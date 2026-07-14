@@ -1,0 +1,8 @@
+skyfield
+cartopy
+numpy
+matplotlib
+shapely
+ttkbootstrap
+pillow
+pyinstaller

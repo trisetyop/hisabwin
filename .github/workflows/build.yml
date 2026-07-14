@@ -25,7 +25,7 @@ jobs:
     - name: Install Dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install skyfield cartopy numpy matplotlib shapely ttkbootstrap pillow pyinstaller
+        pip install -r requirements.txt
 
     - name: Build HisabWin Executable
       shell: powershell
