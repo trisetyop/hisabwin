@@ -1,0 +1,78 @@
+name: Build HisabWin Installer
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Windows Installer
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+        cache: 'pip'
+
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install skyfield cartopy numpy matplotlib shapely ttkbootstrap pillow pyinstaller
+
+    - name: Build HisabWin Executable
+      shell: powershell
+      run: |
+        pyinstaller --noconfirm --windowed --onedir `
+          --name HisabWin `
+          --icon "logo.ico" `
+          --splash "splash.png" `
+          --collect-data cartopy `
+          --collect-submodules shapely `
+          --exclude-module scipy `
+          --exclude-module pandas `
+          --exclude-module sqlalchemy `
+          --exclude-module psycopg2 `
+          --exclude-module greenlet `
+          --exclude-module numba `
+          --exclude-module llvmlite `
+          --exclude-module astropy `
+          --exclude-module astropy_iers_data `
+          --exclude-module erfa `
+          --exclude-module Cython `
+          --exclude-module yaml `
+          --exclude-module IPython `
+          --exclude-module jupyter `
+          --exclude-module notebook `
+          --add-data "logo.png;." `
+          --add-data "mainland_amerika_mask.npz;." `
+          --add-data "de421.bsp;." `
+          hisabwin.py
+
+    - name: Prepare HisabWin.7z Archive
+      shell: powershell
+      run: |
+        # Zip the PyInstaller output directory (dist/HisabWin)
+        Push-Location dist
+        & "C:\Program Files\7-Zip\7z.exe" a -t7z HisabWin.7z HisabWin
+        Pop-Location
+
+    - name: Build Installer and Uninstaller
+      shell: powershell
+      run: |
+        powershell -ExecutionPolicy Bypass -File build_installer.ps1
+
+    - name: Upload Installer Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: HisabWin-Installer
+        path: |
+          dist/HisabWin_Installer.exe
+          dist/HisabWin_Uninstaller.exe
