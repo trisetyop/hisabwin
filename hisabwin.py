@@ -255,7 +255,6 @@ def delta_t_detik(tahun, bulan=1):
             r = r * t + c
         return r
 
-    # --- data historis Morrison & Stephenson (500-1900) ---
     dt_500_1600 = poly((y - 1000.0) / 100.0,
                         [1574.2, -556.01, 71.23472, 0.319781,
                          -0.8503463, -0.005050998, 0.0083572073])
@@ -267,36 +266,28 @@ def delta_t_detik(tahun, bulan=1):
                                       -0.0000001699, 0.000000000875])
     dt_1860_1900 = poly(y - 1860.0, [7.62, 0.5737, -0.251754, 0.01680668,
                                       -0.0004473624, 1.0 / 233174.0])
-
-    # --- segmen modern (tidak berubah dari versi sebelumnya) ---
     dt_1900_1920 = poly(y - 1900.0, [-2.79, 1.494119, -0.0598939, 0.0061966, -0.000197])
     dt_1920_1941 = poly(y - 1920.0, [21.20, 0.84493, -0.076100, 0.0020936])
     dt_1941_1961 = poly(y - 1950.0, [29.07, 0.407, -1.0 / 233.0, 1.0 / 2547.0])
     dt_1961_1986 = poly(y - 1975.0, [45.45, 1.067, -1.0 / 260.0, -1.0 / 718.0])
     dt_1986_2005 = poly(y - 2000.0, [63.86, 0.3345, -0.060374, 0.0017275,
                                       0.000651814, 0.00002373599])
-
-    # --- 2005 ke atas: ekstrapolasi termutakhir (Espenak 2014) ---
     dt_2005_2015 = 64.69 + 0.2930 * (y - 2005.0)
     dt_2015_up = 67.62 + 0.3645 * (y - 2015.0) + 0.0039755 * (y - 2015.0) ** 2
-
-    # --- fallback jangka panjang (Morrison-Stephenson) untuk tahun ekstrem ---
     u_far = (y - 1820.0) / 100.0
     dt_far = -20.0 + 32.0 * u_far ** 2
 
-    dt = np.where(y < 1600, dt_500_1600,
-         np.where(y < 1700, dt_1600_1700,
-         np.where(y < 1800, dt_1700_1800,
-         np.where(y < 1860, dt_1800_1860,
-         np.where(y < 1900, dt_1860_1900,
-         np.where(y < 1920, dt_1900_1920,
-         np.where(y < 1941, dt_1920_1941,
-         np.where(y < 1961, dt_1941_1961,
-         np.where(y < 1986, dt_1961_1986,
-         np.where(y < 2005, dt_1986_2005,
-         np.where(y < 2015, dt_2005_2015,
-         np.where(y < 3000, dt_2015_up, dt_far)))))))))))))
-    return dt
+    condlist = [
+        y < 1600, y < 1700, y < 1800, y < 1860, y < 1900,
+        y < 1920, y < 1941, y < 1961, y < 1986, y < 2005,
+        y < 2015, y < 3000,
+    ]
+    choicelist = [
+        dt_500_1600, dt_1600_1700, dt_1700_1800, dt_1800_1860, dt_1860_1900,
+        dt_1900_1920, dt_1920_1941, dt_1941_1961, dt_1961_1986, dt_1986_2005,
+        dt_2005_2015, dt_2015_up,
+    ]
+    return np.select(condlist, choicelist, default=dt_far)
 
 
 def nutasi_singkat(T):
