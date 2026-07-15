@@ -50,12 +50,39 @@ def _resource_base_dir():
 
 matplotlib.use("TkAgg")
 
+import cartopy
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import cartopy.io.shapereader as shpreader
 import matplotlib.pyplot as plt
 import numpy as np
 import shapely  # dipakai untuk shapely.contains_xy (vectorized, no Python loop)
+
+# HIPOTESA PERFORMA CARTOPY (belum diverifikasi lewat profiling -- lihat
+# catatan di masing-masing buat_figure_* untuk hipotesa lain yang SUDAH
+# diterapkan). Ini soal folder CACHE, beda dari bug de421.bsp/logo.png/mask
+# yang sudah diperbaiki (itu soal path relatif ke folder instalasi/CWD).
+#
+# cartopy secara default menyimpan shapefile Natural Earth (LAND/OCEAN/
+# BORDERS/coastlines) di folder cache PER-USER (mis. %LOCALAPPDATA%\cartopy
+# di Windows), diunduh dari internet saat PERTAMA KALI dipakai. Untuk
+# aplikasi yang didesain 100% offline (alasan yang sama kenapa mode "ringan"
+# VSOP87/ELP2000 dibuat -- supaya tidak butuh unduhan apapun), sebaiknya
+# shapefile Natural Earth 110m juga dibundel (mis. lewat --add-data) &
+# cartopy diarahkan ke situ LEBIH DULU -- supaya generate peta pertama kali
+# di komputer user yang offline tidak diam-diam mencoba akses internet dulu
+# (bisa lambat menunggu timeout) sebelum akhirnya gagal.
+#
+# Baris ini AMAN ditambahkan SEKARANG walau shapefile-nya belum dibundel --
+# kalau foldernya belum ada, cartopy otomatis balik ke perilaku default
+# (cache per-user + unduh kalau perlu), jadi tidak ada risiko regresi sama
+# sekali. Begitu folder 'cartopy_data' (hasil menyalin isi
+# cartopy.config['data_dir'] dari mesin developer setelah generate peta
+# sekali, lalu di-bundle lewat --add-data) ditambahkan, baris ini otomatis
+# memakainya duluan.
+_folder_data_cartopy = os.path.join(_resource_base_dir(), "cartopy_data")
+if os.path.isdir(_folder_data_cartopy):
+    cartopy.config["pre_existing_data_dir"] = _folder_data_cartopy
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from skyfield import almanac
 from skyfield.api import load, wgs84
@@ -461,6 +488,42 @@ def cari_ijtimak_tahun_ringan(tahun):
     return hasil
 
 
+def _alt_matahari_saja(tanggal, jam_utc_flat, lat_flat, lon_flat):
+    """Versi RINGAN dari _altaz_matahari_bulan() yang CUMA menghitung altitude
+    Matahari -- sengaja TIDAK memanggil posisi_bulan() (deret ELP2000, ~60
+    suku) sama sekali.
+
+    Dipakai khusus di tahap PENCARIAN WINDOW waktu sunset (bisection/linear-
+    interpolation utk menemukan alt_matahari == -0.8333), yang secara logika
+    memang cuma butuh posisi Matahari -- posisi Bulan di tahap ini TIDAK
+    PERNAH dipakai (lihat _altaz_matahari_bulan asli: 3 dari 4 nilai
+    kembaliannya (alt_moon_topo, alt_moon_geo, elong) dibuang begitu saja
+    oleh pemanggilnya di tahap ini). posisi_bulan() adalah >20x lebih mahal
+    per elemen dibanding posisi_matahari() (profiling: ELP2000 60-suku vs
+    VSOP87 term yang jauh lebih sedikit), jadi menghindarinya di sini
+    memangkas signifikan waktu hitung_grid_ringan()/PKG 2 Amerika (mode
+    ringan) -- posisi Bulan baru dihitung SEKALI lagi lewat
+    _altaz_matahari_bulan() di titik sunset final yang sudah presisi.
+    """
+    tahun_a = np.full(jam_utc_flat.shape, tanggal.year, dtype=float)
+    bulan_a = np.full(jam_utc_flat.shape, tanggal.month, dtype=float)
+    hari_a = tanggal.day + jam_utc_flat / 24.0
+
+    jd_ut = julian_day(tahun_a, bulan_a, hari_a)
+    dt = delta_t_detik(tanggal.year, tanggal.month)
+    T = (jd_ut + dt / 86400.0 - 2451545.0) / 36525.0
+
+    ra_s, dec_s, _, _ = posisi_matahari(T)
+    dpsi, deps = nutasi_singkat(T)
+    eps = (23 + 26/60 + 21.448/3600 - (46.8150*T)/3600) + deps
+
+    gast = gast_derajat(jd_ut, T, dpsi, eps)
+    lst = (gast + lon_flat) % 360
+    H_sun = ((lst - ra_s + 180) % 360) - 180
+
+    return altitude_geosentris(lat_flat, dec_s, H_sun)
+
+
 def _altaz_matahari_bulan(tanggal, jam_utc_flat, lat_flat, lon_flat):
     """Hitung (alt_matahari_geo, alt_bulan_topo, alt_bulan_geo, elongasi,
     ra_sun, dec_sun, ra_moon, dec_moon, parallax) utk kombinasi (waktu, lokasi)
@@ -553,7 +616,7 @@ def hitung_grid_ringan(tanggal, progress_cb=lambda msg: None, lat_range=None, lo
         lon_rep = np.repeat(lons[idx], n_window)
         t_flat = t_window_2d.ravel()
 
-        alt_sun_flat, _, _, _ = _altaz_matahari_bulan(tanggal, t_flat, lat_rep, lon_rep)
+        alt_sun_flat = _alt_matahari_saja(tanggal, t_flat, lat_rep, lon_rep)
         alts_2d = alt_sun_flat.reshape(M, n_window)
 
         is_above = alts_2d > -0.8333
@@ -672,22 +735,38 @@ def hitung_fajar_nz(tanggal_lokal, ts, eph, sudut_fajar=SUDUT_FAJAR_DERAJAT, mod
     if mode == "ringan":
         return hitung_fajar_nz_ringan(tanggal_lokal, sudut_fajar=sudut_fajar,
                                        lat_ref=NZ_REF_LAT, lon_ref=NZ_REF_LON)
-    sun = eph['sun']
+    sun, earth = eph['sun'], eph['earth']
     topo = wgs84.latlon(NZ_REF_LAT, NZ_REF_LON)
 
-    # Jendela pencarian: dari jam -14 s/d +14 UTC pada tanggal tsb (relatif
-    # ke tengah malam UTC), cukup lebar untuk mencakup dini hari lokal NZ
-    # (UTC+12/+13) tanpa memotong kejadian fajarnya.
-    t0 = ts.utc(tanggal_lokal.year, tanggal_lokal.month, tanggal_lokal.day, -14)
-    t1 = ts.utc(tanggal_lokal.year, tanggal_lokal.month, tanggal_lokal.day, 14)
+    # Catatan performa: implementasi lama pakai almanac.risings_and_settings()
+    # + almanac.find_discrete() -- pencarian diskrit generik Skyfield yang
+    # men-sampling lalu bisection berulang sampai presisi ~1 detik, dan
+    # terukur (profiling) memicu ~297 pemanggilan jplephem.spk.generate()
+    # cuma untuk SATU titik referensi NZ. Padahal presisi yang benar-benar
+    # dibutuhkan di sini cuma level detik/menit (dibandingkan waktu ijtimak
+    # yang presisinya juga di orde itu), bukan sub-detik.
+    #
+    # Diganti dengan teknik yang SAMA seperti pencarian sunset di
+    # hitung_grid_jpl()/hitung_fajar_nz_ringan(): satu array waktu yang
+    # di-observe dalam SATU panggilan batch (bukan pencarian iteratif),
+    # lalu interpolasi linear di sekitar titik transisi horizon. Jauh lebih
+    # sedikit pemanggilan ephemeris utk hasil yang presisinya setara.
+    jam = np.arange(-14.0, 14.0 + 1/12.0, 1/12.0)  # tiap 5 menit, jendela -14..+14 jam
+    t_all = ts.utc(tanggal_lokal.year, tanggal_lokal.month, tanggal_lokal.day, jam)
+    alt, _, _ = (earth + topo).at(t_all).observe(sun).apparent().altaz()
+    alt_deg = alt.degrees
 
-    f = almanac.risings_and_settings(eph, sun, topo, horizon_degrees=sudut_fajar)
-    t, y = almanac.find_discrete(t0, t1, f)
-
-    waktu_fajar = [tt.utc_datetime() for tt, yy in zip(t, y) if yy]
-    if not waktu_fajar:
+    is_above = alt_deg > sudut_fajar
+    naik = (~is_above[:-1]) & is_above[1:]  # transisi naik = fajar
+    idx = np.where(naik)[0]
+    if len(idx) == 0:
         return None
-    return min(waktu_fajar)
+    i = idx[0]
+    frac = (sudut_fajar - alt_deg[i]) / (alt_deg[i + 1] - alt_deg[i])
+    jam_c = jam[i] + frac * (jam[i + 1] - jam[i])
+
+    t_final = ts.utc(tanggal_lokal.year, tanggal_lokal.month, tanggal_lokal.day, float(jam_c))
+    return t_final.utc_datetime()
 
 
 # Aset pra-olah daratan utama benua Amerika, dibundel satu folder dengan skrip ini.
@@ -979,7 +1058,7 @@ def _hitung_titik_flat(tanggal, ts, eph, lats, lons, mode="jpl"):
     t_flat = t_window_2d.ravel()
 
     if mode == "ringan":
-        alt_sun_flat, _, _, _ = _altaz_matahari_bulan(tanggal, t_flat, lat_rep, lon_rep)
+        alt_sun_flat = _alt_matahari_saja(tanggal, t_flat, lat_rep, lon_rep)
     else:
         t_micro_all = ts.utc(tanggal.year, tanggal.month, tanggal.day, t_flat)
         topo_all = wgs84.latlon(lat_rep, lon_rep)
@@ -1236,7 +1315,7 @@ INDONESIA_LON_RANGE = (94.0, 142.0)
 INDONESIA_RESOLUSI_KASAR = 1.0
 # Tahap 2: resolusi HALUS -- hasil interpolasi bilinear (nyaris gratis,
 # murni numpy), dipakai untuk digambar kontur per-1-derajatnya.
-INDONESIA_RESOLUSI_HALUS = 0.15
+INDONESIA_RESOLUSI_HALUS = 0.05
 
 # Catatan performa (ilustrasi jumlah titik):
 #   Grid global (skyfield)         : 46 x 91  =  4.186 titik
@@ -1343,83 +1422,68 @@ def _gambar_peta_dasar_indonesia(ax):
 
 
 def buat_figure_indonesia_tinggi_hilal(grids_id, tanggal):
-    """Peta tinggi hilal toposentris khusus wilayah Indonesia, dengan garis
-    kontur di SETIAP derajat bulat (mis. 0°, 1°, 2°, ...) — gaya peta yang
-    biasa dipublikasikan BMKG — plus garis tebal untuk ambang MABIMS (3°)."""
+    """Peta tinggi hilal toposentris khusus wilayah Indonesia, polos tanpa heatmap,
+    dengan garis kontur di setiap 0.2 derajat — gaya peta kontur bersih —
+    plus garis tebal untuk ambang MABIMS (3°)."""
     lon_mesh, lat_mesh = grids_id["lon_mesh"], grids_id["lat_mesh"]
     alt_grid = grids_id["alt_grid"]
 
-    fig = plt.figure(figsize=(10, 7))
+    fig = plt.figure(figsize=(10, 7), constrained_layout=True)
     ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
     _gambar_peta_dasar_indonesia(ax)
 
     valid = ~np.isnan(alt_grid)
     if np.any(valid):
-        lo = int(np.floor(np.nanmin(alt_grid)))
-        hi = int(np.ceil(np.nanmax(alt_grid)))
+        lo = np.floor(np.nanmin(alt_grid) / 0.2) * 0.2
+        hi = np.ceil(np.nanmax(alt_grid) / 0.2) * 0.2
     else:
-        lo, hi = -2, 10
-    levels_int = np.arange(lo, hi + 1, 1)
+        lo, hi = -2.0, 10.0
+    levels_02 = np.arange(lo, hi + 0.001, 0.2)
 
-    cf = ax.contourf(lon_mesh, lat_mesh, alt_grid, levels=levels_int,
-                      cmap="RdYlGn", extend="both", alpha=0.75,
-                      transform=ccrs.PlateCarree())
-    cs = ax.contour(lon_mesh, lat_mesh, alt_grid, levels=levels_int,
-                     colors="black", linewidths=0.6, transform=ccrs.PlateCarree())
-    ax.clabel(cs, fmt="%d°", fontsize=7, inline=True)
+    cs = ax.contour(lon_mesh, lat_mesh, alt_grid, levels=levels_02,
+                     colors="black", linewidths=0.5, transform=ccrs.PlateCarree())
+    ax.clabel(cs, fmt="%.1f°", fontsize=7, inline=True)
 
     # Ambang kriteria MABIMS (tinggi hilal >=3°) ditebalkan supaya menonjol
-    # di antara garis-garis integer biasa.
-    ax.contour(lon_mesh, lat_mesh, alt_grid, levels=[3], colors="blue",
+    ax.contour(lon_mesh, lat_mesh, alt_grid, levels=[3.0], colors="blue",
                linewidths=2.2, transform=ccrs.PlateCarree())
 
-    cbar = fig.colorbar(cf, ax=ax, orientation="vertical", pad=0.02, shrink=0.85)
-    cbar.set_label("Tinggi hilal toposentris (°)")
-
     ax.set_title("Peta Tinggi Hilal Toposentris — Wilayah Indonesia\n"
-                 f"{tanggal.strftime('%d %B %Y')}  (garis hitam: tiap 1°, garis biru tebal: 3° / MABIMS)",
+                 f"{tanggal.strftime('%d %B %Y')}  (garis hitam: tiap 0.2°, garis biru tebal: 3° / MABIMS)",
                  fontsize=11, pad=12)
-    fig.tight_layout()
     return fig
 
 
 def buat_figure_indonesia_elongasi(grids_id, tanggal):
-    """Peta elongasi khusus wilayah Indonesia, dengan garis kontur di SETIAP
-    derajat bulat — gaya peta yang biasa dipublikasikan BMKG — plus garis
-    tebal untuk ambang MABIMS (6.4°)."""
+    """Peta elongasi khusus wilayah Indonesia, polos tanpa heatmap,
+    dengan garis kontur di setiap 0.2 derajat — gaya peta kontur bersih —
+    plus garis tebal untuk ambang MABIMS (6.4°)."""
     lon_mesh, lat_mesh = grids_id["lon_mesh"], grids_id["lat_mesh"]
     elong_grid = grids_id["elong_grid"]
 
-    fig = plt.figure(figsize=(10, 7))
+    fig = plt.figure(figsize=(10, 7), constrained_layout=True)
     ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
     _gambar_peta_dasar_indonesia(ax)
 
     valid = ~np.isnan(elong_grid)
     if np.any(valid):
-        lo = int(np.floor(np.nanmin(elong_grid)))
-        hi = int(np.ceil(np.nanmax(elong_grid)))
+        lo = np.floor(np.nanmin(elong_grid) / 0.2) * 0.2
+        hi = np.ceil(np.nanmax(elong_grid) / 0.2) * 0.2
     else:
-        lo, hi = 0, 12
-    levels_int = np.arange(lo, hi + 1, 1)
+        lo, hi = 0.0, 12.0
+    levels_02 = np.arange(lo, hi + 0.001, 0.2)
 
-    cf = ax.contourf(lon_mesh, lat_mesh, elong_grid, levels=levels_int,
-                      cmap="RdYlGn", extend="both", alpha=0.75,
-                      transform=ccrs.PlateCarree())
-    cs = ax.contour(lon_mesh, lat_mesh, elong_grid, levels=levels_int,
-                     colors="black", linewidths=0.6, transform=ccrs.PlateCarree())
-    ax.clabel(cs, fmt="%d°", fontsize=7, inline=True)
+    cs = ax.contour(lon_mesh, lat_mesh, elong_grid, levels=levels_02,
+                     colors="black", linewidths=0.5, transform=ccrs.PlateCarree())
+    ax.clabel(cs, fmt="%.1f°", fontsize=7, inline=True)
 
-    # Ambang kriteria MABIMS (elongasi >=6.4°) ditebalkan.
+    # Ambang kriteria MABIMS (elongasi >=6.4°) ditebalkan
     ax.contour(lon_mesh, lat_mesh, elong_grid, levels=[6.4], colors="red",
                linewidths=2.2, transform=ccrs.PlateCarree())
 
-    cbar = fig.colorbar(cf, ax=ax, orientation="vertical", pad=0.02, shrink=0.85)
-    cbar.set_label("Elongasi (°)")
-
     ax.set_title("Peta Elongasi — Wilayah Indonesia\n"
-                 f"{tanggal.strftime('%d %B %Y')}  (garis hitam: tiap 1°, garis merah tebal: 6.4° / MABIMS)",
+                 f"{tanggal.strftime('%d %B %Y')}  (garis hitam: tiap 0.2°, garis merah tebal: 6.4° / MABIMS)",
                  fontsize=11, pad=12)
-    fig.tight_layout()
     return fig
 
 
@@ -1431,7 +1495,7 @@ def buat_figure_mabims(grids, tanggal):
     lon_mesh, lat_mesh = grids["lon_mesh"], grids["lat_mesh"]
     elong_grid, alt_grid = grids["elong_grid"], grids["alt_grid"]
 
-    fig = plt.figure(figsize=(13, 7.2))
+    fig = plt.figure(figsize=(13, 7.2), constrained_layout=True)
     ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
     ax.set_extent([-180, 180, -90, 90], crs=ccrs.PlateCarree())
     ax.add_feature(cfeature.LAND, facecolor="lightgray")
@@ -1469,7 +1533,10 @@ def buat_figure_mabims(grids, tanggal):
     ]
     ax.legend(handles=legend_elems_mabims, loc="upper left", bbox_to_anchor=(1.01, 1.0),
               borderaxespad=0, fontsize=9, framealpha=0.9)
-    fig.tight_layout()
+    # fig.tight_layout() dihapus -- sudah digantikan constrained_layout=True
+    # di plt.figure() saat pembuatan figure (hipotesa: tight_layout() memicu
+    # render-pass tambahan yang lebih mahal saat berinteraksi dgn GeoAxes
+    # cartopy dibanding constrained_layout yg terintegrasi ke layout engine).
     return fig
 
 
@@ -1757,7 +1824,7 @@ def buat_figure_muhammadiyah(grids, tanggal, evaluasi):
     hasil_pkg2 = evaluasi["hasil_pkg2"]
     waktu_ijtimak = evaluasi["waktu_ijtimak"]
 
-    fig = plt.figure(figsize=(13, 7.2))
+    fig = plt.figure(figsize=(13, 7.2), constrained_layout=True)
     ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
     ax.set_extent([-180, 180, -90, 90], crs=ccrs.PlateCarree())
     ax.add_feature(cfeature.LAND, facecolor="lightgray")
@@ -1844,7 +1911,10 @@ def buat_figure_muhammadiyah(grids, tanggal, evaluasi):
         fig.text(0.01, 0.01, catatan, fontsize=8, va="bottom", ha="left",
                   color="dimgray", wrap=True)
 
-    fig.tight_layout()
+    # fig.tight_layout() dihapus -- sudah digantikan constrained_layout=True
+    # di plt.figure() saat pembuatan figure (hipotesa: tight_layout() memicu
+    # render-pass tambahan yang lebih mahal saat berinteraksi dgn GeoAxes
+    # cartopy dibanding constrained_layout yg terintegrasi ke layout engine).
     return fig
 
 
@@ -2646,6 +2716,12 @@ class HisabWinApp(tk.Tk):
         self.waktu_ijtimak_terpilih = None
         self.mode = tk.StringVar(value="jpl")  # default: perilaku lama (presisi JPL)
 
+        # Variabel untuk memilih kriteria peta yang akan dihitung
+        self.hitung_mabims = tk.BooleanVar(value=True)
+        self.hitung_khgt = tk.BooleanVar(value=True)
+        self.hitung_alt = tk.BooleanVar(value=True)
+        self.hitung_elong = tk.BooleanVar(value=True)
+
         # Menyimpan tab-peta yang sudah pernah dibuat: nama_tab -> {"frame":..., "fig":...}
         # supaya saat "Tampilkan Peta" ditekan lagi, kanvas & figure LAMA diganti
         # (bukan menumpuk tab baru terus-menerus).
@@ -2995,6 +3071,8 @@ class HisabWinApp(tk.Tk):
         self.paned.add(self.notebook, weight=1)
         self.notebook.bind("<<NotebookTabChanged>>", self._on_ganti_tab_notebook)
         self.notebook.bind("<<NotebookTabClosed>>", self._on_tab_notebook_ditutup)
+        self.notebook.bind("<Button-3>", self._on_right_click_tab)
+        self.notebook.bind("<Button-2>", self._on_right_click_tab)
 
         # --- Log status (selalu tampil paling atas, di LUAR akordeon --
         #     dipakai bersama oleh perhitungan Hilal maupun Waktu Sholat.
@@ -3090,6 +3168,31 @@ class HisabWinApp(tk.Tk):
         self.radio_ijtimak.grid(row=0, column=0, padx=10, pady=6, sticky="w")
         self.radio_setelah.grid(row=0, column=1, padx=10, pady=6, sticky="w")
 
+        # --- Langkah 4: pilihan kriteria ---
+        frame4 = ttk.LabelFrame(body_hilal, text="4. Pilihan Kriteria Peta")
+        frame4.pack(fill="x", **pad)
+
+        chk_opts = {
+            "bg": WARNA_BG,
+            "fg": WARNA_TEKS,
+            "activebackground": WARNA_BG,
+            "activeforeground": WARNA_TEKS,
+            "selectcolor": WARNA_PANEL,
+            "font": FONT_UTAMA,
+            "bd": 0,
+            "highlightthickness": 0,
+            "anchor": "w"
+        }
+        self.chk_mabims = tk.Checkbutton(frame4, text="MABIMS Global", variable=self.hitung_mabims, **chk_opts)
+        self.chk_khgt = tk.Checkbutton(frame4, text="KHGT / Wujudul Hilal", variable=self.hitung_khgt, **chk_opts)
+        self.chk_alt = tk.Checkbutton(frame4, text="Alt Lokal (RI)", variable=self.hitung_alt, **chk_opts)
+        self.chk_elong = tk.Checkbutton(frame4, text="Elongasi Lokal (RI)", variable=self.hitung_elong, **chk_opts)
+
+        self.chk_mabims.grid(row=0, column=0, padx=10, pady=4, sticky="w")
+        self.chk_khgt.grid(row=1, column=0, padx=10, pady=4, sticky="w")
+        self.chk_alt.grid(row=2, column=0, padx=10, pady=4, sticky="w")
+        self.chk_elong.grid(row=3, column=0, padx=10, pady=4, sticky="w")
+
         self.btn_proses = ttk.Button(body_hilal, text="Tampilkan Peta", command=self._on_proses,
                                       state="disabled", style="Aksen.TButton")
         self.btn_proses.pack(pady=8)
@@ -3129,7 +3232,11 @@ class HisabWinApp(tk.Tk):
         if not tab_id:
             return
         self.notebook.tab_ditutup_terakhir = None
+        self._tutup_tab_by_id(tab_id)
 
+    def _tutup_tab_by_id(self, tab_id):
+        """Menutup tab berdasarkan ID widget tab-nya. Membersihkan figure
+        matplotlib dan state peta jika tab tersebut adalah tab peta."""
         try:
             widget_tab = self.nametowidget(tab_id)
         except (KeyError, tk.TclError):
@@ -3171,6 +3278,50 @@ class HisabWinApp(tk.Tk):
                 widget_tab.destroy()
             except tk.TclError:
                 pass
+
+    def _on_right_click_tab(self, event):
+        """Menampilkan menu konteks klik kanan pada tab (Tutup Tab,
+        Tutup Tab Lain, Tutup Semua Tab)."""
+        element = self.notebook.identify(event.x, event.y)
+        if "client" in element:
+            return  # Klik di dalam area konten tab, bukan di tab header
+
+        try:
+            clicked_index = self.notebook.index(f"@{event.x},{event.y}")
+        except tk.TclError:
+            return  # Klik di luar tab header (misalnya di sisa area kosong bilah tab)
+
+        all_tabs = self.notebook.tabs()
+        if not all_tabs:
+            return
+
+        clicked_tab_id = all_tabs[clicked_index]
+
+        # Membuat menu konteks styled
+        menu = tk.Menu(self.notebook, tearoff=0, bg=WARNA_PANEL, fg=WARNA_TEKS,
+                       activebackground=WARNA_AKSEN, activeforeground="white")
+
+        menu.add_command(label="Tutup Tab",
+                         command=lambda: self._tutup_tab_by_id(clicked_tab_id))
+        menu.add_command(label="Tutup Tab Lain",
+                         command=lambda: self._tutup_tab_lain(clicked_tab_id))
+        menu.add_command(label="Tutup Semua Tab",
+                         command=self._tutup_semua_tab)
+
+        menu.post(event.x_root, event.y_root)
+
+    def _tutup_tab_lain(self, keep_tab_id):
+        """Menutup semua tab kecuali tab yang ditentukan."""
+        all_tabs = list(self.notebook.tabs())
+        for tab_id in all_tabs:
+            if tab_id != keep_tab_id:
+                self._tutup_tab_by_id(tab_id)
+
+    def _tutup_semua_tab(self):
+        """Menutup seluruh tab yang terbuka."""
+        all_tabs = list(self.notebook.tabs())
+        for tab_id in all_tabs:
+            self._tutup_tab_by_id(tab_id)
 
     # ---------------- Tab peta (di jendela utama, bukan popup) ----------------
 
@@ -3977,6 +4128,16 @@ class HisabWinApp(tk.Tk):
             messagebox.showwarning("Belum dipilih", "Pilih salah satu ijtimak dari daftar terlebih dahulu.")
             return
 
+        # Validasi setidaknya satu kriteria dipilih
+        hitung_mabims_val = self.hitung_mabims.get()
+        hitung_khgt_val = self.hitung_khgt.get()
+        hitung_alt_val = self.hitung_alt.get()
+        hitung_elong_val = self.hitung_elong.get()
+
+        if not (hitung_mabims_val or hitung_khgt_val or hitung_alt_val or hitung_elong_val):
+            messagebox.showwarning("Kriteria belum dipilih", "Pilih setidaknya satu kriteria peta yang ingin dihitung.")
+            return
+
         idx = seleksi[0]
         waktu_ijtimak = ke_utc_datetime(self.ijtimak_times[idx])
         tanggal_ijtimak = datetime(waktu_ijtimak.year, waktu_ijtimak.month, waktu_ijtimak.day)
@@ -3986,102 +4147,94 @@ class HisabWinApp(tk.Tk):
         self.tanggal_terpilih = tanggal
         self.waktu_ijtimak_terpilih = waktu_ijtimak
 
+        # Tutup tab peta lama yang tidak terpilih untuk perhitungan baru ini,
+        # agar tidak menampilkan data usang (outdated).
+        tabs_to_close = []
+        if not hitung_mabims_val and "mabims" in self._tab_peta:
+            tabs_to_close.append(str(self._tab_peta["mabims"]["frame"]))
+        if not hitung_khgt_val and "muhammadiyah" in self._tab_peta:
+            tabs_to_close.append(str(self._tab_peta["muhammadiyah"]["frame"]))
+        if not hitung_alt_val and "id_tinggi" in self._tab_peta:
+            tabs_to_close.append(str(self._tab_peta["id_tinggi"]["frame"]))
+        if not hitung_elong_val and "id_elongasi" in self._tab_peta:
+            tabs_to_close.append(str(self._tab_peta["id_elongasi"]["frame"]))
+
+        for tab_id in tabs_to_close:
+            self._tutup_tab_by_id(tab_id)
+
         self.btn_proses.config(state="disabled")
-        # Ada 2 tugas independen yang berjalan paralel & tampil begitu masing-
-        # masing siap (peta global MABIMS/Muhammadiyah, dan peta Indonesia).
-        # Tombol "Tampilkan Peta" baru diaktifkan lagi setelah KEDUANYA
-        # selesai (bisa dalam urutan apa saja).
-        self._tugas_peta_tersisa = 2
+
+        # Tentukan tugas tersisa berdasarkan kelompok kriteria yang diaktifkan
+        hitung_global = hitung_mabims_val or hitung_khgt_val
+        hitung_indonesia = hitung_alt_val or hitung_elong_val
+
+        self._tugas_peta_tersisa = 0
+        if hitung_global:
+            self._tugas_peta_tersisa += 1
+        if hitung_indonesia:
+            self._tugas_peta_tersisa += 1
+
         self._log(f"\nIjtimak terpilih : {format_waktu_ijtimak(waktu_ijtimak)}")
         self._log(f"Tanggal diproses : {tanggal.strftime('%d %B %Y')}")
         self._log("Memulai perhitungan peta visibilitas hilal...")
 
-        threading.Thread(target=self._hitung_grid_thread, args=(tanggal,), daemon=True).start()
+        threading.Thread(target=self._hitung_grid_thread,
+                         args=(tanggal, hitung_global, hitung_indonesia),
+                         daemon=True).start()
 
-    def _hitung_grid_thread(self, tanggal):
+    def _hitung_grid_thread(self, tanggal, hitung_global, hitung_indonesia):
         try:
             mode = self.mode.get()
             progress_cb = lambda msg: self.antrian.put(("progress", msg))
             waktu_ijtimak = self.waktu_ijtimak_terpilih
 
-            # --- Grid Indonesia TIDAK bergantung sama sekali pada grid
-            #     global atau hasil evaluasi PKG (cuma butuh tanggal/ts/eph),
-            #     jadi dihitung di thread terpisah SECARA PARALEL dengan
-            #     grid global + evaluasi PKG. Skyfield/VSOP87 di sini cuma
-            #     melakukan operasi numpy baca-saja atas ephemeris yang
-            #     sudah dimuat, jadi aman dipanggil paralel dari beberapa
-            #     thread.
-            #     PENTING: thread ini TIDAK di-join oleh thread utama --
-            #     begitu selesai ia langsung kirim hasilnya sendiri ke
-            #     antrian ("grid_id_ok"). Jadi peta global (MABIMS/
-            #     Muhammadiyah, lihat "grid_global_ok" di bawah) maupun
-            #     peta Indonesia sama-sama tampil begitu masing-masing
-            #     siap -- yang lebih dulu selesai TIDAK menunggu yang
-            #     lain. ---
-            def _hitung_id_paralel():
-                try:
-                    grids_id = hitung_grid_indonesia(
-                        tanggal, self.ts, self.eph, progress_cb=progress_cb, mode=mode)
-                    self.antrian.put(("grid_id_ok", (tanggal, grids_id)))
-                except Exception as e:
-                    self.antrian.put(("grid_id_error", f"Gagal menghitung grid Indonesia: {e}"))
+            # --- Grid Indonesia (Alt & Elongasi Lokal) ---
+            if hitung_indonesia:
+                def _hitung_id_paralel():
+                    try:
+                        grids_id = hitung_grid_indonesia(
+                            tanggal, self.ts, self.eph, progress_cb=progress_cb, mode=mode)
+                        self.antrian.put(("grid_id_ok", (tanggal, grids_id)))
+                    except Exception as e:
+                        self.antrian.put(("grid_id_error", f"Gagal menghitung grid Indonesia: {e}"))
 
-            threading.Thread(target=_hitung_id_paralel, daemon=True).start()
+                threading.Thread(target=_hitung_id_paralel, daemon=True).start()
 
-            # --- PKG 2 Amerika (pemindaian daratan benua + cek fajar NZ)
-            #     juga TIDAK bergantung pada grid global -- satu-satunya
-            #     alasan ia biasanya baru dihitung SETELAH grid global
-            #     selesai adalah karena ia cuma DIBUTUHKAN kalau PKG 1
-            #     ternyata gagal. Supaya tidak menunggu bergiliran, hasilnya
-            #     dihitung SPEKULATIF di thread lain paralel dengan grid
-            #     global sejak awal. Kalau nanti ternyata PKG 1 lolos (kasus
-            #     paling umum), hasil ini tinggal diabaikan -- tidak
-            #     menambah waktu tunggu sama sekali karena berjalan paralel,
-            #     cuma memakai sedikit CPU ekstra di belakang layar. Kalau
-            #     PKG 1 gagal, hasilnya sudah siap/hampir siap duluan,
-            #     bukan baru mulai dihitung dari nol. ---
-            hasil_pkg2_spekulatif = {}
+            # --- Grid Global (MABIMS & Muhammadiyah) ---
+            if hitung_global:
+                hasil_pkg2_spekulatif = {}
 
-            def _hitung_pkg2_paralel():
-                try:
-                    hasil_pkg2_spekulatif["hasil_pkg2"] = cari_zona_pkg2_amerika(
-                        tanggal, self.ts, self.eph, progress_cb=progress_cb, mode=mode)
-                    bisa_hitung = (mode == "ringan") or (self.ts is not None and self.eph is not None)
-                    if waktu_ijtimak is not None and bisa_hitung:
-                        hasil_pkg2_spekulatif["waktu_fajar_nz"] = hitung_fajar_nz(
-                            tanggal + timedelta(days=1), self.ts, self.eph, mode=mode)
-                except Exception as e:
-                    hasil_pkg2_spekulatif["error"] = e
+                def _hitung_pkg2_paralel():
+                    try:
+                        hasil_pkg2_spekulatif["hasil_pkg2"] = cari_zona_pkg2_amerika(
+                            tanggal, self.ts, self.eph, progress_cb=progress_cb, mode=mode)
+                        bisa_hitung = (mode == "ringan") or (self.ts is not None and self.eph is not None)
+                        if waktu_ijtimak is not None and bisa_hitung:
+                            hasil_pkg2_spekulatif["waktu_fajar_nz"] = hitung_fajar_nz(
+                                tanggal + timedelta(days=1), self.ts, self.eph, mode=mode)
+                    except Exception as e:
+                        hasil_pkg2_spekulatif["error"] = e
 
-            thread_pkg2 = threading.Thread(target=_hitung_pkg2_paralel, daemon=True)
-            thread_pkg2.start()
+                thread_pkg2 = threading.Thread(target=_hitung_pkg2_paralel, daemon=True)
+                thread_pkg2.start()
 
-            grids = hitung_grid(tanggal, self.ts, self.eph, progress_cb=progress_cb, mode=mode)
+                grids = hitung_grid(tanggal, self.ts, self.eph, progress_cb=progress_cb, mode=mode)
 
-            pkg2_precomputed = None
-            if not _cek_pkg1_terpenuhi(grids):
-                progress_cb("PKG 1 tidak terpenuhi -- menunggu hasil PKG 2 Amerika "
-                            "(sudah dihitung paralel sejak awal, tinggal menunggu selesai)...")
-                thread_pkg2.join()
-                if "error" in hasil_pkg2_spekulatif:
-                    raise hasil_pkg2_spekulatif["error"]
-                pkg2_precomputed = hasil_pkg2_spekulatif
-            # Kalau PKG 1 lolos, thread_pkg2 SENGAJA tidak di-join -- biarkan
-            # selesai sendiri di belakang layar (daemon thread), hasilnya
-            # tidak dipakai sama sekali.
+                pkg2_precomputed = None
+                if not _cek_pkg1_terpenuhi(grids):
+                    progress_cb("PKG 1 tidak terpenuhi -- menunggu hasil PKG 2 Amerika "
+                                "(sudah dihitung paralel sejak awal, tinggal menunggu selesai)...")
+                    thread_pkg2.join()
+                    if "error" in hasil_pkg2_spekulatif:
+                        raise hasil_pkg2_spekulatif["error"]
+                    pkg2_precomputed = hasil_pkg2_spekulatif
 
-            evaluasi = evaluasi_pkg(grids, tanggal, waktu_ijtimak=waktu_ijtimak,
-                                     ts=self.ts, eph=self.eph,
-                                     progress_cb=progress_cb, mode=mode,
-                                     pkg2_precomputed=pkg2_precomputed)
+                evaluasi = evaluasi_pkg(grids, tanggal, waktu_ijtimak=waktu_ijtimak,
+                                         ts=self.ts, eph=self.eph,
+                                         progress_cb=progress_cb, mode=mode,
+                                         pkg2_precomputed=pkg2_precomputed)
 
-            # --- Begitu evaluasi PKG (PKG 1, dan PKG 2 kalau perlu) selesai,
-            #     LANGSUNG kirim ke antrian supaya peta MABIMS & Muhammadiyah
-            #     bisa ditampilkan saat itu juga -- TIDAK menunggu thread
-            #     grid Indonesia di atas selesai dulu. Kalau grid Indonesia
-            #     belakangan selesai, ia akan tampil menyusul lewat pesan
-            #     "grid_id_ok"-nya sendiri. ---
-            self.antrian.put(("grid_global_ok", (tanggal, grids, evaluasi)))
+                self.antrian.put(("grid_global_ok", (tanggal, grids, evaluasi)))
         except Exception as e:
             self.antrian.put(("grid_global_error", f"Gagal menghitung grid: {e}"))
 
@@ -4129,12 +4282,22 @@ class HisabWinApp(tk.Tk):
                     # dan tampil sendiri lewat "grid_id_ok" di bawah).
                     tanggal, grids, evaluasi = payload
                     self._log("Peta global (MABIMS/Muhammadiyah) selesai. Menampilkan...")
-                    fig_mabims = buat_figure_mabims(grids, tanggal)
-                    fig_muh = buat_figure_muhammadiyah(grids, tanggal, evaluasi)
                     tgl_str = tanggal.strftime('%d %B %Y')
-                    self._tampilkan_peta("muhammadiyah", f"🌙 Muhammadiyah — {tgl_str}", fig_muh)
-                    frame_mabims = self._tampilkan_peta("mabims", f"🌙 MABIMS — {tgl_str}", fig_mabims)
-                    self.notebook.select(frame_mabims)  # tampilkan tab MABIMS terlebih dahulu
+                    frame_to_select = None
+
+                    if self.hitung_khgt.get():
+                        fig_muh = buat_figure_muhammadiyah(grids, tanggal, evaluasi)
+                        frame_muh = self._tampilkan_peta("muhammadiyah", f"🌙 Muhammadiyah — {tgl_str}", fig_muh)
+                        frame_to_select = frame_muh
+
+                    if self.hitung_mabims.get():
+                        fig_mabims = buat_figure_mabims(grids, tanggal)
+                        frame_mabims = self._tampilkan_peta("mabims", f"🌙 MABIMS — {tgl_str}", fig_mabims)
+                        frame_to_select = frame_mabims
+
+                    if frame_to_select is not None:
+                        self.notebook.select(frame_to_select)
+
                     self._tugas_peta_tersisa = max(0, getattr(self, "_tugas_peta_tersisa", 1) - 1)
                     if self._tugas_peta_tersisa == 0:
                         self.btn_proses.config(state="normal")
@@ -4145,11 +4308,16 @@ class HisabWinApp(tk.Tk):
                     # dilihat user (mis. kalau user sudah ada di tab MABIMS).
                     tanggal, grids_id = payload
                     self._log("Peta Indonesia selesai. Menampilkan...")
-                    fig_id_tinggi = buat_figure_indonesia_tinggi_hilal(grids_id, tanggal)
-                    fig_id_elong = buat_figure_indonesia_elongasi(grids_id, tanggal)
                     tgl_str = tanggal.strftime('%d %B %Y')
-                    self._tampilkan_peta("id_tinggi", f"🇮🇩 Tinggi Hilal — {tgl_str}", fig_id_tinggi)
-                    self._tampilkan_peta("id_elongasi", f"🇮🇩 Elongasi — {tgl_str}", fig_id_elong)
+
+                    if self.hitung_alt.get():
+                        fig_id_tinggi = buat_figure_indonesia_tinggi_hilal(grids_id, tanggal)
+                        self._tampilkan_peta("id_tinggi", f"🇮🇩 Tinggi Hilal — {tgl_str}", fig_id_tinggi)
+
+                    if self.hitung_elong.get():
+                        fig_id_elong = buat_figure_indonesia_elongasi(grids_id, tanggal)
+                        self._tampilkan_peta("id_elongasi", f"🇮🇩 Elongasi — {tgl_str}", fig_id_elong)
+
                     self._tugas_peta_tersisa = max(0, getattr(self, "_tugas_peta_tersisa", 1) - 1)
                     if self._tugas_peta_tersisa == 0:
                         self.btn_proses.config(state="normal")
