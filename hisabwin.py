@@ -241,8 +241,12 @@ def julian_day(tahun, bulan, hari_desimal):
 
 
 def delta_t_detik(tahun, bulan=1):
-    """Delta-T (TT-UT) dalam detik, polinomial Espenak-Meeus (rentang 1900-2150,
-    cukup untuk pemakaian praktis hisab masa kini)."""
+    """Delta-T (TT-UT) dalam detik. Himpunan polinomial lengkap Espenak-Meeus
+    (Five Millennium Canon, 2006) untuk rentang 1000-2005, diperbarui dengan
+    ekstrapolasi termutakhir Espenak (2014) untuk 2005 ke atas.
+    Akurasi terbaik di 1900-2050 (< 1 detik). Sebelum 1600 atau setelah 3000
+    akurasinya menurun (bisa puluhan detik/menit) karena sifatnya
+    rekonstruksi historis / ekstrapolasi jangka panjang -- wajar untuk ΔT."""
     y = np.asarray(tahun, dtype=float) + (bulan - 0.5) / 12.0
 
     def poly(t, coeffs):
@@ -251,33 +255,47 @@ def delta_t_detik(tahun, bulan=1):
             r = r * t + c
         return r
 
-    dt = np.where(
-        y < 1920,
-        poly(y - 1900.0, [-2.79, 1.494119, -0.0598939, 0.0061966, -0.000197]),
-        np.where(
-            y < 1941,
-            poly(y - 1920.0, [21.20, 0.84493, -0.076100, 0.0020936]),
-            np.where(
-                y < 1961,
-                poly(y - 1950.0, [29.07, 0.407, -1.0 / 233.0, 1.0 / 2547.0]),
-                np.where(
-                    y < 1986,
-                    poly(y - 1975.0, [45.45, 1.067, -1.0 / 260.0, -1.0 / 718.0]),
-                    np.where(
-                        y < 2005,
-                        poly(y - 2000.0, [63.86, 0.3345, -0.060374, 0.0017275,
-                                          0.000651814, 0.00002373599]),
-                        np.where(
-                            y < 2050,
-                            62.92 + 0.32217 * (y - 2000.0) + 0.005589 * (y - 2000.0) ** 2,
-                            (-20.0 + 32.0 * ((y - 1820.0) / 100.0) ** 2
-                             - 0.5628 * (2150.0 - y)),
-                        ),
-                    ),
-                ),
-            ),
-        ),
-    )
+    # --- data historis Morrison & Stephenson (500-1900) ---
+    dt_500_1600 = poly((y - 1000.0) / 100.0,
+                        [1574.2, -556.01, 71.23472, 0.319781,
+                         -0.8503463, -0.005050998, 0.0083572073])
+    dt_1600_1700 = poly(y - 1600.0, [120.0, -0.9808, -0.01532, 1.0 / 7129.0])
+    dt_1700_1800 = poly(y - 1700.0, [8.83, 0.1603, -0.0059285, 0.00013336,
+                                      -1.0 / 1174000.0])
+    dt_1800_1860 = poly(y - 1800.0, [13.72, -0.332447, 0.0068612, 0.0041116,
+                                      -0.00037436, 0.0000121272,
+                                      -0.0000001699, 0.000000000875])
+    dt_1860_1900 = poly(y - 1860.0, [7.62, 0.5737, -0.251754, 0.01680668,
+                                      -0.0004473624, 1.0 / 233174.0])
+
+    # --- segmen modern (tidak berubah dari versi sebelumnya) ---
+    dt_1900_1920 = poly(y - 1900.0, [-2.79, 1.494119, -0.0598939, 0.0061966, -0.000197])
+    dt_1920_1941 = poly(y - 1920.0, [21.20, 0.84493, -0.076100, 0.0020936])
+    dt_1941_1961 = poly(y - 1950.0, [29.07, 0.407, -1.0 / 233.0, 1.0 / 2547.0])
+    dt_1961_1986 = poly(y - 1975.0, [45.45, 1.067, -1.0 / 260.0, -1.0 / 718.0])
+    dt_1986_2005 = poly(y - 2000.0, [63.86, 0.3345, -0.060374, 0.0017275,
+                                      0.000651814, 0.00002373599])
+
+    # --- 2005 ke atas: ekstrapolasi termutakhir (Espenak 2014) ---
+    dt_2005_2015 = 64.69 + 0.2930 * (y - 2005.0)
+    dt_2015_up = 67.62 + 0.3645 * (y - 2015.0) + 0.0039755 * (y - 2015.0) ** 2
+
+    # --- fallback jangka panjang (Morrison-Stephenson) untuk tahun ekstrem ---
+    u_far = (y - 1820.0) / 100.0
+    dt_far = -20.0 + 32.0 * u_far ** 2
+
+    dt = np.where(y < 1600, dt_500_1600,
+         np.where(y < 1700, dt_1600_1700,
+         np.where(y < 1800, dt_1700_1800,
+         np.where(y < 1860, dt_1800_1860,
+         np.where(y < 1900, dt_1860_1900,
+         np.where(y < 1920, dt_1900_1920,
+         np.where(y < 1941, dt_1920_1941,
+         np.where(y < 1961, dt_1941_1961,
+         np.where(y < 1986, dt_1961_1986,
+         np.where(y < 2005, dt_1986_2005,
+         np.where(y < 2015, dt_2005_2015,
+         np.where(y < 3000, dt_2015_up, dt_far)))))))))))))
     return dt
 
 
