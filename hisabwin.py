@@ -24,12 +24,29 @@ import calendar
 import csv
 import os
 import queue
+import sys
 import threading
 import tkinter as tk
 from datetime import datetime, timedelta
 from tkinter import filedialog, messagebox, ttk
 
 import matplotlib
+
+
+def _resource_base_dir():
+    """Folder tempat aset bundel (de421.bsp, logo.png, mask NPZ, dll) berada.
+
+    JANGAN pakai path relatif ('de421.bsp') atau cwd secara implisit --
+    itu cuma kebetulan benar saat dijalankan lewat 'python hisabwin.py'
+    di folder yang sama. Setelah dibundel PyInstaller (--onedir), CWD saat
+    exe di-double-click adalah folder ROOT instalasi, sedangkan file yang
+    ditambahkan lewat --add-data ada di 'root/_internal/' (default PyInstaller
+    6.x). sys._MEIPASS selalu menunjuk ke folder itu dengan benar, baik utk
+    --onedir (folder _internal) maupun --onefile (folder ekstraksi sementara).
+    """
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return sys._MEIPASS
+    return os.path.dirname(os.path.abspath(__file__))
 
 matplotlib.use("TkAgg")
 
@@ -42,6 +59,20 @@ import shapely  # dipakai untuk shapely.contains_xy (vectorized, no Python loop)
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from skyfield import almanac
 from skyfield.api import load, wgs84
+import skyfield.timelib
+from skyfield.nutationlib import iau2000b_radians
+
+# Skyfield secara default selalu memakai model nutasi IAU2000A penuh (687 suku
+# luni-solar + 687 suku planeter = ~1374 suku trigonometri per titik waktu)
+# lewat Time._nutation_angles_radians -- ini presisi sub-milidetik-busur,
+# jauh melebihi kebutuhan hisab hilal (cukup akurasi menit busur utk kriteria
+# MABIMS/KHGT). Ganti ke IAU2000B (77 suku luni-solar, 0 planeter): selisih
+# maksimum thd IAU2000A cuma ~0.4 milidetik busur (diverifikasi utk tanggal
+# uji 2040), tapi ~40-47x lebih cepat -- pipeline PKG1/PKG2 Muhammadiyah mode
+# JPL turun dari ~2.75 detik jadi ~0.49 detik. Di-patch di sini (level modul,
+# sebelum ts/eph dipakai di manapun) supaya berlaku otomatis utk SEMUA
+# pemanggilan .apparent() di seluruh kode tanpa perlu ubah logika hisab.
+skyfield.timelib.iau2000a_radians = iau2000b_radians
 
 BULAN_ID = ["Januari", "Februari", "Maret", "April", "Mei", "Juni",
             "Juli", "Agustus", "September", "Oktober", "November", "Desember"]
@@ -659,7 +690,7 @@ def hitung_fajar_nz(tanggal_lokal, ts, eph, sudut_fajar=SUDUT_FAJAR_DERAJAT, mod
 # Tengah & Amerika Selatan, pulau lepas & Greenland sudah dibuang, sudah
 # disederhanakan dgn shapely.simplify(toleransi 0.01°)), atau shapefile Natural
 # Earth 50m jika WKT juga tidak ada (lihat _muat_mainland_amerika_dari_shapefile).
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_SCRIPT_DIR = _resource_base_dir()
 ASET_MAINLAND_AMERIKA_NPZ = os.path.join(_SCRIPT_DIR, "mainland_amerika_mask.npz")
 ASET_MAINLAND_AMERIKA = os.path.join(_SCRIPT_DIR, "mainland_amerika.wkt")
 
@@ -2649,10 +2680,7 @@ class HisabWinApp(tk.Tk):
 
         Kalau logo.png tidak ditemukan atau gagal dibaca, mengembalikan None
         -- BUKAN error fatal, aplikasi tetap jalan normal tanpa logo."""
-        try:
-            folder_script = os.path.dirname(os.path.abspath(__file__))
-        except NameError:
-            folder_script = os.getcwd()
+        folder_script = _resource_base_dir()
         path_logo = os.path.join(folder_script, "logo.png")
 
         if not os.path.isfile(path_logo):
@@ -3190,11 +3218,23 @@ class HisabWinApp(tk.Tk):
     def _path_file_lokasi(self):
         """Path file teks lokal tempat lokasi terakhir (koordinat, zona
         waktu, dll) disimpan/dimuat -- selalu di folder yang sama dengan
-        script/exe ini."""
-        try:
-            folder_script = os.path.dirname(os.path.abspath(__file__))
-        except NameError:
-            folder_script = os.getcwd()
+        exe/script ini.
+
+        Beda dengan aset baca-saja (de421.bsp, logo.png, dll) yang harus
+        dicari lewat _resource_base_dir()/_MEIPASS: file INI ditulis ulang
+        saat runtime, jadi harus mengarah ke folder exe yang SEBENARNYA
+        (sys.executable), bukan folder ekstraksi/bundle PyInstaller --
+        kalau tidak, setting bisa gagal tersimpan (folder _internal/temp
+        tidak selalu dimaksudkan sebagai tempat persisten) atau malah
+        "hilang" tiap kali app dibuka ulang (folder onefile diekstrak ke
+        temp baru setiap start)."""
+        if getattr(sys, "frozen", False):
+            folder_script = os.path.dirname(os.path.abspath(sys.executable))
+        else:
+            try:
+                folder_script = os.path.dirname(os.path.abspath(__file__))
+            except NameError:
+                folder_script = os.getcwd()
         return os.path.join(folder_script, "hisabwin_lokasi.txt")
 
     def _bangun_tab_sholat(self):
@@ -3891,7 +3931,8 @@ class HisabWinApp(tk.Tk):
     def _muat_ephemeris(self):
         try:
             ts = load.timescale()
-            eph = load('de421.bsp')
+            path_bsp = os.path.join(_resource_base_dir(), 'de421.bsp')
+            eph = load(path_bsp)
             self.antrian.put(("ephemeris_ok", (ts, eph)))
         except Exception as e:
             self.antrian.put(("error", f"Gagal memuat ephemeris: {e}"))
