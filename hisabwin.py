@@ -3184,7 +3184,7 @@ class HisabWinApp(tk.Tk):
             "anchor": "w"
         }
         self.chk_mabims = tk.Checkbutton(frame4, text="MABIMS Global", variable=self.hitung_mabims, **chk_opts)
-        self.chk_khgt = tk.Checkbutton(frame4, text="KHGT / Wujudul Hilal", variable=self.hitung_khgt, **chk_opts)
+        self.chk_khgt = tk.Checkbutton(frame4, text="KHGT Global", variable=self.hitung_khgt, **chk_opts)
         self.chk_alt = tk.Checkbutton(frame4, text="Alt Lokal (RI)", variable=self.hitung_alt, **chk_opts)
         self.chk_elong = tk.Checkbutton(frame4, text="Elongasi Lokal (RI)", variable=self.hitung_elong, **chk_opts)
 
