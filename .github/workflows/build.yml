@@ -27,6 +27,26 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
+    - name: Pre-fetch Natural Earth shapefiles (110m) untuk bundel offline
+      shell: powershell
+      run: |
+        # hisabwin.py cuma pakai 4 shapefile Natural Earth 110m ini (LAND,
+        # OCEAN, COASTLINE, BORDERS -- lihat cfeature.LAND/OCEAN/COASTLINE/
+        # BORDERS di kode). Cartopy TIDAK membundel shapefile ini secara
+        # default -- normalnya diunduh dari naturalearth.s3.amazonaws.com
+        # saat PERTAMA KALI user generate peta, yang butuh internet dan bisa
+        # gagal total kalau mesin user offline (padahal astronominya sendiri
+        # sudah didesain 100% offline lewat de421.bsp/VSOP87). Di-fetch
+        # sekali di sini (runner GitHub Actions selalu online), lalu hasil
+        # cache-nya di-bundel ke exe lewat --add-data supaya user gak perlu
+        # akses internet sama sekali.
+        python -c "import cartopy.io.shapereader as s; [s.natural_earth(resolution='110m', category=c, name=n) for c, n in [('physical','land'),('physical','ocean'),('physical','coastline'),('cultural','admin_0_boundary_lines_land')]]"
+        $dataDir = (python -c "import cartopy; print(cartopy.config['data_dir'])").Trim()
+        Copy-Item -Path $dataDir -Destination "cartopy_data" -Recurse
+        Write-Host "Shapefile Natural Earth di-cache ke: $dataDir"
+        Write-Host "Dibundel ke folder cartopy_data/ (struktur sama, dipakai oleh"
+        Write-Host "cartopy.config['pre_existing_data_dir'] di hisabwin.py saat frozen)"
+
     - name: Build HisabWin Executable
       shell: powershell
       run: |
@@ -54,6 +74,7 @@ jobs:
           --add-data "logo.png;." `
           --add-data "mainland_amerika_mask.npz;." `
           --add-data "de421.bsp;." `
+          --add-data "cartopy_data;cartopy_data" `
           hisabwin.py
 
     - name: Prepare HisabWin.7z Archive

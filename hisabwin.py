@@ -1412,10 +1412,27 @@ def _gambar_peta_dasar_indonesia(ax):
     ax.set_extent([INDONESIA_LON_RANGE[0], INDONESIA_LON_RANGE[1],
                    INDONESIA_LAT_RANGE[0], INDONESIA_LAT_RANGE[1]],
                   crs=ccrs.PlateCarree())
-    ax.add_feature(cfeature.LAND, facecolor="lightgray")
-    ax.add_feature(cfeature.OCEAN, facecolor="lightblue")
-    ax.add_feature(cfeature.BORDERS, linewidth=0.5, edgecolor="dimgray")
-    ax.coastlines(linewidth=0.6)
+    # PENTING: cfeature.LAND/OCEAN/BORDERS bawaan cartopy TERNYATA (dikonfirmasi
+    # via tracing langsung ke shapereader.natural_earth() saat savefig) memakai
+    # AdaptiveScaler yang SAMA seperti cfeature.COASTLINE -- bukan skala tetap
+    # 110m seperti yang terlihat dari repr default-nya. Untuk extent Indonesia
+    # (~17-46 derajat), scaler ini otomatis naik ke 50m utk KETIGANYA (LAND,
+    # OCEAN, BORDERS), bukan cuma garis pantai. .with_scale("110m") membuat
+    # SALINAN dgn skala tetap (bukan adaptif) -- baris ini yang benar-benar
+    # menghindari kebutuhan 2 set shapefile (110m+50m) utk peta ini.
+    ax.add_feature(cfeature.LAND.with_scale("110m"), facecolor="lightgray")
+    ax.add_feature(cfeature.OCEAN.with_scale("110m"), facecolor="lightblue")
+    ax.add_feature(cfeature.BORDERS.with_scale("110m"), linewidth=0.5, edgecolor="dimgray")
+    # resolution='110m' dipatok eksplisit (bukan biarkan default 'auto') --
+    # DIKONFIRMASI lewat pengujian: extent Indonesia yang kecil membuat
+    # AdaptiveScaler cartopy otomatis pilih '50m' utk coastline SAJA (LAND/
+    # OCEAN di atas tetap 110m krn scale-nya memang dipatok tetap, bukan
+    # auto), artinya cartopy butuh 2 set shapefile berbeda (110m+50m) utk
+    # SATU peta ini. Dengan 110m eksplisit, cuma 1 set shapefile yang perlu
+    # di-cache/bundle -- konsisten dgn LAND/OCEAN, dan cukup detail utk skala
+    # peta regional Indonesia (beda beberapa piksel garis pantai tidak
+    # kelihatan di skala ini).
+    ax.coastlines(resolution="110m", linewidth=0.6)
     gl = ax.gridlines(draw_labels=True, linewidth=0.3, alpha=0.5)
     gl.top_labels = False
     gl.right_labels = False
@@ -1498,9 +1515,15 @@ def buat_figure_mabims(grids, tanggal):
     fig = plt.figure(figsize=(13, 7.2), constrained_layout=True)
     ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
     ax.set_extent([-180, 180, -90, 90], crs=ccrs.PlateCarree())
-    ax.add_feature(cfeature.LAND, facecolor="lightgray")
-    ax.add_feature(cfeature.OCEAN, facecolor="lightblue")
-    ax.coastlines(linewidth=0.5)
+    # LAND/OCEAN dipatok .with_scale("110m") jg di sini utk konsisten/robust --
+    # extent dunia [-180,180,-90,90] saat ini memang sudah otomatis resolve ke
+    # 110m lewat AdaptiveScaler bawaan cfeature.LAND/OCEAN, TAPI itu bergantung
+    # implisit pada extent selalu dunia penuh; kalau nanti ada yg nambah
+    # ax.set_extent() utk zoom di fungsi ini, adaptive scaler akan diam-diam
+    # minta shapefile lebih detail (persis bug yg ditemukan di peta Indonesia).
+    ax.add_feature(cfeature.LAND.with_scale("110m"), facecolor="lightgray")
+    ax.add_feature(cfeature.OCEAN.with_scale("110m"), facecolor="lightblue")
+    ax.coastlines(resolution="110m", linewidth=0.5)
 
     gl = ax.gridlines(draw_labels=True, linewidth=0.3, alpha=0.5)
     gl.top_labels = False
@@ -1827,9 +1850,15 @@ def buat_figure_muhammadiyah(grids, tanggal, evaluasi):
     fig = plt.figure(figsize=(13, 7.2), constrained_layout=True)
     ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
     ax.set_extent([-180, 180, -90, 90], crs=ccrs.PlateCarree())
-    ax.add_feature(cfeature.LAND, facecolor="lightgray")
-    ax.add_feature(cfeature.OCEAN, facecolor="lightblue")
-    ax.coastlines(linewidth=0.5)
+    # LAND/OCEAN dipatok .with_scale("110m") jg di sini utk konsisten/robust --
+    # extent dunia [-180,180,-90,90] saat ini memang sudah otomatis resolve ke
+    # 110m lewat AdaptiveScaler bawaan cfeature.LAND/OCEAN, TAPI itu bergantung
+    # implisit pada extent selalu dunia penuh; kalau nanti ada yg nambah
+    # ax.set_extent() utk zoom di fungsi ini, adaptive scaler akan diam-diam
+    # minta shapefile lebih detail (persis bug yg ditemukan di peta Indonesia).
+    ax.add_feature(cfeature.LAND.with_scale("110m"), facecolor="lightgray")
+    ax.add_feature(cfeature.OCEAN.with_scale("110m"), facecolor="lightblue")
+    ax.coastlines(resolution="110m", linewidth=0.5)
 
     gl = ax.gridlines(draw_labels=True, linewidth=0.3, alpha=0.5)
     gl.top_labels = False
