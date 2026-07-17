@@ -21,6 +21,7 @@ dan bagian plotting dipindah ke thread utama agar aman dipakai bersama Tkinter.
 """
 
 import calendar
+import math
 import csv
 import os
 import queue
@@ -138,6 +139,24 @@ def ke_utc_datetime(t):
     """Konversi seragam ke datetime UTC biasa, entah 't' objek Time skyfield
     (punya .utc_datetime()) atau sudah berupa datetime polos (mode Ringan)."""
     return t.utc_datetime() if hasattr(t, "utc_datetime") else t
+
+
+def _ke_naif(dt):
+    """Lepas tzinfo (kalau ada) dari sebuah datetime, supaya aman
+    dibandingkan (<, >, ==) dengan datetime lain yang naive.
+
+    Dibutuhkan krn dua sumber waktu di kode ini TIDAK selalu konsisten
+    soal tzinfo: waktu ijtimak dari cari_ijtimak_tahun_ringan() (dipakai
+    apa adanya oleh bandingkan_kalender_mabims_khgt(), independen dari
+    mode) selalu NAIVE, sedangkan hitung_fajar_nz() mengembalikan datetime
+    AWARE (via Skyfield .utc_datetime()) saat mode='jpl' tapi NAIVE saat
+    mode='ringan'. Membandingkan langsung (mis. waktu_ijtimak <
+    waktu_fajar_nz) meledak dgn TypeError 'can't compare offset-naive and
+    offset-aware datetimes' begitu salah satu aware dan satunya naive.
+    Kedua datetime yg dibandingkan di sini sama2 berbasis UTC, jadi
+    melepas tzinfo (bukan mengonversinya) aman dan tidak mengubah nilai
+    jam/menitnya."""
+    return dt.replace(tzinfo=None) if dt is not None and dt.tzinfo is not None else dt
 
 
 def cari_ijtimak_tahun(tahun, ts, eph, mode="jpl"):
@@ -523,6 +542,125 @@ def cari_istiqbal_tahun_ringan(tahun):
         if waktu_istiqbal.year == tahun:
             hasil.append(waktu_istiqbal)
     return hasil
+
+
+# =========================================================
+#  HISAB URFI -- PELABELAN TAHUN/BULAN HIJRIYAH
+#
+#  Aplikasi ini AGNOSTIK terhadap kalender Hijriyah: semua fungsi di atas
+#  (ijtimak, istiqbal, evaluasi_pkg, dst) cuma tahu WAKTU ASTRONOMIS
+#  (datetime UTC), tidak tahu ini "bulan apa, tahun berapa H". Modul ini
+#  isinya hisab URFI (tabular/aritmatik, BUKAN astronomis) yang dipakai
+#  SEMATA-MATA sbg "penunjuk arah" -- tebakan awal utk mencocokkan tiap
+#  ijtimak asli ke label (tahun H, bulan H) yang benar, BUKAN sbg sumber
+#  kebenaran tanggal itu sendiri.
+#
+#  KENAPA INI VALID (bukan cuma "cara gampang"): siklus urfi 30-tahun
+#  dirancang supaya rata2 panjang bulannya HAMPIR PERSIS sama dgn rata2
+#  bulan sinodis asli (10.631 hari / 360 bulan = 29,53056 hari, vs bulan
+#  sinodis asli 29,530589 hari -- beda cuma ~0,01 hari per 30 tahun,
+#  praktis tanpa drift kumulatif jangka pendek/menengah). Satu2nya sumber
+#  selisih per-bulan ya variasi kecepatan Bulan asli (perige/apoge, biasa
+#  cuma nggeser ijtimak asli beberapa jam-1 hari dari urfi), BUKAN
+#  kesalahan sistematis yg menumpuk -- makanya "cari ijtimak asli
+#  terdekat dari tebakan urfi" itu robust & tidak ambigu dlm skala
+#  tahun-ke-tahun (dua ijtimak asli berturutan tidak akan pernah sama2
+#  jadi kandidat terdekat ke urfi bulan yang sama).
+#
+#  Formula & pola kabisat (11 tahun kabisat dari 30, di posisi
+#  {2,5,7,10,13,16,18,21,24,26,29} dlm siklus) adalah pola "tipe IIa" /
+#  "Kuwaiti algorithm" -- pola PALING UMUM dipakai (al-Fazari,
+#  al-Khwarizmi, al-Battani, Toledan/Alfonsine Tables, Microsoft), SUDAH
+#  DIVERIFIKASI terhadap referensi independen (Wikipedia "Tabular Islamic
+#  calendar": 18 Februari 2026 = 1 Ramadan 1447 H tabular -- formula di
+#  bawah menghasilkan tanggal PERSIS SAMA).
+# =========================================================
+
+_EPOCH_URFI_JD = 1948439.5   # JD 1 Muharram 1 H (tabular, tengah malam)
+_NAMA_BULAN_HIJRIYAH = ["Muharram", "Safar", "Rabiul Awal", "Rabiul Akhir",
+                        "Jumadil Awal", "Jumadil Akhir", "Rajab", "Syaban",
+                        "Ramadan", "Syawal", "Dzulqaidah", "Dzulhijjah"]
+
+
+def _urfi_kabisat(tahun_h):
+    """True kalau tahun_h (tahun Hijriyah) kabisat menurut siklus 30-tahun
+    tipe IIa/Kuwaiti -- posisi kabisat dlm siklus: 2,5,7,10,13,16,18,21,24,26,29."""
+    posisi = ((tahun_h - 1) % 30) + 1
+    return posisi in (2, 5, 7, 10, 13, 16, 18, 21, 24, 26, 29)
+
+
+def _urfi_ke_jd(tahun_h, bulan_h, hari_h=1):
+    """Konversi tanggal urfi (tabular, BUKAN astronomis) -> Julian Day.
+    Formula standar type-IIa/Kuwaiti (lihat catatan modul di atas),
+    epoch _EPOCH_URFI_JD = 1 Muharram 1 H."""
+    return (hari_h
+            + math.ceil(29.5 * (bulan_h - 1))
+            + (tahun_h - 1) * 354
+            + math.floor((3 + 11 * tahun_h) / 30)
+            + _EPOCH_URFI_JD - 1)
+
+
+def _jd_ke_urfi(jd):
+    """Konversi Julian Day -> tanggal urfi (tahun_h, bulan_h, hari_h).
+    Kebalikan dari _urfi_ke_jd() -- estimasi awal analitik lalu dikoreksi
+    dgn loop kecil (biasanya konvergen dlm 0-1 iterasi, standar teknik dari
+    Calendrical Calculations/Dershowitz & Reingold)."""
+    jd_bulat = math.floor(jd) + 0.5
+    tahun_h = math.floor((30 * (jd_bulat - _EPOCH_URFI_JD) + 10646) / 10631)
+
+    while _urfi_ke_jd(tahun_h + 1, 1, 1) <= jd_bulat:
+        tahun_h += 1
+    while _urfi_ke_jd(tahun_h, 1, 1) > jd_bulat:
+        tahun_h -= 1
+
+    bulan_h = 1
+    while bulan_h < 12 and _urfi_ke_jd(tahun_h, bulan_h + 1, 1) <= jd_bulat:
+        bulan_h += 1
+
+    hari_h = int(jd_bulat - _urfi_ke_jd(tahun_h, bulan_h, 1) + 1)
+    return tahun_h, bulan_h, hari_h
+
+
+def _cari_label_hijriyah_urfi(jd_ijtimak):
+    """Untuk satu ijtimak asli (Julian Day-nya), cari label (tahun_h,
+    bulan_h) yg PALING COCOK -- bandingkan jarak ke awal-bulan-urfi yg
+    'memuat' ijtimak ini (dari _jd_ke_urfi) VS awal-bulan-urfi SETELAHNYA,
+    ambil yg jaraknya PALING DEKAT. Ini implementasi persis dari ide
+    "tebakan urfi sbg initial guess, ijtimak asli terdekat yg dipakai
+    sbg patokan real" -- di sini arahnya dibalik (dari ijtimak asli,
+    cari label urfi terdekat), tapi hasilnya ekuivalen."""
+    tahun_h, bulan_h, _ = _jd_ke_urfi(jd_ijtimak)
+    jd_awal_ini = _urfi_ke_jd(tahun_h, bulan_h, 1)
+
+    tahun_h2, bulan_h2 = (tahun_h, bulan_h + 1) if bulan_h < 12 else (tahun_h + 1, 1)
+    jd_awal_next = _urfi_ke_jd(tahun_h2, bulan_h2, 1)
+
+    if abs(jd_ijtimak - jd_awal_next) < abs(jd_ijtimak - jd_awal_ini):
+        return tahun_h2, bulan_h2
+    return tahun_h, bulan_h
+
+
+def beri_label_hijriyah(ijtimak_list):
+    """Tempel label (tahun Hijriyah, nama bulan Hijriyah) ke tiap ijtimak
+    ASLI (astronomis) dlm ijtimak_list (list datetime UTC, mis. gabungan
+    hasil cari_ijtimak_tahun_ringan() lintas beberapa tahun Masehi berturut2
+    supaya urutannya utuh -- SATU tahun Masehi biasanya memotong 1-2 tahun
+    Hijriyah di tengah).
+
+    Return: list of dict {'waktu_ijtimak', 'tahun_h', 'bulan_h',
+    'nama_bulan_h'}, terurut sesuai urutan input.
+    """
+    hasil = []
+    for waktu_ijtimak in ijtimak_list:
+        jd = julian_day(waktu_ijtimak.year, waktu_ijtimak.month,
+                         waktu_ijtimak.day + (waktu_ijtimak.hour
+                                               + waktu_ijtimak.minute / 60.0
+                                               + waktu_ijtimak.second / 3600.0) / 24.0)
+        tahun_h, bulan_h = _cari_label_hijriyah_urfi(jd)
+        hasil.append({"waktu_ijtimak": waktu_ijtimak, "tahun_h": tahun_h,
+                      "bulan_h": bulan_h, "nama_bulan_h": _NAMA_BULAN_HIJRIYAH[bulan_h - 1]})
+    return hasil
+
 
 
 RE_EKUATOR_KM = 6378.137   # WGS84
@@ -2344,7 +2482,7 @@ def evaluasi_pkg(grids, tanggal, waktu_ijtimak=None, ts=None, eph=None,
             hasil_pkg2 = pkg2_precomputed.get("hasil_pkg2")
             waktu_fajar_nz = pkg2_precomputed.get("waktu_fajar_nz")
             if waktu_ijtimak is not None and waktu_fajar_nz is not None:
-                pkg2_ijtimak_ok = waktu_ijtimak < waktu_fajar_nz
+                pkg2_ijtimak_ok = _ke_naif(waktu_ijtimak) < _ke_naif(waktu_fajar_nz)
             pkg2_amerika_ok = bool(hasil_pkg2["ditemukan"]) if hasil_pkg2 is not None else False
             pkg2_terpenuhi = bool(pkg2_ijtimak_ok) and pkg2_amerika_ok
         else:
@@ -2371,7 +2509,7 @@ def evaluasi_pkg(grids, tanggal, waktu_ijtimak=None, ts=None, eph=None,
 
             waktu_fajar_nz = hasil_ab.get("waktu_fajar_nz")
             if waktu_ijtimak is not None and waktu_fajar_nz is not None:
-                pkg2_ijtimak_ok = waktu_ijtimak < waktu_fajar_nz
+                pkg2_ijtimak_ok = _ke_naif(waktu_ijtimak) < _ke_naif(waktu_fajar_nz)
 
             hasil_pkg2 = hasil_ab.get("hasil_pkg2")
             pkg2_amerika_ok = bool(hasil_pkg2["ditemukan"]) if hasil_pkg2 is not None else False
@@ -2391,6 +2529,281 @@ def evaluasi_pkg(grids, tanggal, waktu_ijtimak=None, ts=None, eph=None,
 
 
 def buat_figure_muhammadiyah(grids, tanggal, evaluasi):
+    lon_mesh, lat_mesh = grids["lon_mesh"], grids["lat_mesh"]
+    elong_grid, geo_alt_grid, hours_utc_grid = (
+        grids["elong_grid"], grids["geo_alt_grid"], grids["hours_utc_grid"]
+    )
+
+    zona_pkg1 = evaluasi["zona_pkg1"]
+    no_sunset_masked = evaluasi["no_sunset_masked"]
+    pkg1_terpenuhi = evaluasi["pkg1_terpenuhi"]
+    pkg2_terpenuhi = evaluasi["pkg2_terpenuhi"]
+    pkg2_ijtimak_ok = evaluasi["pkg2_ijtimak_ok"]
+    waktu_fajar_nz = evaluasi["waktu_fajar_nz"]
+    hasil_pkg2 = evaluasi["hasil_pkg2"]
+    waktu_ijtimak = evaluasi["waktu_ijtimak"]
+
+    fig = plt.figure(figsize=(13, 7.2), constrained_layout=True)
+    ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
+    ax.set_extent([-180, 180, -90, 90], crs=ccrs.PlateCarree())
+    # LAND/OCEAN dipatok .with_scale("110m") jg di sini utk konsisten/robust --
+    # extent dunia [-180,180,-90,90] saat ini memang sudah otomatis resolve ke
+    # 110m lewat AdaptiveScaler bawaan cfeature.LAND/OCEAN, TAPI itu bergantung
+    # implisit pada extent selalu dunia penuh; kalau nanti ada yg nambah
+    # ax.set_extent() utk zoom di fungsi ini, adaptive scaler akan diam-diam
+    # minta shapefile lebih detail (persis bug yg ditemukan di peta Indonesia).
+    ax.add_feature(cfeature.LAND.with_scale("110m"), facecolor="lightgray")
+    ax.add_feature(cfeature.OCEAN.with_scale("110m"), facecolor="lightblue")
+    ax.coastlines(resolution="110m", linewidth=0.5)
+
+    gl = ax.gridlines(draw_labels=True, linewidth=0.3, alpha=0.5)
+    gl.top_labels = False
+    gl.right_labels = False
+
+    if pkg1_terpenuhi:
+        warna_zona, label_zona = "orange", "Zona memenuhi kriteria (PKG 1 & PKG 2 terpenuhi)"
+        if np.any(zona_pkg1):
+            ax.contourf(lon_mesh, lat_mesh, zona_pkg1.astype(int),
+                        levels=[0.5, 1.5], colors=[warna_zona], alpha=0.45,
+                        transform=ccrs.PlateCarree())
+    elif pkg2_terpenuhi:
+        warna_zona, label_zona = "gold", "Zona memenuhi PKG 2 (fallback, daratan utama Amerika)"
+        zona2 = hasil_pkg2["zona"]
+        lon2, lat2 = hasil_pkg2["lon_mesh"], hasil_pkg2["lat_mesh"]
+        ax.contourf(lon2, lat2, zona2.astype(int),
+                    levels=[0.5, 1.5], colors=[warna_zona], alpha=0.6,
+                    transform=ccrs.PlateCarree())
+        # Zonanya bisa sangat sempit (dekat batas ambang), jadi ditandai juga
+        # dengan penanda titik supaya tetap terlihat di peta skala dunia.
+        lat_c = lat2[zona2].mean()
+        lon_c = lon2[zona2].mean()
+        ax.plot(lon_c, lat_c, marker="*", color="darkorange", markersize=14,
+                markeredgecolor="black", transform=ccrs.PlateCarree(), zorder=5)
+    else:
+        warna_zona, label_zona = "orange", "Zona memenuhi kriteria Muhammadiyah"
+
+    ax.contour(lon_mesh, lat_mesh, geo_alt_grid, levels=[5],
+               colors="blue", linewidths=1.5, transform=ccrs.PlateCarree())
+    ax.contour(lon_mesh, lat_mesh, elong_grid, levels=[8],
+               colors="red", linewidths=1.5, transform=ccrs.PlateCarree())
+    ax.contourf(lon_mesh, lat_mesh, no_sunset_masked.astype(int),
+                levels=[0.5, 1.5], colors=["dimgray"], alpha=0.3,
+                transform=ccrs.PlateCarree())
+    ax.contour(lon_mesh, lat_mesh, hours_utc_grid, levels=[0, 24],
+               colors="black", linewidths=1.8, linestyles="dashed",
+               transform=ccrs.PlateCarree())
+
+    if pkg1_terpenuhi:
+        status_teks = "PKG 1 & PKG 2 terpenuhi"
+    elif pkg2_terpenuhi:
+        status_teks = "PKG 1 tidak terpenuhi — fallback ke PKG 2: terpenuhi"
+    else:
+        status_teks = "PKG 1 & PKG 2 tidak terpenuhi"
+
+    ax.set_title(f"Peta Kriteria Muhammadiyah — Elongasi ≥8° & Tinggi Hilal ≥5° (Geosentris)\n"
+                 f"{tanggal.strftime('%d %B %Y')}  —  {status_teks}",
+                 fontsize=12, pad=14)
+
+    legend_elems_muh = [
+        plt.Line2D([0], [0], color="blue", lw=1.5, label="Tinggi hilal geosentris = 5°"),
+        plt.Line2D([0], [0], color="red", lw=1.5, label="Elongasi geosentris = 8°"),
+        plt.Line2D([0], [0], color="black", lw=1.8, linestyle="dashed",
+                   label="Batas cutoff (sunset di luar rentang UTC 0-24\ntanggal target) — batas PKG 1"),
+        plt.Rectangle((0, 0), 1, 1, fc=warna_zona, alpha=0.45, label=label_zona),
+        plt.Rectangle((0, 0), 1, 1, fc="dimgray", alpha=0.3, label="Tidak ada sunset"),
+    ]
+    ax.legend(handles=legend_elems_muh, loc="upper left", bbox_to_anchor=(1.01, 1.0),
+              borderaxespad=0, fontsize=9, framealpha=0.9)
+
+    # --- Catatan status PKG 2 (hanya ditampilkan kalau PKG 1 tidak terpenuhi) ---
+    if not pkg1_terpenuhi:
+        baris = []
+        if waktu_fajar_nz is not None:
+            cek = "OK" if pkg2_ijtimak_ok else "TIDAK terpenuhi"
+            baris.append(f"Ijtimak {waktu_ijtimak.strftime('%d %b %Y %H:%M')} UTC vs "
+                         f"fajar NZ {waktu_fajar_nz.strftime('%d %b %Y %H:%M')} UTC -> {cek}")
+        else:
+            baris.append("Waktu fajar NZ tidak dapat dihitung.")
+        if hasil_pkg2 is not None:
+            ket = "terpenuhi" if hasil_pkg2["ditemukan"] else "TIDAK terpenuhi"
+            tahap = hasil_pkg2["tahap"]
+            baris.append(f"Kriteria 5°/8° di daratan utama Amerika: {ket} "
+                         f"(pencarian tahap {tahap}, resolusi "
+                         f"{f'adaptif {RES_KASAR_PKG2:g}°/{RES_HALUS_ZONA_SEMPIT_PKG2:g}°' if tahap == 1 else '0.25°'})")
+        else:
+            baris.append("Kriteria 5°/8° di daratan utama Amerika: tidak dapat diperiksa.")
+        catatan = "Cek syarat PKG 2:\n" + "\n".join(baris)
+        fig.text(0.01, 0.01, catatan, fontsize=8, va="bottom", ha="left",
+                  color="dimgray", wrap=True)
+
+    # fig.tight_layout() dihapus -- sudah digantikan constrained_layout=True
+    # di plt.figure() saat pembuatan figure (hipotesa: tight_layout() memicu
+    # render-pass tambahan yang lebih mahal saat berinteraksi dgn GeoAxes
+    # cartopy dibanding constrained_layout yg terintegrasi ke layout engine).
+    return fig
+
+# =========================================================
+#  PERBANDINGAN KALENDER MABIMS vs KHGT MUHAMMADIYAH
+#  Menyambung dari beri_label_hijriyah(): tiap ijtimak asli yg sudah punya
+#  label (tahun H, bulan H) dipakai sbg ANCHOR utk mengevaluasi kedua
+#  kriteria (MABIMS lokal Indonesia & KHGT/Muhammadiyah global) di malam
+#  yg sama, lalu dibandingkan tanggal Masehi awal bulannya.
+# =========================================================
+
+# =========================================================
+#  TITIK SAMPLING MABIMS -- pesisir barat Sumatra & pesisir selatan
+#  Jawa bagian barat.
+#
+#  _cek_mabims_terpenuhi() dulu memindai grid PENUH seluruh Indonesia
+#  (hitung_grid_indonesia: 18x49 = 882 titik astronomi sungguhan lalu
+#  diinterpolasi ke 115x321 = 36.915 titik) HANYA untuk menjawab
+#  pertanyaan boolean "ada/tidak ada SATU titik di Indonesia yang lolos
+#  kriteria MABIMS" -- brutal & mubazir utk kebutuhan sesederhana itu,
+#  apalagi dipanggil berulang (tiap bulan x sampai beberapa hari
+#  tambahan) oleh bandingkan_kalender_mabims_khgt().
+#
+#  Padahal secara astronomis, di Indonesia hilal tertinggi pada malam
+#  manapun praktis SELALU muncul di titik-titik paling barat & lintang
+#  ekstrem: matahari terbenam paling akhir (dlm skala jam UTC) di
+#  sanalah, jadi Bulan (yang terbenam belakangan lagi) sudah paling
+#  tinggi/paling jauh elongasinya saat matahari tepat terbenam. Titik itu
+#  ada di dua jalur: (1) pesisir barat Sumatra, dari ujung utara di Pulau
+#  Weh/Sabang turun ke selatan, dan (2) pesisir selatan Jawa bagian
+#  barat, dari Ujung Kulon ke timur sampai Pangandaran.
+#
+#  Jadi cukup dicek di titik-titik pesisir ini saja (belasan titik,
+#  bukan ribuan) -- jauh lebih cepat, kesimpulan lolos/tidaknya kriteria
+#  praktis tidak berubah. Koordinat berikut estimasi kota/desa pesisir
+#  (bukan hasil geocoding presisi tinggi) -- cukup akurat utk hisab,
+#  toleransi beberapa km tidak mengubah kesimpulan lolos/tidak.
+# =========================================================
+TITIK_SAMPLING_MABIMS = [
+    # --- Ujung utara & pesisir barat Sumatra (Aceh) ---
+    ("Sabang (kota)",                    5.8942,  95.3192),
+    ("Meulingge / Tugu KM 0 Sabang",     5.9010,  95.2160),
+    ("Banda Aceh",                       5.5500,  95.3175),
+    ("Meulaboh",                         4.1330,  96.1170),
+    ("Tapaktuan",                        3.2667,  97.1833),
+    # --- Sampling turun ke selatan sepanjang pesisir barat Sumatra ---
+    ("Sinabang (P. Simeulue)",           2.4800,  96.3800),
+    ("Sibolga",                          1.7500,  98.7833),
+    ("Painan",                          -1.3500, 100.5833),
+    ("Bengkulu",                        -3.8000, 102.2667),
+    ("Krui (Pesisir Barat, Lampung)",   -5.1700, 103.9300),
+    ("Bakauheni / ujung selatan Sumatra", -5.8700, 105.7500),
+    # --- Pesisir selatan Jawa bagian barat ---
+    ("Ujung Kulon",                     -6.7597, 105.2100),
+    ("Pelabuhan Ratu",                  -7.0167, 106.0500),
+    ("Pangandaran",                     -7.6667, 108.6000),
+]
+
+_TITIK_SAMPLING_MABIMS_LAT = np.array([t[1] for t in TITIK_SAMPLING_MABIMS])
+_TITIK_SAMPLING_MABIMS_LON = np.array([t[2] for t in TITIK_SAMPLING_MABIMS])
+
+
+def _cek_mabims_terpenuhi(tanggal, ts, eph, mode="ringan"):
+    """Cek kriteria MABIMS Baru (tinggi hilal toposentris >=3 derajat DAN
+    elongasi >=6.4 derajat) terpenuhi di WILAYAH INDONESIA pada malam
+    'tanggal'. True kalau ADA SETIDAKNYA SATU titik di antara
+    TITIK_SAMPLING_MABIMS yg memenuhi -- asumsi praktis: kriteria
+    terpenuhi di MANA SAJA di Indonesia dianggap terpenuhi scr nasional
+    (sidang isbat), sama seperti cari_zona_pkg2_amerika yg juga cukup
+    'ada satu titik' utk KHGT. Kalau ternyata Kemenag pakai titik acuan
+    spesifik (bukan 'ada satu titik di mana saja'), sesuaikan fungsi ini.
+
+    Dihitung lewat _hitung_titik_flat() (versi 'scattered-point', sama
+    yg dipakai PKG 2 Amerika utk titik-titik daratan hasil saringan
+    mask) -- HANYA di titik-titik pesisir barat Sumatra/selatan Jawa
+    (lihat komentar TITIK_SAMPLING_MABIMS di atas), bukan grid penuh."""
+    elong, alt, _, _ = _hitung_titik_flat(
+        tanggal, ts, eph, _TITIK_SAMPLING_MABIMS_LAT, _TITIK_SAMPLING_MABIMS_LON, mode=mode)
+    terpenuhi = (alt >= 3.0) & (elong >= 6.4)
+    return bool(np.any(terpenuhi))
+
+
+def _tentukan_awal_bulan(tanggal_ijtimak, waktu_ijtimak, kriteria, ts, eph,
+                          mode="ringan", maks_hari_tambahan=3):
+    """Tentukan tanggal Masehi (datetime, tengah malam) MULAI bulan baru
+    menurut 'kriteria' ('mabims' atau 'khgt'), dari tanggal_ijtimak
+    (datetime tengah malam hari ijtimak). Cek kriteria di malam
+    tanggal_ijtimak; kalau terpenuhi, bulan mulai malam itu; kalau tidak,
+    coba malam2 berikutnya (jaga2, meski praktiknya nyaris selalu cukup
+    di hari ijtimak atau H+1).
+
+    waktu_ijtimak (datetime presisi, bukan cuma tengah malam) tetap dipakai
+    APA ADANYA utk kriteria 'khgt' (dibutuhkan evaluasi_pkg utk cek PKG 2 --
+    ijtimak sebelum fajar NZ) -- TIDAK ikut bergeser meski tanggal_cek maju
+    beberapa hari, krn waktu ijtimak asli ya cuma satu, tidak berubah.
+    """
+    for tambahan in range(maks_hari_tambahan + 1):
+        tanggal_cek = tanggal_ijtimak + timedelta(days=tambahan)
+        if kriteria == "mabims":
+            terpenuhi = _cek_mabims_terpenuhi(tanggal_cek, ts, eph, mode=mode)
+        else:
+            grids = hitung_grid(tanggal_cek, ts, eph, mode=mode)
+            evaluasi = evaluasi_pkg(grids, tanggal_cek, waktu_ijtimak=waktu_ijtimak,
+                                     ts=ts, eph=eph, mode=mode)
+            terpenuhi = evaluasi["pkg1_terpenuhi"] or evaluasi["pkg2_terpenuhi"]
+        if terpenuhi:
+            return tanggal_cek
+    return None   # jaga2 -- semestinya tidak pernah kejadian dlm praktik
+
+
+def bandingkan_kalender_mabims_khgt(tahun_h, ts=None, eph=None, mode="ringan",
+                                     progress_cb=lambda msg: None):
+    """Bangun tabel perbandingan AWAL BULAN Hijriyah versi MABIMS vs KHGT
+    Muhammadiyah, utk SATU tahun Hijriyah (tahun_h), dari ijtimak ASLI
+    (astronomis) yg dilabeli otomatis lewat beri_label_hijriyah() (hisab
+    urfi cuma dipakai sbg penunjuk arah label bulan, BUKAN sbg sumber
+    tanggal -- tanggal MABIMS/KHGT selalu dari astronomi sungguhan).
+
+    mode='ringan' -> tidak butuh ts/eph (VSOP87+ELP2000, dipakai default).
+    mode='jpl' -> presisi tinggi, WAJIB isi ts & eph.
+
+    Return: list of dict (bulan 1..12), keys:
+      'bulan_h', 'nama_bulan_h', 'waktu_ijtimak',
+      'tanggal_mabims', 'tanggal_khgt' (datetime tengah malam, awal bulan
+      versi masing2 kriteria), 'beda' (bool, True kalau kedua tanggal
+      beda -- potensi beda hari raya/awal bulan antar kriteria).
+    """
+    # Cari rentang tahun Masehi yg mencakup tahun_h penuh (1 Hijriyah tahun
+    # selalu overlap 1-2 tahun Masehi, kadang nyerempet perbatasan) --
+    # perkiraan kasar (622 + tahun_h*0.970229) lalu diperlebar +-1 tahun
+    # Masehi sbg margin aman.
+    tahun_m_perkiraan = int(622 + tahun_h * 0.970229)
+    ijtimak_semua = []
+    for tahun_m in range(tahun_m_perkiraan - 1, tahun_m_perkiraan + 2):
+        ijtimak_semua.extend(cari_ijtimak_tahun_ringan(tahun_m))
+    ijtimak_semua.sort()
+
+    label_semua = beri_label_hijriyah(ijtimak_semua)
+    label_tahun_ini = [l for l in label_semua if l["tahun_h"] == tahun_h]
+    label_tahun_ini.sort(key=lambda l: l["bulan_h"])
+
+    hasil = []
+    for l in label_tahun_ini:
+        waktu_ijtimak = l["waktu_ijtimak"]
+        tanggal_ijtimak = datetime(waktu_ijtimak.year, waktu_ijtimak.month, waktu_ijtimak.day)
+
+        progress_cb(f"Menghitung {l['nama_bulan_h']} {tahun_h} H "
+                    f"(ijtimak {waktu_ijtimak.strftime('%d %b %Y')})...")
+
+        tanggal_mabims = _tentukan_awal_bulan(tanggal_ijtimak, waktu_ijtimak, "mabims",
+                                               ts, eph, mode=mode)
+        tanggal_khgt = _tentukan_awal_bulan(tanggal_ijtimak, waktu_ijtimak, "khgt",
+                                             ts, eph, mode=mode)
+
+        hasil.append({
+            "bulan_h": l["bulan_h"], "nama_bulan_h": l["nama_bulan_h"],
+            "waktu_ijtimak": waktu_ijtimak,
+            "tanggal_mabims": tanggal_mabims, "tanggal_khgt": tanggal_khgt,
+            "beda": (tanggal_mabims != tanggal_khgt),
+        })
+
+    return hasil
+
+
+
     lon_mesh, lat_mesh = grids["lon_mesh"], grids["lat_mesh"]
     elong_grid, geo_alt_grid, hours_utc_grid = (
         grids["elong_grid"], grids["geo_alt_grid"], grids["hours_utc_grid"]
@@ -3860,6 +4273,12 @@ class HisabWinApp(tk.Tk):
         # selesai dimuat (dipicu saat user ganti mode padahal sudah pernah mencari).
         self._auto_cari_pending = False
 
+        # Hasil perbandingan kalender MABIMS vs KHGT Muhammadiyah terakhir:
+        # (tahun_h, mode, hasil_list) -- disimpan supaya tombol "Simpan ke CSV"
+        # bisa mengekspor tanpa menghitung ulang.
+        self._hasil_kalbanding_terakhir = None
+        self._tab_kalbanding_ditambahkan = False
+
         self.antrian = queue.Queue()
         self._poll_after_id = None  # id job after() yg sedang terjadwal (lihat _on_close)
 
@@ -4233,7 +4652,8 @@ class HisabWinApp(tk.Tk):
             self._buat_bagian_akordeon(
                 tab_kontrol, "🌙 Visibilitas",
                 buka_awal=False,
-                on_open=lambda: (self._tutup_akordeon_sholat(), self._tutup_akordeon_gerhana()))
+                on_open=lambda: (self._tutup_akordeon_sholat(), self._tutup_akordeon_gerhana(),
+                                  self._tutup_akordeon_kalbanding()))
 
         # --- Langkah 0: mode perhitungan ---
         frame0 = ttk.LabelFrame(body_hilal, text="0. Mode Perhitungan")
@@ -4335,7 +4755,8 @@ class HisabWinApp(tk.Tk):
             self._buat_bagian_akordeon(
                 tab_kontrol, "🕌 Waktu Sholat & Kiblat",
                 buka_awal=False,
-                on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_gerhana()))
+                on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_gerhana(),
+                                  self._tutup_akordeon_kalbanding()))
 
         # --- Tab tambahan: Waktu Sholat & Arah Kiblat (permanen, selalu ada) ---
         self._bangun_tab_sholat()
@@ -4349,8 +4770,29 @@ class HisabWinApp(tk.Tk):
             self._buat_bagian_akordeon(
                 tab_kontrol, "☀️ Gerhana",
                 buka_awal=False,
-                on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat()))
+                on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
+                                  self._tutup_akordeon_kalbanding()))
         self._bangun_akordeon_gerhana(self._body_akordeon_gerhana, pad)
+
+        # --- Bagian akordeon ke-4: Perbandingan Kalender MABIMS vs KHGT
+        #     Muhammadiyah (terlipat di awal juga -- terbuka otomatis begitu
+        #     tab hasil perbandingan dipilih, lihat _on_ganti_tab_notebook).
+        #     Memakai bandingkan_kalender_mabims_khgt() yang sudah ada
+        #     (murni logika astronomi, TIDAK diubah) -- bagian ini cuma
+        #     pembungkus GUI-nya (input tahun H + tombol, tabel hasil). ---
+        self._body_akordeon_kalbanding, self._buka_akordeon_kalbanding, self._tutup_akordeon_kalbanding = \
+            self._buat_bagian_akordeon(
+                tab_kontrol, "📅 Perbandingan Kalender",
+                buka_awal=False,
+                on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
+                                  self._tutup_akordeon_gerhana()))
+        self._bangun_akordeon_kalbanding(self._body_akordeon_kalbanding, pad)
+
+        # --- Tab hasil perbandingan (permanen, sama seperti tab Waktu
+        #     Sholat -- dibangun sekali di sini, baru dimunculkan di
+        #     notebook kanan begitu tombol "Bandingkan" pertama kali
+        #     menghasilkan sesuatu, lihat _pastikan_tab_kalbanding_tampil). ---
+        self._bangun_tab_kalbanding()
 
     def _on_ganti_tab_notebook(self, event=None):
         """Dipanggil tiap kali tab notebook kanan (peta/Waktu Sholat)
@@ -4366,15 +4808,23 @@ class HisabWinApp(tk.Tk):
             self._buka_akordeon_sholat()
             self._tutup_akordeon_hilal()
             self._tutup_akordeon_gerhana()
+            self._tutup_akordeon_kalbanding()
         elif "Gerhana" in tab_terpilih:
             self._buka_akordeon_gerhana()
             self._tutup_akordeon_hilal()
             self._tutup_akordeon_sholat()
+            self._tutup_akordeon_kalbanding()
+        elif "Perbandingan" in tab_terpilih:
+            self._buka_akordeon_kalbanding()
+            self._tutup_akordeon_hilal()
+            self._tutup_akordeon_sholat()
+            self._tutup_akordeon_gerhana()
         else:
             # Tab peta Hilal (MABIMS, Muhammadiyah, Indonesia, dll)
             self._buka_akordeon_hilal()
             self._tutup_akordeon_sholat()
             self._tutup_akordeon_gerhana()
+            self._tutup_akordeon_kalbanding()
 
     def _on_tab_notebook_ditutup(self, event=None):
         """Dipanggil begitu user klik tombol × di salah satu tab notebook
@@ -4402,6 +4852,14 @@ class HisabWinApp(tk.Tk):
             # (lihat _pastikan_tab_sholat_tampil).
             self.notebook.forget(tab_id)
             self._tab_sholat_ditambahkan = False
+            return
+
+        if widget_tab is not None and widget_tab is getattr(self, "_frame_kalbanding", None):
+            # Sama seperti tab Waktu Sholat & Kiblat di atas -- tab
+            # "Perbandingan Kalender" cuma disembunyikan, tabel hasil
+            # terakhir tetap dipertahankan (lihat _pastikan_tab_kalbanding_tampil).
+            self.notebook.forget(tab_id)
+            self._tab_kalbanding_ditambahkan = False
             return
 
         # Selain itu berarti salah satu tab peta (mabims/muhammadiyah/
@@ -4678,6 +5136,207 @@ class HisabWinApp(tk.Tk):
         finally:
             self.config(cursor="")
             self.btn_tampilkan_gerhana.config(state="normal")
+
+    # ---------------- Perbandingan Kalender MABIMS vs KHGT Muhammadiyah ----------------
+
+    def _bangun_akordeon_kalbanding(self, body, pad):
+        """Isi badan akordeon "📅 Perbandingan Kalender": pilih tahun
+        Hijriyah -> tombol "Bandingkan" memanggil bandingkan_kalender_mabims_khgt()
+        (sudah ada, tidak diubah sama sekali di sini -- method2 di bawah
+        cuma pembungkus GUI-nya) -> hasilnya (12 bulan, tanggal awal bulan
+        versi MABIMS vs KHGT, ditandai kalau beda) ditampilkan sbg tabel
+        di tab notebook kanan."""
+
+        ttk.Label(
+            body,
+            text="Bandingkan tanggal awal tiap bulan Hijriyah sepanjang satu "
+                 "tahun H menurut kriteria MABIMS (Indonesia) vs KHGT "
+                 "Muhammadiyah (global), dari ijtimak astronomis yang sama. "
+                 "Baris yang berbeda tanggal ditandai merah muda.",
+            font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left",
+            wraplength=280,
+        ).pack(fill="x", padx=10, pady=(4, 6))
+
+        frame1 = ttk.LabelFrame(body, text="1. Pilih Tahun Hijriyah")
+        frame1.pack(fill="x", **pad)
+
+        ttk.Label(frame1, text="Tahun Hijriyah:").grid(row=0, column=0, padx=6, pady=6)
+        self.entry_tahun_kalbanding = ttk.Entry(frame1, width=10)
+        # Perkiraan awal tahun H saat ini (rumus urfi yg sama dipakai di
+        # beri_label_hijriyah -- cukup sbg NILAI AWAL isian, bukan sumber
+        # tanggal, jadi tidak masalah kalau meleset 1 tahun).
+        tahun_h_perkiraan = math.floor((datetime.now().year - 622) / 0.970229)
+        self.entry_tahun_kalbanding.insert(0, str(tahun_h_perkiraan))
+        self.entry_tahun_kalbanding.grid(row=0, column=1, padx=6, pady=6)
+
+        self.btn_bandingkan_kalender = ttk.Button(
+            frame1, text="Bandingkan", command=self._on_bandingkan_kalender,
+            style="Aksen.TButton")
+        self.btn_bandingkan_kalender.grid(row=0, column=2, padx=6, pady=6)
+
+        ttk.Label(
+            frame1,
+            text="Memakai Mode Perhitungan yang sama seperti bagian "
+                 "🌙 Visibilitas di atas (Ringan/Presisi).",
+            font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left",
+            wraplength=280,
+        ).grid(row=1, column=0, columnspan=3, padx=6, pady=(0, 6), sticky="w")
+
+    def _on_bandingkan_kalender(self):
+        teks_tahun = self.entry_tahun_kalbanding.get().strip()
+        if not (teks_tahun.isdigit() and 1 <= len(teks_tahun) <= 4):
+            messagebox.showerror("Input tidak valid", "Masukkan angka tahun Hijriyah, mis. 1447.")
+            return
+
+        tahun_h = int(teks_tahun)
+        mode = self.mode.get()
+
+        if mode == "jpl" and self.eph is None:
+            messagebox.showwarning(
+                "Ephemeris belum siap",
+                "Mode Presisi (JPL DE421) dipilih di bagian Visibilitas, tapi "
+                "ephemeris-nya belum selesai dimuat. Tunggu sebentar, atau "
+                "beralih ke Mode Ringan dulu di bagian 🌙 Visibilitas.")
+            return
+
+        self.btn_bandingkan_kalender.config(state="disabled")
+        self._log(f"\nMembandingkan kalender MABIMS vs KHGT Muhammadiyah untuk tahun {tahun_h} H...")
+
+        threading.Thread(target=self._bandingkan_kalender_thread,
+                          args=(tahun_h, mode), daemon=True).start()
+
+    def _bandingkan_kalender_thread(self, tahun_h, mode):
+        try:
+            progress_cb = lambda msg: self.antrian.put(("progress", msg))
+            hasil = bandingkan_kalender_mabims_khgt(
+                tahun_h, ts=self.ts, eph=self.eph, mode=mode, progress_cb=progress_cb)
+            self.antrian.put(("kalbanding_ok", (tahun_h, mode, hasil)))
+        except Exception as e:
+            self.antrian.put(("kalbanding_error", f"Gagal membandingkan kalender: {e}"))
+
+    def _bangun_tab_kalbanding(self):
+        """Bangun (sekali saja, permanen) frame tab hasil perbandingan
+        kalender -- pola sama seperti _bangun_tab_sholat: dibuat di awal,
+        baru dimasukkan ke notebook kanan begitu ada hasil pertama kali
+        (lihat _pastikan_tab_kalbanding_tampil)."""
+        frame = ttk.Frame(self.notebook)
+        self._frame_kalbanding = frame
+
+        panel_hasil = ttk.Frame(frame)
+        panel_hasil.pack(fill="both", expand=True, padx=8, pady=8)
+
+        self.label_judul_kalbanding = ttk.Label(
+            panel_hasil, text="Belum ada perbandingan dihitung.", font=FONT_UTAMA_BOLD)
+        self.label_judul_kalbanding.pack(anchor="w", pady=(0, 2))
+
+        self.label_ringkasan_kalbanding = ttk.Label(
+            panel_hasil, text="", foreground=WARNA_TEKS_MUTED)
+        self.label_ringkasan_kalbanding.pack(anchor="w", pady=(0, 8))
+
+        kolom = ("bulan_h", "waktu_ijtimak", "tanggal_mabims", "tanggal_khgt", "status")
+        judul_kolom = {"bulan_h": "Bulan Hijriyah", "waktu_ijtimak": "Waktu Ijtimak (UTC)",
+                        "tanggal_mabims": "Awal Bulan — MABIMS", "tanggal_khgt": "Awal Bulan — KHGT",
+                        "status": "Status"}
+        self.tree_kalbanding = ttk.Treeview(
+            panel_hasil, columns=kolom, show="headings", height=14)
+        for kunci in kolom:
+            self.tree_kalbanding.heading(kunci, text=judul_kolom[kunci])
+            lebar = 170 if kunci == "waktu_ijtimak" else (150 if "tanggal" in kunci else 130)
+            self.tree_kalbanding.column(kunci, width=lebar, anchor="center")
+        self.tree_kalbanding.tag_configure("beda", background="#FDECEA")
+        self.tree_kalbanding.tag_configure("sama", background=WARNA_PANEL)
+
+        scroll_tree_y = ttk.Scrollbar(panel_hasil, orient="vertical",
+                                       command=self.tree_kalbanding.yview)
+        self.tree_kalbanding.configure(yscrollcommand=scroll_tree_y.set)
+        self.tree_kalbanding.pack(side="left", fill="both", expand=True)
+        scroll_tree_y.pack(side="left", fill="y")
+
+        panel_bawah = ttk.Frame(frame)
+        panel_bawah.pack(fill="x", padx=8, pady=(0, 8))
+        ttk.Label(
+            panel_bawah,
+            text="🟥 Baris merah muda = tanggal awal bulan MABIMS dan KHGT berbeda "
+                 "(potensi beda hari raya/awal bulan antar kriteria).",
+            font=FONT_KECIL, foreground=WARNA_TEKS_MUTED,
+        ).pack(anchor="w")
+        self.btn_simpan_csv_kalbanding = ttk.Button(
+            panel_bawah, text="Simpan ke File .csv",
+            command=self._on_simpan_csv_kalbanding, state="disabled")
+        self.btn_simpan_csv_kalbanding.pack(anchor="e", pady=(6, 0))
+
+    def _pastikan_tab_kalbanding_tampil(self):
+        if not self._tab_kalbanding_ditambahkan:
+            self.notebook.add(self._frame_kalbanding, text="📅 Perbandingan Kalender")
+            self._tab_kalbanding_ditambahkan = True
+        self.notebook.select(self._frame_kalbanding)
+
+    def _tampilkan_kalbanding(self, tahun_h, mode, hasil):
+        self._hasil_kalbanding_terakhir = (tahun_h, mode, hasil)
+
+        self.tree_kalbanding.delete(*self.tree_kalbanding.get_children())
+        jumlah_beda = 0
+        for b in hasil:
+            teks_mabims = b["tanggal_mabims"].strftime("%d %B %Y") if b["tanggal_mabims"] else "—"
+            teks_khgt = b["tanggal_khgt"].strftime("%d %B %Y") if b["tanggal_khgt"] else "—"
+            if b["beda"]:
+                jumlah_beda += 1
+                status, tag = "⚠️ Beda", "beda"
+            else:
+                status, tag = "✅ Sama", "sama"
+            self.tree_kalbanding.insert("", "end", tags=(tag,), values=(
+                f"{b['bulan_h']}. {b['nama_bulan_h']}",
+                format_waktu_ijtimak(b["waktu_ijtimak"]),
+                teks_mabims, teks_khgt, status,
+            ))
+
+        metode_label = "Presisi (Skyfield + JPL DE421)" if mode == "jpl" else "Ringan (VSOP87+ELP2000)"
+        self.label_judul_kalbanding.config(
+            text=f"Perbandingan Kalender {tahun_h} H — MABIMS vs KHGT Muhammadiyah "
+                 f"({len(hasil)} bulan, metode: {metode_label})")
+        if len(hasil) == 0:
+            self.label_ringkasan_kalbanding.config(
+                text="Tidak ditemukan bulan Hijriyah pada tahun tersebut.")
+        else:
+            self.label_ringkasan_kalbanding.config(
+                text=f"{jumlah_beda} dari {len(hasil)} bulan berbeda tanggal awal bulan "
+                     f"antara MABIMS dan KHGT Muhammadiyah.")
+
+        self.btn_simpan_csv_kalbanding.config(state="normal" if hasil else "disabled")
+        self._pastikan_tab_kalbanding_tampil()
+        self._log(f"Perbandingan kalender {tahun_h} H selesai "
+                   f"({jumlah_beda} dari {len(hasil)} bulan berbeda).")
+        self.btn_bandingkan_kalender.config(state="normal")
+
+    def _on_simpan_csv_kalbanding(self):
+        if not self._hasil_kalbanding_terakhir:
+            messagebox.showwarning("Belum ada data", "Hitung perbandingan kalender terlebih dahulu.")
+            return
+        tahun_h, mode, hasil = self._hasil_kalbanding_terakhir
+        nama_default = f"perbandingan_kalender_{tahun_h}H.csv"
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV (Comma-separated)", "*.csv"), ("Semua File", "*.*")],
+            initialfile=nama_default,
+            title="Simpan Perbandingan Kalender")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                penulis = csv.writer(f)
+                penulis.writerow(["Bulan H", "Nama Bulan H", "Waktu Ijtimak (UTC)",
+                                   "Awal Bulan MABIMS", "Awal Bulan KHGT Muhammadiyah", "Beda"])
+                for b in hasil:
+                    penulis.writerow([
+                        b["bulan_h"], b["nama_bulan_h"],
+                        b["waktu_ijtimak"].strftime("%d-%m-%Y %H:%M"),
+                        b["tanggal_mabims"].strftime("%d-%m-%Y") if b["tanggal_mabims"] else "-",
+                        b["tanggal_khgt"].strftime("%d-%m-%Y") if b["tanggal_khgt"] else "-",
+                        "Ya" if b["beda"] else "Tidak",
+                    ])
+            messagebox.showinfo("Tersimpan", f"Perbandingan kalender disimpan ke:\n{path}")
+        except OSError as e:
+            messagebox.showerror("Gagal menyimpan", f"Tidak bisa menulis file CSV:\n{e}")
 
     # ---------------- Tab Waktu Sholat & Arah Kiblat ----------------
 
@@ -5685,6 +6344,15 @@ class HisabWinApp(tk.Tk):
                     self._tugas_peta_tersisa = max(0, getattr(self, "_tugas_peta_tersisa", 1) - 1)
                     if self._tugas_peta_tersisa == 0:
                         self.btn_proses.config(state="normal")
+
+                elif jenis == "kalbanding_ok":
+                    tahun_h, mode, hasil = payload
+                    self._tampilkan_kalbanding(tahun_h, mode, hasil)
+
+                elif jenis == "kalbanding_error":
+                    self._log(f"ERROR: {payload}")
+                    messagebox.showerror("Terjadi kesalahan", payload)
+                    self.btn_bandingkan_kalender.config(state="normal")
 
                 elif jenis == "jadwal_bulan_ok":
                     tahun, bulan, mode_hisab, jadwal = payload
