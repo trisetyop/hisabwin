@@ -97,3 +97,106 @@ jobs:
         path: |
           dist/HisabWin_Installer.exe
           dist/HisabWin_Uninstaller.exe
+
+  build-linux:
+    name: Build Linux Portable Tarball
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+        cache: 'pip'
+
+    - name: Install System Dependencies
+      run: |
+        # python3-tk WAJIB -- setup-python di Linux TIDAK menyertakan
+        # tkinter secara default (beda dgn installer python.org di Windows
+        # yg sudah termasuk tcl/tk), padahal PyInstaller butuh library
+        # tcl/tk ini terpasang di mesin BUILD supaya bisa ikut dibundel.
+        # libgl1 & libegl1 utk dependency runtime matplotlib/cartopy (GLX).
+        #
+        # libgeos-dev & libproj-dev: DEFENSIF/PENCEGAHAN, belum tentu semua
+        # dipakai -- shapely & cartopy SEHARUSNYA sudah bawa GEOS/PROJ
+        # ter-bundel di wheel manylinux (pip install biasa gak perlu ini).
+        # Tapi ditambahkan jaga2 kalau pip di runner ini kebetulan fallback
+        # ke source build utk salah satu paket (butuh header GEOS/PROJ
+        # buat kompilasi), atau cartopy butuh binary `proj`/data PROJ saat
+        # runtime yg gak ke-bundle penuh oleh wheel-nya. Belum pernah
+        # diverifikasi lewat run CI sungguhan -- kalau ternyata gak
+        # dibutuhkan, aman dihapus lagi (cuma nambah sedikit waktu install).
+        sudo apt-get update
+        sudo apt-get install -y python3-tk libgl1 libegl1 libgeos-dev libproj-dev proj-bin
+
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Pre-fetch Natural Earth shapefiles (110m) untuk bundel offline
+      run: |
+        # Sama persis alasannya dgn step yg sama di job Windows -- lihat
+        # komentar di sana. Sengaja diulang (bukan job terpisah/reusable)
+        # krn tiap runner OS py yang beda butuh cache cartopy sendiri2.
+        python -c "import cartopy.io.shapereader as s; [s.natural_earth(resolution='110m', category=c, name=n) for c, n in [('physical','land'),('physical','ocean'),('physical','coastline'),('cultural','admin_0_boundary_lines_land')]]"
+        DATA_DIR=$(python -c "import cartopy; print(cartopy.config['data_dir'])")
+        cp -r "$DATA_DIR" cartopy_data
+        echo "Shapefile Natural Earth di-cache ke: $DATA_DIR"
+        echo "Dibundel ke folder cartopy_data/ (dipakai oleh"
+        echo "cartopy.config['pre_existing_data_dir'] di hisabwin.py saat frozen)"
+
+    - name: Build HisabWin Executable
+      run: |
+        # CATATAN perbedaan dari build Windows:
+        # - --add-data pakai ':' (bukan ';') sbg pemisah src/dest di Linux/macOS
+        # - --icon (logo.ico) DIHILANGKAN -- PyInstaller Linux tidak mendukung
+        #   format .ico utk embed icon ke ELF binary (beda dari .exe Windows)
+        # - --splash (splash.png) DIHILANGKAN -- fitur splash screen PyInstaller
+        #   TIDAK didukung di Linux sama sekali (keterbatasan bootloader),
+        #   build akan gagal kalau tetap dipaksa disertakan
+        pyinstaller --noconfirm --windowed --onedir \
+          --name HisabWin \
+          --collect-data cartopy \
+          --collect-submodules shapely \
+          --exclude-module scipy \
+          --exclude-module pandas \
+          --exclude-module sqlalchemy \
+          --exclude-module psycopg2 \
+          --exclude-module greenlet \
+          --exclude-module numba \
+          --exclude-module llvmlite \
+          --exclude-module astropy \
+          --exclude-module astropy_iers_data \
+          --exclude-module erfa \
+          --exclude-module Cython \
+          --exclude-module yaml \
+          --exclude-module IPython \
+          --exclude-module jupyter \
+          --exclude-module notebook \
+          --add-data "logo.png:." \
+          --add-data "mainland_amerika_mask.npz:." \
+          --add-data "de421.bsp:." \
+          --add-data "cartopy_data:cartopy_data" \
+          hisabwin.py
+
+    - name: Package Portable Tarball
+      run: |
+        # Belum ada installer/uninstaller custom setara build_installer.ps1
+        # utk Linux (itu proyek terpisah, kira2 setara bikin .deb/AppImage).
+        # Utk sekarang dipaket sbg tarball portable -- ini cara standar yg
+        # direkomendasikan PyInstaller sendiri utk distribusi Linux: user
+        # tinggal extract & jalankan langsung dist/HisabWin/HisabWin, tanpa
+        # proses instalasi/registry apapun (mirip semangat --onedir Windows,
+        # cuma tanpa wrapper installer.exe).
+        cd dist
+        tar -czf HisabWin-linux-x86_64.tar.gz HisabWin
+
+    - name: Upload Linux Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: HisabWin-Linux-Portable
+        path: dist/HisabWin-linux-x86_64.tar.gz

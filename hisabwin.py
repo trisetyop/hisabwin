@@ -530,6 +530,144 @@ def _vektor_matahari_bulan_gast(waktu):
     return P_sun, P_moon, gast, float(np.ravel(beta)[0])
 
 
+def _vektor_matahari_bulan_gast_batch(waktu_dasar, menit_offset):
+    """Versi VEKTOR (numpy) dari _vektor_matahari_bulan_gast() -- hitung
+    SEKALIGUS utk banyak titik waktu (waktu_dasar + menit_offset[i] menit),
+    bukan for-loop Python manggil versi skalar berkali-kali.
+
+    Semua fungsi di bawah (julian_day, posisi_matahari, posisi_bulan,
+    nutasi_singkat, gast_derajat) SUDAH menerima array numpy -- jadi
+    perbaikannya murni di sisi PEMANGGIL: kumpulkan semua titik waktu jadi
+    satu array, panggil sekali, bukan panggil fungsi2 mahal itu (terutama
+    posisi_bulan, deret ELP2000 60-suku) satu-per-satu per titik.
+
+    delta_t_detik() SENGAJA dihitung SEKALI (pakai tahun/bulan waktu_dasar,
+    bukan per-titik) -- delta T cuma berubah berarti dalam skala TAHUN,
+    bukan jam/menit, jadi aman dipakai bersama utk seluruh jendela +-4 jam
+    yg dipakai fungsi2 pemindaian gerhana di file ini.
+
+    Return: P_sun (N,3 km), P_moon (N,3 km), gast (N, derajat), beta (N, derajat).
+    """
+    menit_offset = np.asarray(menit_offset, dtype=float)
+
+    dt_detik = float(delta_t_detik(waktu_dasar.year, waktu_dasar.month))
+    hari_dasar = (waktu_dasar.day + (waktu_dasar.hour + waktu_dasar.minute / 60.0
+                                      + waktu_dasar.second / 3600.0) / 24.0)
+    hari_arr = hari_dasar + menit_offset / 1440.0
+
+    jd_ut = julian_day(waktu_dasar.year, waktu_dasar.month, hari_arr)
+    T = (jd_ut + dt_detik / 86400.0 - 2451545.0) / 36525.0
+
+    ra_sun, dec_sun, _, R_au = posisi_matahari(T)
+    ra_moon, dec_moon, _, beta, delta_moon_km, _ = posisi_bulan(T)
+    dpsi, deps = nutasi_singkat(T)
+    eps0 = (23 + 26/60 + 21.448/3600
+            - (46.8150*T + 0.00059*T**2 - 0.001813*T**3) / 3600)
+    gast = np.asarray(gast_derajat(jd_ut, T, dpsi, eps0 + deps))
+
+    R_sun_km = np.asarray(R_au) * AU_KM
+    R_moon_km = np.asarray(delta_moon_km)
+    ra_s, dec_s = np.asarray(ra_sun), np.asarray(dec_sun)
+    ra_m, dec_m = np.asarray(ra_moon), np.asarray(dec_moon)
+
+    def _ke_kartesian_batch(ra, dec, r):
+        rar, decr = np.radians(ra), np.radians(dec)
+        return np.stack([r * np.cos(decr) * np.cos(rar),
+                          r * np.cos(decr) * np.sin(rar),
+                          r * np.sin(decr)], axis=-1)  # shape (N, 3)
+
+    P_sun = _ke_kartesian_batch(ra_s, dec_s, R_sun_km)
+    P_moon = _ke_kartesian_batch(ra_m, dec_m, R_moon_km)
+    return P_sun, P_moon, gast, np.asarray(beta)
+
+
+def _jarak_sumbu_ke_pusat_bumi_km_batch(P_sun, P_moon):
+    """Versi vektor dari _jarak_sumbu_ke_pusat_bumi_km() -- P_sun/P_moon
+    berbentuk (N, 3). Return array (N,) jarak (km)."""
+    d = P_moon - P_sun
+    return np.linalg.norm(np.cross(P_sun, d), axis=1) / np.linalg.norm(d, axis=1)
+
+
+def _titik_bayangan_ellipsoid_batch(P_sun, P_moon, gast):
+    """Versi vektor dari _titik_bayangan_ellipsoid(). P_sun/P_moon (N,3),
+    gast (N,). Return (kena_bumi (N, bool), lat_geodetik (N,), lon (N,),
+    gamma (N,)) -- nilai lat/lon TIDAK BERARTI di baris yang kena_bumi=False
+    (garis tidak menyentuh ellipsoid di titik itu), pemanggil wajib filter
+    pakai kena_bumi sebelum memakai lat/lon."""
+    d = P_moon - P_sun
+    Px, Py, Pz = P_sun[:, 0], P_sun[:, 1], P_sun[:, 2]
+    dx, dy, dz = d[:, 0], d[:, 1], d[:, 2]
+    A = (dx**2 + dy**2) / RE_EKUATOR_KM**2 + dz**2 / RE_KUTUB_KM**2
+    B = 2*(Px*dx + Py*dy) / RE_EKUATOR_KM**2 + 2*Pz*dz / RE_KUTUB_KM**2
+    C = (Px**2 + Py**2) / RE_EKUATOR_KM**2 + Pz**2 / RE_KUTUB_KM**2 - 1
+    diskriminan = B**2 - 4*A*C
+    kena_bumi = diskriminan >= 0
+
+    gamma = np.linalg.norm(np.cross(P_sun, d), axis=1) / np.linalg.norm(d, axis=1) / RE_EKUATOR_KM
+
+    # np.where dulu sebelum sqrt supaya gak keluar RuntimeWarning "invalid value"
+    # dari sqrt(negatif) di baris2 yg kena_bumi=False (hasilnya dibuang kok,
+    # tapi numpy tetap ngitung elementwise utk SELURUH array dulu).
+    disk_aman = np.where(kena_bumi, diskriminan, 0.0)
+    t_dekat = (-B - np.sqrt(disk_aman)) / (2*A)
+
+    titik = P_sun + t_dekat[:, None] * d
+    x, y, z = titik[:, 0], titik[:, 1], titik[:, 2]
+    lon_geosentris = np.degrees(np.arctan2(y, x)) % 360
+    lat_geosentris = np.arctan2(z, np.sqrt(x**2 + y**2))
+    lat_geodetik = np.degrees(np.arctan2(np.tan(lat_geosentris), 1 - _ECC2_BUMI))
+    lon_hit = ((lon_geosentris - gast + 180) % 360) - 180
+    return kena_bumi, lat_geodetik, lon_hit, gamma
+
+
+def _subtitik_sumbu_bayangan_batch(P_sun, P_moon, gast):
+    """Versi vektor dari _subtitik_sumbu_bayangan() -- SELALU menghasilkan
+    titik (proyeksi radial titik-terdekat-ke-pusat-Bumi kalau garis meleset
+    dari ellipsoid), beda dari _titik_bayangan_ellipsoid_batch yg butuh
+    garis betul2 tembus. P_sun/P_moon (N,3), gast (N,). Return
+    (lat_geodetik (N,), lon (N,))."""
+    d = P_moon - P_sun
+    Px, Py, Pz = P_sun[:, 0], P_sun[:, 1], P_sun[:, 2]
+    dx, dy, dz = d[:, 0], d[:, 1], d[:, 2]
+    A = (dx**2 + dy**2) / RE_EKUATOR_KM**2 + dz**2 / RE_KUTUB_KM**2
+    B = 2*(Px*dx + Py*dy) / RE_EKUATOR_KM**2 + 2*Pz*dz / RE_KUTUB_KM**2
+    C = (Px**2 + Py**2) / RE_EKUATOR_KM**2 + Pz**2 / RE_KUTUB_KM**2 - 1
+    diskriminan = B**2 - 4*A*C
+    kena_bumi = diskriminan >= 0
+
+    disk_aman = np.where(kena_bumi, diskriminan, 0.0)
+    t_dekat = (-B - np.sqrt(disk_aman)) / (2*A)
+
+    d_norm = np.linalg.norm(d, axis=1)
+    u = d / d_norm[:, None]
+    t_proyeksi = np.sum(-P_sun * u, axis=1)   # dot(-P_sun, u) per baris
+
+    t_pakai = np.where(kena_bumi, t_dekat, t_proyeksi)
+    titik = P_sun + t_pakai[:, None] * d
+    x, y, z = titik[:, 0], titik[:, 1], titik[:, 2]
+    lon_geosentris = np.degrees(np.arctan2(y, x)) % 360
+    lat_geosentris = np.arctan2(z, np.sqrt(x**2 + y**2))
+    lat_geodetik = np.degrees(np.arctan2(np.tan(lat_geosentris), 1 - _ECC2_BUMI))
+    lon_hit = ((lon_geosentris - gast + 180) % 360) - 180
+    return lat_geodetik, lon_hit
+
+
+def _radius_bayangan_km_batch(P_sun, P_moon):
+    """Versi vektor dari _radius_bayangan_km(). P_sun/P_moon (N,3).
+    Return (gamma_km (N,), r_umbra_km (N,), r_penumbra_km (N,))."""
+    d = P_moon - P_sun
+    d_sm = np.linalg.norm(d, axis=1)
+    u = d / d_sm[:, None]
+    gamma_km = np.linalg.norm(np.cross(P_sun, u), axis=1)
+
+    t_dari_matahari = np.sum(-P_sun * u, axis=1)
+    t_dari_bulan = t_dari_matahari - d_sm
+
+    r_umbra_km = R_BULAN_KM - t_dari_bulan * (R_MATAHARI_KM - R_BULAN_KM) / d_sm
+    r_penumbra_km = R_BULAN_KM + t_dari_bulan * (R_MATAHARI_KM + R_BULAN_KM) / d_sm
+    return gamma_km, r_umbra_km, r_penumbra_km
+
+
 def _jarak_sumbu_ke_pusat_bumi_km(waktu):
     """Jarak tegak lurus (km) dari pusat Bumi ke garis sumbu bayangan
     (garis Matahari-Bulan diperpanjang). Ini yang diminimalkan utk mencari
@@ -555,8 +693,8 @@ def _cari_waktu_greatest_eclipse(waktu_ijtimak, jendela_menit=180, langkah_menit
     rapat).
     """
     offset = np.arange(-jendela_menit, jendela_menit + langkah_menit, langkah_menit, dtype=float)
-    jarak = np.array([_jarak_sumbu_ke_pusat_bumi_km(waktu_ijtimak + timedelta(minutes=float(m)))
-                       for m in offset])
+    P_sun, P_moon, _, _ = _vektor_matahari_bulan_gast_batch(waktu_ijtimak, offset)
+    jarak = _jarak_sumbu_ke_pusat_bumi_km_batch(P_sun, P_moon)
     i = int(np.argmin(jarak))
 
     # interpolasi parabola pakai 3 titik (i-1, i, i+1) kalau bukan di ujung
@@ -2223,13 +2361,14 @@ def hitung_lintasan_gerhana_matahari(waktu_greatest_eclipse, jendela_menit=150, 
     tapi tetap dicek di sini utk keamanan).
     """
     menit = np.arange(-jendela_menit, jendela_menit + langkah_menit, langkah_menit, dtype=float)
+    P_sun, P_moon, gast, _ = _vektor_matahari_bulan_gast_batch(waktu_greatest_eclipse, menit)
+    kena_bumi, lat, lon, gamma = _titik_bayangan_ellipsoid_batch(P_sun, P_moon, gast)
+
     lintasan = []
-    for m in menit:
-        waktu = waktu_greatest_eclipse + timedelta(minutes=float(m))
-        hasil = _titik_bayangan_ellipsoid(waktu)
-        if hasil is not None:
-            lat, lon, gamma = hasil
-            lintasan.append({"waktu": waktu, "lat": lat, "lon": lon, "gamma": gamma})
+    for i in np.where(kena_bumi)[0]:
+        waktu = waktu_greatest_eclipse + timedelta(minutes=float(menit[i]))
+        lintasan.append({"waktu": waktu, "lat": float(lat[i]), "lon": float(lon[i]),
+                          "gamma": float(gamma[i])})
     return lintasan
 
 
@@ -2268,28 +2407,30 @@ def hitung_bayangan_penumbra_gerhana_matahari(waktu_greatest_eclipse, jendela_me
     """
     Re = RE_EKUATOR_KM
     menit = np.arange(-jendela_menit, jendela_menit + langkah_menit, langkah_menit, dtype=float)
+    P_sun, P_moon, gast, _ = _vektor_matahari_bulan_gast_batch(waktu_greatest_eclipse, menit)
+    gamma_km, _r_umbra_km, r_penumbra_km = _radius_bayangan_km_batch(P_sun, P_moon)
+    lat, lon = _subtitik_sumbu_bayangan_batch(P_sun, P_moon, gast)
+
+    menyentuh = gamma_km <= Re + r_penumbra_km
+
+    # radius efektif lingkaran iris di permukaan Bumi (km) -- vektor dari
+    # cabang if/else skalar aslinya: kalau sumbu di luar permukaan (gamma>Re),
+    # radius iris dihitung dari sudut potong kerucut vs bola; kalau sumbu
+    # sudah menembus permukaan, radius efektifnya ya radius penumbra itu
+    # sendiri. np.where dievaluasi elementwise utk SELURUH array dulu
+    # (termasuk baris yg nanti tidak dipakai krn menyentuh=False), makanya
+    # np.clip dipakai supaya arccos tidak NaN pada baris yg gamma_km sangat
+    # jauh (rasio di luar [-1,1]).
+    cos_theta = np.clip((gamma_km**2 + Re**2 - r_penumbra_km**2) / (2 * gamma_km * Re), -1.0, 1.0)
+    r_eff_di_luar = Re * np.arccos(cos_theta)
+    r_eff = np.where(gamma_km > Re, r_eff_di_luar, r_penumbra_km)
+
+    dipakai = menyentuh & (r_eff > 1.0)
     jejak = []
-    for m in menit:
-        waktu = waktu_greatest_eclipse + timedelta(minutes=float(m))
-        gamma_km, _r_umbra_km, r_penumbra_km = _radius_bayangan_km(waktu)
-        if gamma_km <= Re + r_penumbra_km:
-            lat, lon = _subtitik_sumbu_bayangan(waktu)
-            
-            # Hitung radius efektif pada permukaan Bumi (dalam km)
-            if gamma_km > Re:
-                # Sumbu bayangan berada di luar permukaan Bumi (di angkasa)
-                # Tentukan radius potongan kerucut di permukaan bumi (lingkaran iris)
-                cos_theta = (gamma_km**2 + Re**2 - r_penumbra_km**2) / (2 * gamma_km * Re)
-                cos_theta = np.clip(cos_theta, -1.0, 1.0)
-                theta = np.arccos(cos_theta)
-                r_eff = Re * theta
-            else:
-                # Sumbu bayangan menembus permukaan Bumi
-                r_eff = r_penumbra_km
-                
-            if r_eff > 1.0:
-                jejak.append({"waktu": waktu, "lat": lat, "lon": lon,
-                              "r_penumbra_km": r_eff})
+    for i in np.where(dipakai)[0]:
+        waktu = waktu_greatest_eclipse + timedelta(minutes=float(menit[i]))
+        jejak.append({"waktu": waktu, "lat": float(lat[i]), "lon": float(lon[i]),
+                      "r_penumbra_km": float(r_eff[i])})
     return jejak
 
 
@@ -2329,13 +2470,8 @@ def cari_kontak_gerhana_matahari(waktu_greatest_eclipse, jendela_menit=240, lang
     terjadi kalau kandidat sudah lolos filter beta di sana.
     """
     menit = np.arange(-jendela_menit, jendela_menit + langkah_menit, langkah_menit, dtype=float)
-    waktu_arr = [waktu_greatest_eclipse + timedelta(minutes=float(m)) for m in menit]
-
-    gamma = np.empty(len(menit))
-    r_umbra = np.empty(len(menit))
-    r_penumbra = np.empty(len(menit))
-    for i, w in enumerate(waktu_arr):
-        gamma[i], r_umbra[i], r_penumbra[i] = _radius_bayangan_km(w)
+    P_sun, P_moon, _, _ = _vektor_matahari_bulan_gast_batch(waktu_greatest_eclipse, menit)
+    gamma, r_umbra, r_penumbra = _radius_bayangan_km_batch(P_sun, P_moon)
 
     Re = RE_EKUATOR_KM   # pendekatan BOLA (cukup utk label kontak menit;
                           # lintasan detail di hitung_lintasan_gerhana_matahari
@@ -2359,8 +2495,10 @@ def cari_kontak_gerhana_matahari(waktu_greatest_eclipse, jendela_menit=240, lang
             m = menit[i0] + frac * (menit[i1] - menit[i0])
             return waktu_greatest_eclipse + timedelta(minutes=float(m))
 
-        t_masuk = _interp(i_masuk - 1, i_masuk) if i_masuk > 0 else waktu_arr[i_masuk]
-        t_keluar = _interp(i_keluar, i_keluar + 1) if i_keluar < len(menit) - 1 else waktu_arr[i_keluar]
+        t_masuk = _interp(i_masuk - 1, i_masuk) if i_masuk > 0 else \
+            waktu_greatest_eclipse + timedelta(minutes=float(menit[i_masuk]))
+        t_keluar = _interp(i_keluar, i_keluar + 1) if i_keluar < len(menit) - 1 else \
+            waktu_greatest_eclipse + timedelta(minutes=float(menit[i_keluar]))
         return t_masuk, t_keluar
 
     p1, p4 = _kontak_masuk_keluar(r_penumbra)
