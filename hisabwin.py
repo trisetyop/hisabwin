@@ -488,6 +488,43 @@ def cari_ijtimak_tahun_ringan(tahun):
     return hasil
 
 
+def cari_istiqbal_tahun_ringan(tahun):
+    """Mencari semua waktu ISTIQBAL (oposisi/purnama, selisih longitude
+    Bulan-Matahari = 180 derajat) sepanjang tahun -- basis waktu gerhana
+    BULAN, sama seperti ijtimak basis gerhana MATAHARI. Struktur & metode
+    PERSIS sama dgn cari_ijtimak_tahun_ringan(), cuma titik potongnya
+    digeser 180 derajat (bukan cari selisih==0, tapi selisih==180)."""
+    t0 = datetime(tahun, 1, 1)
+    total_jam = 366 * 24 + 48
+    jam_arr = np.arange(0, total_jam, 6.0)
+    waktu_arr = [t0 + timedelta(hours=float(h)) for h in jam_arr]
+
+    tahun_a = np.array([w.year for w in waktu_arr])
+    bulan_a = np.array([w.month for w in waktu_arr])
+    hari_a = np.array([w.day + (w.hour + w.minute/60.0)/24.0 for w in waktu_arr])
+
+    jd_ut = julian_day(tahun_a, bulan_a, hari_a)
+    dt_arr = delta_t_detik(tahun_a, bulan_a)
+    T = (jd_ut + dt_arr / 86400.0 - 2451545.0) / 36525.0
+
+    _, _, lam_sun, _ = posisi_matahari(T)
+    _, _, lam_moon, _, _, _ = posisi_bulan(T)
+
+    # beda dgn ijtimak: selisih digeser 180 derajat dulu sblm di-wrap ke
+    # -180..180, supaya titik nol yg dicari jadi pas oposisi (bukan konjungsi)
+    selisih = (lam_moon - lam_sun) % 360 - 180
+
+    hasil = []
+    naik = np.where((selisih[:-1] < 0) & (selisih[1:] >= 0))[0]
+    for i in naik:
+        frac = -selisih[i] / (selisih[i + 1] - selisih[i])
+        jam_c = jam_arr[i] + frac * (jam_arr[i + 1] - jam_arr[i])
+        waktu_istiqbal = t0 + timedelta(hours=float(jam_c))
+        if waktu_istiqbal.year == tahun:
+            hasil.append(waktu_istiqbal)
+    return hasil
+
+
 RE_EKUATOR_KM = 6378.137   # WGS84
 RE_KUTUB_KM = 6356.752
 _ECC2_BUMI = 1 - (RE_KUTUB_KM / RE_EKUATOR_KM) ** 2
@@ -642,8 +679,18 @@ def _subtitik_sumbu_bayangan_batch(P_sun, P_moon, gast):
     u = d / d_norm[:, None]
     t_proyeksi = np.sum(-P_sun * u, axis=1)   # dot(-P_sun, u) per baris
 
+    # PENTING: t_dekat adalah pecahan SEPANJANG d (satuannya "fraksi", t=1
+    # persis di titik Bulan) -- makanya dipasangkan dengan d. t_proyeksi
+    # sebaliknya dihitung lewat dot product dengan u (VEKTOR SATUAN), jadi
+    # satuannya km, bukan fraksi -- harus dipasangkan dengan u juga, BUKAN d
+    # (memasangkannya dengan d salah total: menyisakan skala sisa sebesar
+    # |d| ~ 1 SA, membuat titik hasil melenceng liar, arahnya condong ke
+    # arah d itu sendiri yang justru mendekati ANTIPODA dari lokasi
+    # gerhana sesungguhnya -- lihat versi skalar _subtitik_sumbu_bayangan()
+    # di atas sbg acuan yang benar: kasus meleset memakai `P_sun + t * u`).
     t_pakai = np.where(kena_bumi, t_dekat, t_proyeksi)
-    titik = P_sun + t_pakai[:, None] * d
+    vektor_arah = np.where(kena_bumi[:, None], d, u)
+    titik = P_sun + t_pakai[:, None] * vektor_arah
     x, y, z = titik[:, 0], titik[:, 1], titik[:, 2]
     lon_geosentris = np.degrees(np.arctan2(y, x)) % 360
     lat_geosentris = np.arctan2(z, np.sqrt(x**2 + y**2))
@@ -668,6 +715,35 @@ def _radius_bayangan_km_batch(P_sun, P_moon):
     return gamma_km, r_umbra_km, r_penumbra_km
 
 
+def _jarak_bulan_ke_sumbu_bayangan_bumi_km_batch(P_sun, P_moon):
+    """Versi GERHANA BULAN dari _radius_bayangan_km_batch(): geometri kerucut
+    bayangan yg sama persis (segitiga sebangun Matahari-benda), TAPI dgn
+    peran benda pengoklusi ditukar -- di gerhana Matahari, Bulan yg
+    mengoklusi & bayangannya dievaluasi di permukaan Bumi; di gerhana Bulan,
+    BUMI yg mengoklusi (radius RE_EKUATOR_KM, bukan R_BULAN_KM) & bayangannya
+    dievaluasi di POSISI BULAN (bukan di permukaan sesuatu).
+
+    Sumbu bayangan Bumi = garis dari Matahari lewat PUSAT Bumi diperpanjang
+    ke arah antisolar (krn geosentris, P_bumi=titik asal, jadi arahnya
+    tinggal -P_sun ternormalisasi). P_sun/P_moon (N,3) km.
+
+    Return: (jarak_bulan_ke_sumbu_km (N,), r_umbra_km (N,), r_penumbra_km (N,))
+    -- r_umbra/r_penumbra di sini itu radius KERUCUT BAYANGAN BUMI di
+    JARAK BULAN saat itu (beda dari makna serupa di fungsi gerhana Matahari,
+    yg radiusnya kerucut bayangan BULAN)."""
+    Re = RE_EKUATOR_KM
+    d_se = np.linalg.norm(P_sun, axis=1)          # jarak Matahari-Bumi
+    u = -P_sun / d_se[:, None]                     # arah antisolar (sumbu bayangan Bumi)
+
+    t_dari_bumi = np.sum(P_moon * u, axis=1)        # proyeksi posisi Bulan ke sumbu
+    titik_sumbu = t_dari_bumi[:, None] * u
+    jarak_bulan_ke_sumbu = np.linalg.norm(P_moon - titik_sumbu, axis=1)
+
+    r_umbra_km = Re - t_dari_bumi * (R_MATAHARI_KM - Re) / d_se
+    r_penumbra_km = Re + t_dari_bumi * (R_MATAHARI_KM + Re) / d_se
+    return jarak_bulan_ke_sumbu, r_umbra_km, r_penumbra_km
+
+
 def _jarak_sumbu_ke_pusat_bumi_km(waktu):
     """Jarak tegak lurus (km) dari pusat Bumi ke garis sumbu bayangan
     (garis Matahari-Bulan diperpanjang). Ini yang diminimalkan utk mencari
@@ -676,6 +752,28 @@ def _jarak_sumbu_ke_pusat_bumi_km(waktu):
     P_sun, P_moon, _, _ = _vektor_matahari_bulan_gast(waktu)
     d = P_moon - P_sun
     return np.linalg.norm(np.cross(P_sun, d)) / np.linalg.norm(d)
+
+
+def _cari_waktu_greatest_lunar_eclipse(waktu_istiqbal, jendela_menit=180, langkah_menit=3):
+    """Versi GERHANA BULAN dari _cari_waktu_greatest_eclipse() -- refine
+    waktu istiqbal (oposisi geosentris) ke waktu GREATEST ECLIPSE
+    sesungguhnya (saat Bulan paling dekat ke sumbu bayangan Bumi). Struktur
+    & alasan PERSIS sama dgn versi Matahari, cuma jarak yg diminimalkan
+    beda (jarak Bulan-ke-sumbu, bukan jarak sumbu-ke-pusat-Bumi)."""
+    offset = np.arange(-jendela_menit, jendela_menit + langkah_menit, langkah_menit, dtype=float)
+    P_sun, P_moon, _, _ = _vektor_matahari_bulan_gast_batch(waktu_istiqbal, offset)
+    jarak, _, _ = _jarak_bulan_ke_sumbu_bayangan_bumi_km_batch(P_sun, P_moon)
+    i = int(np.argmin(jarak))
+
+    if 0 < i < len(offset) - 1:
+        y0, y1, y2 = jarak[i - 1], jarak[i], jarak[i + 1]
+        penyebut = (y0 - 2*y1 + y2)
+        koreksi = 0.5 * (y0 - y2) / penyebut if penyebut != 0 else 0.0
+        offset_halus = offset[i] + koreksi * langkah_menit
+    else:
+        offset_halus = offset[i]
+
+    return waktu_istiqbal + timedelta(minutes=float(offset_halus))
 
 
 def _cari_waktu_greatest_eclipse(waktu_ijtimak, jendela_menit=180, langkah_menit=3):
@@ -876,6 +974,78 @@ def cari_gerhana_matahari_kandidat_ringan(tahun, ambang_beta_derajat=1.8):
         hasil.append(entri)
 
     return hasil
+
+
+def cari_gerhana_bulan_kandidat_ringan(tahun, ambang_beta_derajat=1.5):
+    """Deteksi KANDIDAT gerhana BULAN sepanjang tahun, dari waktu2 istiqbal
+    (oposisi/purnama). Struktur & filosofi PERSIS sama dgn
+    cari_gerhana_matahari_kandidat_ringan(), cuma basis waktunya istiqbal
+    (bukan ijtimak) dan geometrinya "Bulan menembus bayangan Bumi" (bukan
+    "bayangan Bulan menyentuh Bumi").
+
+    1) FILTER KANDIDAT: |beta| Bulan pas istiqbal < ambang_beta_derajat.
+       Ambang gerhana Bulan (~1.0-1.5 derajat) sedikit beda dari gerhana
+       Matahari (~1.5-1.8 derajat) krn geometrinya beda (radius bayangan
+       Bumi vs radius piringan Bulan) -- 1.5 derajat dipilih cukup longgar
+       spy tidak ada gerhana penumbral tipis yg kelewat (lebih baik
+       false-positive yg disaring lewat magnitudo drpd kelewat kandidat asli).
+
+    2) REFINE WAKTU: cari waktu GREATEST ECLIPSE sesungguhnya lewat
+       _cari_waktu_greatest_lunar_eclipse() -- minimalkan jarak Bulan ke
+       sumbu bayangan Bumi (bukan cuma pas istiqbal).
+
+    3) KLASIFIKASI JENIS & MAGNITUDO: bandingkan jarak Bulan-ke-sumbu thd
+       radius umbra/penumbra Bumi di jarak Bulan saat itu (ditambah/dikurang
+       radius fisik Bulan sendiri, R_BULAN_KM, krn Bulan bukan titik).
+       Magnitudo umbral >= 1.0 berarti TOTAL (seluruh piringan Bulan masuk
+       umbra), 0 < magnitudo umbral < 1.0 berarti SEBAGIAN (umbral), kalau
+       magnitudo umbral <= 0 tapi magnitudo penumbral > 0 berarti
+       PENUMBRAL SAJA (jauh lebih tipis/kurang kentara scr visual).
+
+    Return: list of dict, satu per kandidat, dengan keys:
+      'waktu_istiqbal', 'waktu_greatest_eclipse' (None kalau tdk lolos
+      filter beta), 'beta', 'jenis' ('total'/'sebagian'/'penumbral'/
+      'tidak ada gerhana'), 'magnitudo_umbral', 'magnitudo_penumbral'
+      (None kalau tdk lolos filter beta).
+    """
+    istiqbal_list = cari_istiqbal_tahun_ringan(tahun)
+    hasil = []
+
+    for waktu_istiqbal in istiqbal_list:
+        _, _, _, beta = _vektor_matahari_bulan_gast(waktu_istiqbal)
+
+        entri = {"waktu_istiqbal": waktu_istiqbal, "waktu_greatest_eclipse": None,
+                 "beta": beta, "jenis": "tidak ada gerhana",
+                 "magnitudo_umbral": None, "magnitudo_penumbral": None}
+
+        if abs(beta) < ambang_beta_derajat:
+            waktu_greatest = _cari_waktu_greatest_lunar_eclipse(waktu_istiqbal)
+            entri["waktu_greatest_eclipse"] = waktu_greatest
+
+            P_sun, P_moon, _, _ = _vektor_matahari_bulan_gast_batch(waktu_greatest, np.array([0.0]))
+            jarak, r_umbra, r_penumbra = _jarak_bulan_ke_sumbu_bayangan_bumi_km_batch(P_sun, P_moon)
+            jarak, r_umbra, r_penumbra = float(jarak[0]), float(r_umbra[0]), float(r_penumbra[0])
+
+            mag_umbral = (r_umbra + R_BULAN_KM - jarak) / (2 * R_BULAN_KM)
+            mag_penumbral = (r_penumbra + R_BULAN_KM - jarak) / (2 * R_BULAN_KM)
+            entri["magnitudo_umbral"] = mag_umbral
+            entri["magnitudo_penumbral"] = mag_penumbral
+
+            if mag_umbral >= 1.0:
+                entri["jenis"] = "total"
+            elif mag_umbral > 0.0:
+                entri["jenis"] = "sebagian"
+            elif mag_penumbral > 0.0:
+                entri["jenis"] = "penumbral"
+            # else: tetap "tidak ada gerhana" (lolos filter beta kasar tapi
+            # geometri sebenarnya ternyata meleset -- mirip kasus solar yg
+            # kena_bumi=False, wajar terjadi krn ambang beta sengaja longgar)
+
+        hasil.append(entri)
+
+    return hasil
+
+
 def _alt_matahari_saja(tanggal, jam_utc_flat, lat_flat, lon_flat):
     """Versi RINGAN dari _altaz_matahari_bulan() yang CUMA menghitung altitude
     Matahari -- sengaja TIDAK memanggil posisi_bulan() (deret ELP2000, ~60
@@ -2508,6 +2678,69 @@ def cari_kontak_gerhana_matahari(waktu_greatest_eclipse, jendela_menit=240, lang
     return {"P1": p1, "U1": u1, "U2": u2, "U3": u3, "U4": u4, "P4": p4}
 
 
+def cari_kontak_gerhana_bulan(waktu_greatest_eclipse, jendela_menit=240, langkah_menit=2):
+    """Versi GERHANA BULAN dari cari_kontak_gerhana_matahari() -- 7 waktu
+    kontak standar (istilah baku NASA/BMKG utk gerhana Bulan):
+
+      P1 : Bulan PERTAMA menyentuh penumbra (gerhana sebagian mulai kentara
+           scr visual samar -- P1 sendiri nyaris tak terlihat mata telanjang)
+      U1 : Bulan PERTAMA menyentuh umbra (gerhana sebagian mulai jelas kentara)
+      U2 : Bulan SELURUHNYA masuk umbra (gerhana TOTAL mulai) -- None kalau
+           magnitudo umbral < 1.0 (gerhana cuma sebagian/penumbral, tidak
+           pernah total)
+      Greatest : titik tengah, dari _cari_waktu_greatest_lunar_eclipse()
+           (TIDAK dihitung ulang di sini, dipakai sbg pusat jendela)
+      U3 : Bulan mulai keluar dari umbra (akhir totalitas)
+      U4 : Bulan seluruhnya keluar umbra (akhir gerhana sebagian)
+      P4 : Bulan seluruhnya keluar penumbra (akhir gerhana sebagian2 juga)
+
+    Metode: PERSIS sama dgn cari_kontak_gerhana_matahari() -- sampling
+    jarak Bulan-ke-sumbu tiap langkah_menit di +-jendela_menit sekitar
+    greatest eclipse, titik potong dicari lewat interpolasi linear.
+
+    Return: dict {'P1','U1','U2','Greatest','U3','U4','P4'} -> datetime UTC
+    atau None. None utk U2/U3 brarti gerhana TIDAK total (cuma sebagian/
+    penumbral -- lihat 'jenis' di cari_gerhana_bulan_kandidat_ringan). None
+    utk U1/U4 brarti gerhana PENUMBRAL SAJA (Bulan tidak pernah menyentuh
+    umbra sama sekali).
+    """
+    menit = np.arange(-jendela_menit, jendela_menit + langkah_menit, langkah_menit, dtype=float)
+    P_sun, P_moon, _, _ = _vektor_matahari_bulan_gast_batch(waktu_greatest_eclipse, menit)
+    jarak, r_umbra, r_penumbra = _jarak_bulan_ke_sumbu_bayangan_bumi_km_batch(P_sun, P_moon)
+
+    def _kontak_masuk_keluar(radius_km):
+        """radius_km: array radius (r_penumbra+R_BULAN_KM, r_umbra+R_BULAN_KM,
+        ATAU r_umbra-R_BULAN_KM) sepanjang menit. Return (t_masuk, t_keluar)
+        hasil interpolasi linear titik potong jarak - radius_km == 0, atau
+        (None, None) kalau Bulan tidak pernah "di dalam" radius itu di
+        seluruh jendela (mis. gerhana tidak sampai total -> None utk U2/U3)."""
+        selisih = jarak - radius_km
+        di_dalam = selisih <= 0
+        if not np.any(di_dalam):
+            return None, None
+        idx = np.where(di_dalam)[0]
+        i_masuk, i_keluar = int(idx[0]), int(idx[-1])
+
+        def _interp(i0, i1):
+            y0, y1 = selisih[i0], selisih[i1]
+            frac = 0.0 if y1 == y0 else y0 / (y0 - y1)
+            m = menit[i0] + frac * (menit[i1] - menit[i0])
+            return waktu_greatest_eclipse + timedelta(minutes=float(m))
+
+        t_masuk = _interp(i_masuk - 1, i_masuk) if i_masuk > 0 else \
+            waktu_greatest_eclipse + timedelta(minutes=float(menit[i_masuk]))
+        t_keluar = _interp(i_keluar, i_keluar + 1) if i_keluar < len(menit) - 1 else \
+            waktu_greatest_eclipse + timedelta(minutes=float(menit[i_keluar]))
+        return t_masuk, t_keluar
+
+    p1, p4 = _kontak_masuk_keluar(r_penumbra + R_BULAN_KM)
+    u1, u4 = _kontak_masuk_keluar(r_umbra + R_BULAN_KM)
+    u2, u3 = _kontak_masuk_keluar(r_umbra - R_BULAN_KM)   # negatif kalau r_umbra<R_BULAN_KM -> otomatis None,None (benar: tak pernah total)
+
+    return {"P1": p1, "U1": u1, "U2": u2, "Greatest": waktu_greatest_eclipse,
+            "U3": u3, "U4": u4, "P4": p4}
+
+
 def buat_figure_lintasan_gerhana_matahari(kandidat_gerhana, jendela_menit=150, langkah_menit=2):
     """Peta dunia gerhana matahari, dari satu entri kandidat hasil
     cari_gerhana_matahari_kandidat_ringan(). Style peta konsisten dgn
@@ -2677,6 +2910,133 @@ def buat_figure_lintasan_gerhana_matahari(kandidat_gerhana, jendela_menit=150, l
                       edgecolor="gray", linewidth=0.6))
 
     return fig
+
+
+def _subtitik_bulan(waktu):
+    """Titik di Bumi tempat Bulan tepat di zenith (posisi pengamat terbaik
+    utk melihat gerhana Bulan pas waktu itu). KONSEPNYA BEDA dari
+    _subtitik_sumbu_bayangan() (dipakai gerhana Matahari -- itu titik di
+    SUMBU BAYANGAN Matahari-Bulan): di sini murni "Bulan ada tepat di atas
+    kepala", dipakai sbg pusat lingkaran wilayah visibilitas gerhana Bulan
+    (yg SELALU meliputi hampir separuh Bumi -- beda total dari gerhana
+    Matahari yg jalurnya sempit)."""
+    _, P_moon, gast, _ = _vektor_matahari_bulan_gast(waktu)
+    x, y, z = P_moon
+    lat = np.degrees(np.arcsin(z / np.linalg.norm(P_moon)))
+    lon = ((np.degrees(np.arctan2(y, x)) - gast + 180) % 360) - 180
+    return float(lat), float(lon)
+
+
+def buat_figure_visibilitas_gerhana_bulan(kandidat_gerhana, kontak=None):
+    """Peta dunia wilayah visibilitas gerhana Bulan. KONSEP PETANYA BEDA
+    TOTAL dari gerhana Matahari (yg jalur totalitasnya sempit, cuma
+    beberapa ratus km lebar): gerhana Bulan SELALU terlihat SERENTAK dari
+    SELURUH belahan Bumi yg sedang malam & Bulan-nya di atas horizon --
+    jadi yg digambar bukan "lintasan", tapi WILAYAH (hampir separuh Bumi).
+
+    Dua lapis lingkaran horizon (radius geodesic 90 derajat dari
+    _subtitik_bulan(), pakai cartopy.geodesic sama seperti arsiran
+    penumbra di buat_figure_lintasan_gerhana_matahari):
+      1) Lingkaran P1 & P4 (garis putus2) -- batas horizon TERLUAS,
+         wilayah GABUNGAN keduanya adalah tempat yg BISA melihat SEBAGIAN
+         dari gerhana (meski cuma sekilas saat Bulan terbit/terbenam di
+         tengah proses gerhana).
+      2) Lingkaran greatest eclipse (arsiran solid) -- wilayah UTAMA,
+         tempat Bulan di atas horizon PAS puncak gerhana (kandidat lokasi
+         terbaik utk mengamati momen paling gelap/paling tertutup).
+
+    Parameter kandidat_gerhana: satu entri dari
+    cari_gerhana_bulan_kandidat_ringan() dgn jenis != 'tidak ada gerhana'.
+    kontak: dict hasil cari_kontak_gerhana_bulan(), dihitung otomatis kalau
+    tidak diberikan.
+    """
+    if kandidat_gerhana.get("jenis", "tidak ada gerhana") == "tidak ada gerhana":
+        raise ValueError("Kandidat ini tidak menghasilkan gerhana Bulan sama sekali "
+                          "(jenis='tidak ada gerhana') -- tidak ada apa2 utk digambar.")
+
+    waktu_greatest = kandidat_gerhana["waktu_greatest_eclipse"]
+    if kontak is None:
+        kontak = cari_kontak_gerhana_bulan(waktu_greatest)
+
+    import cartopy.geodesic as cgeo
+    geodesic = cgeo.Geodesic()
+    RE_RATA_RATA_M = 6371000.0
+    RADIUS_HORIZON_M = (np.pi / 2) * RE_RATA_RATA_M   # seperempat keliling Bumi = batas horizon
+
+    def _lingkaran_horizon(waktu):
+        lat, lon = _subtitik_bulan(waktu)
+        titik = geodesic.circle(lon=lon, lat=lat, radius=RADIUS_HORIZON_M, n_samples=120)
+        return shapely.Polygon(titik), lat, lon
+
+    fig = plt.figure(figsize=(13, 7.2), constrained_layout=True)
+    ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
+    ax.set_extent([-180, 180, -90, 90], crs=ccrs.PlateCarree())
+    ax.add_feature(cfeature.LAND.with_scale("110m"), facecolor="lightgray")
+    ax.add_feature(cfeature.OCEAN.with_scale("110m"), facecolor="lightblue")
+    ax.add_feature(cfeature.BORDERS.with_scale("110m"), linewidth=0.4, edgecolor="dimgray")
+    ax.coastlines(resolution="110m", linewidth=0.5)
+
+    # ---- Lapis 1: batas horizon terluar (P1 & P4, kalau ada) ----
+    for t in (kontak.get("P1"), kontak.get("P4")):
+        if t is not None:
+            poly, _, _ = _lingkaran_horizon(t)
+            ax.add_geometries([poly], crs=ccrs.Geodetic(), facecolor="none",
+                              edgecolor="darkorange", linewidth=1.3, linestyle="--",
+                              alpha=0.85, zorder=3)
+
+    # ---- Lapis 2: wilayah utama, greatest eclipse ----
+    poly_greatest, lat_g, lon_g = _lingkaran_horizon(waktu_greatest)
+    ax.add_geometries([poly_greatest], crs=ccrs.Geodetic(), facecolor="navy",
+                      edgecolor="darkblue", linewidth=1.5, alpha=0.25, zorder=2)
+
+    ax.plot(lon_g, lat_g, marker="*", color="gold", markeredgecolor="black",
+            markeredgewidth=0.8, markersize=17, transform=ccrs.PlateCarree(), zorder=6)
+
+    gl = ax.gridlines(draw_labels=True, linewidth=0.3, alpha=0.5)
+    gl.top_labels = False
+    gl.right_labels = False
+
+    judul_jenis = {"total": "TOTAL", "sebagian": "SEBAGIAN",
+                   "penumbral": "PENUMBRAL"}.get(kandidat_gerhana["jenis"], kandidat_gerhana["jenis"])
+    ax.set_title(f"Visibilitas Gerhana Bulan {judul_jenis} — {waktu_greatest.strftime('%d %B %Y')}\n"
+                 f"Greatest eclipse: {waktu_greatest.strftime('%H:%M:%S')} UTC   "
+                 f"Magnitudo umbral: {kandidat_gerhana['magnitudo_umbral']:.3f}",
+                 fontsize=12, pad=14)
+
+    from matplotlib.patches import Patch
+    from matplotlib.lines import Line2D
+    handles = [
+        Patch(facecolor="navy", edgecolor="darkblue", alpha=0.35,
+              label="Bulan di atas horizon saat greatest eclipse"),
+        Line2D([0], [0], color="darkorange", linestyle="--", linewidth=1.3,
+               label="Batas horizon P1/P4 (sekilas saat Bulan terbit/terbenam)"),
+        Line2D([0], [0], marker="*", color="gold", markeredgecolor="black",
+               markersize=12, linestyle="None", label="Titik Bulan tepat di zenith"),
+    ]
+    ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(1.01, 1.0),
+              borderaxespad=0, fontsize=9, framealpha=0.9)
+
+    def _fmt(t):
+        return t.strftime("%H:%M:%S") + " UTC" if t is not None else "— (tidak terjadi)"
+
+    baris_info = [
+        f"P1 (awal sebagian/penumbra) : {_fmt(kontak['P1'])}",
+        f"U1 (awal umbra)             : {_fmt(kontak['U1'])}",
+        f"U2 (awal TOTAL)             : {_fmt(kontak['U2'])}",
+        f"Greatest eclipse            : {waktu_greatest.strftime('%H:%M:%S')} UTC",
+        f"U3 (akhir TOTAL)            : {_fmt(kontak['U3'])}",
+        f"U4 (akhir umbra)            : {_fmt(kontak['U4'])}",
+        f"P4 (akhir sebagian/penumbra): {_fmt(kontak['P4'])}",
+    ]
+    teks_kontak = "Kontak Umum Gerhana Bulan (UTC)\n" + "\n".join(baris_info)
+    ax.text(1.01, 0.0, teks_kontak, transform=ax.transAxes,
+            fontsize=8, family="monospace", va="bottom", ha="left",
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.85,
+                      edgecolor="gray", linewidth=0.6))
+
+    return fig
+
+
 #  Koordinat diisi manual (mode Desimal ATAU DMS/Derajat-Menit-Detik),
 #  lengkap dengan pilihan zona waktu. Lokasi terakhir yang dipakai
 #  disimpan otomatis ke file teks lokal (lihat _path_file_lokasi),
@@ -3491,6 +3851,11 @@ class HisabWinApp(tk.Tk):
         # dengan baris di self.listbox_gerhana.
         self.kandidat_gerhana = []
 
+        # Jenis gerhana yang terakhir kali dicari ("matahari" atau "bulan")
+        # -- dipakai supaya _on_tampilkan_gerhana tahu figure-builder mana
+        # yang harus dipanggil utk kandidat yang sedang dipilih di listbox.
+        self._jenis_gerhana_terakhir = "matahari"
+
         # Flag: apakah perlu otomatis mencari ulang ijtimak setelah ephemeris JPL
         # selesai dimuat (dipicu saat user ganti mode padahal sudah pernah mencari).
         self._auto_cari_pending = False
@@ -4180,19 +4545,30 @@ class HisabWinApp(tk.Tk):
             wraplength=280,
         ).pack(fill="x", padx=10, pady=(4, 6))
 
-        # --- Langkah 1: tahun ---
-        frame1 = ttk.LabelFrame(body, text="1. Pilih Tahun")
+        # --- Langkah 1: jenis & tahun ---
+        frame1 = ttk.LabelFrame(body, text="1. Pilih Jenis & Tahun")
         frame1.pack(fill="x", **pad)
 
-        ttk.Label(frame1, text="Tahun Masehi:").grid(row=0, column=0, padx=6, pady=6)
+        # Pilihan jenis gerhana yang dicari -- menentukan fungsi pencarian
+        # (cari_gerhana_matahari_kandidat_ringan vs cari_gerhana_bulan_kandidat_ringan)
+        # dan figure-builder mana yang dipakai nanti di _on_tampilkan_gerhana.
+        self.var_jenis_gerhana = tk.StringVar(value="matahari")
+        frame_jenis = ttk.Frame(frame1)
+        frame_jenis.grid(row=0, column=0, columnspan=3, padx=6, pady=(6, 0), sticky="w")
+        ttk.Radiobutton(frame_jenis, text="☀️ Matahari", value="matahari",
+                         variable=self.var_jenis_gerhana).pack(side="left", padx=(0, 12))
+        ttk.Radiobutton(frame_jenis, text="🌑 Bulan", value="bulan",
+                         variable=self.var_jenis_gerhana).pack(side="left")
+
+        ttk.Label(frame1, text="Tahun Masehi:").grid(row=1, column=0, padx=6, pady=6)
         self.entry_tahun_gerhana = ttk.Entry(frame1, width=10)
         self.entry_tahun_gerhana.insert(0, str(datetime.now().year))
-        self.entry_tahun_gerhana.grid(row=0, column=1, padx=6, pady=6)
+        self.entry_tahun_gerhana.grid(row=1, column=1, padx=6, pady=6)
 
         self.btn_cari_gerhana = ttk.Button(
             frame1, text="Cari Gerhana", command=self._on_cari_gerhana,
             style="Aksen.TButton")
-        self.btn_cari_gerhana.grid(row=0, column=2, padx=6, pady=6)
+        self.btn_cari_gerhana.grid(row=1, column=2, padx=6, pady=6)
 
         # --- Langkah 2: pilih kandidat ---
         frame2 = ttk.LabelFrame(body, text="2. Pilih Gerhana")
@@ -4232,21 +4608,27 @@ class HisabWinApp(tk.Tk):
             return
 
         tahun = int(teks_tahun)
+        jenis = self.var_jenis_gerhana.get()  # "matahari" atau "bulan"
         self.btn_cari_gerhana.config(state="disabled")
         self.btn_tampilkan_gerhana.config(state="disabled")
         self.listbox_gerhana.delete(0, "end")
         self.kandidat_gerhana = []
-        self._log(f"Mencari kandidat gerhana matahari tahun {tahun}...")
+        label_jenis = "matahari" if jenis == "matahari" else "bulan"
+        self._log(f"Mencari kandidat gerhana {label_jenis} tahun {tahun}...")
 
-        threading.Thread(target=self._cari_gerhana_thread, args=(tahun,), daemon=True).start()
+        threading.Thread(target=self._cari_gerhana_thread, args=(tahun, jenis), daemon=True).start()
 
-    def _cari_gerhana_thread(self, tahun):
+    def _cari_gerhana_thread(self, tahun, jenis="matahari"):
         try:
             # Fungsi astronomi (sudah ada, tidak diubah) -- selalu mode Ringan
             # (VSOP87+ELP2000-82B), makanya tidak butuh self.ts/self.eph sama
-            # sekali di jalur gerhana ini.
-            kandidat_mentah = cari_gerhana_matahari_kandidat_ringan(tahun)
-            self.antrian.put(("gerhana_ok", kandidat_mentah))
+            # sekali di jalur gerhana ini. jenis menentukan fungsi mana yang
+            # dipanggil: gerhana Matahari (ijtimak) atau gerhana Bulan (istiqbal).
+            if jenis == "bulan":
+                kandidat_mentah = cari_gerhana_bulan_kandidat_ringan(tahun)
+            else:
+                kandidat_mentah = cari_gerhana_matahari_kandidat_ringan(tahun)
+            self.antrian.put(("gerhana_ok", (jenis, kandidat_mentah)))
         except Exception as e:
             # Sengaja pakai jenis pesan KHUSUS ("gerhana_error"), bukan "error"
             # generik -- handler "error" generik cuma me-re-enable btn_cari
@@ -4265,29 +4647,31 @@ class HisabWinApp(tk.Tk):
         idx = seleksi[0]
         kandidat = self.kandidat_gerhana[idx]
 
-
-
         self.btn_tampilkan_gerhana.config(state="disabled")
-        self._log("Menghitung & menggambar lintasan gerhana "
+        self._log("Menghitung & menggambar peta gerhana "
                    f"{format_waktu_ijtimak(kandidat['waktu_greatest_eclipse'])}...")
         self.config(cursor="watch")
         self.update_idletasks()
         try:
-            # buat_figure_lintasan_gerhana_matahari() sudah ada (memanggil
-            # hitung_lintasan_gerhana_matahari() di dalamnya) -- di sini
-            # murni memanggilnya lalu menaruh hasilnya ke tab notebook,
-            # dengan pola yang sama seperti _tampilkan_peta untuk peta
-            # Hilal (MABIMS/Muhammadiyah). Perhitungannya ringan (hanya
-            # scan beberapa jam di sekitar greatest eclipse, bukan grid
-            # dunia penuh) sehingga aman dipanggil langsung di sini
-            # (thread utama) tanpa perlu thread terpisah -- konsisten dgn
-            # aturan app ini bahwa SEMUA pembuatan figure matplotlib harus
-            # di thread utama.
-            fig = buat_figure_lintasan_gerhana_matahari(kandidat)
+            # buat_figure_lintasan_gerhana_matahari()/buat_figure_visibilitas_
+            # gerhana_bulan() sudah ada -- di sini murni memanggil yang sesuai
+            # jenis (self._jenis_gerhana_terakhir) lalu menaruh hasilnya ke tab
+            # notebook, dengan pola yang sama seperti _tampilkan_peta untuk peta
+            # Hilal (MABIMS/Muhammadiyah). Perhitungannya ringan (hanya scan
+            # beberapa jam di sekitar greatest eclipse, bukan grid dunia penuh)
+            # sehingga aman dipanggil langsung di sini (thread utama) tanpa
+            # perlu thread terpisah -- konsisten dgn aturan app ini bahwa SEMUA
+            # pembuatan figure matplotlib harus di thread utama.
             tgl_str = kandidat["waktu_greatest_eclipse"].strftime("%d %B %Y")
-            frame = self._tampilkan_peta("gerhana", f"☀️ Gerhana Matahari — {tgl_str}", fig)
+            if self._jenis_gerhana_terakhir == "bulan":
+                fig = buat_figure_visibilitas_gerhana_bulan(kandidat)
+                judul_tab = f"🌑 Gerhana Bulan — {tgl_str}"
+            else:
+                fig = buat_figure_lintasan_gerhana_matahari(kandidat)
+                judul_tab = f"☀️ Gerhana Matahari — {tgl_str}"
+            frame = self._tampilkan_peta("gerhana", judul_tab, fig)
             self.notebook.select(frame)
-            self._log("Peta lintasan gerhana selesai ditampilkan.")
+            self._log("Peta gerhana selesai ditampilkan.")
         except Exception as e:
             self._log(f"ERROR: {e}")
             messagebox.showerror("Terjadi kesalahan", str(e))
@@ -5195,33 +5579,47 @@ class HisabWinApp(tk.Tk):
                     self.btn_cari.config(state="normal")
 
                 elif jenis == "gerhana_ok":
-                    # Hasil mentah cari_gerhana_matahari_kandidat_ringan() berisi
-                    # SEMUA waktu ijtimak setahun (~12-13 entri) -- kebanyakan
-                    # BUKAN kandidat gerhana sama sekali (beta terlalu besar,
-                    # ditandai waktu_greatest_eclipse=None). Saring dulu di sini
+                    # Hasil mentah cari_gerhana_matahari_kandidat_ringan()/
+                    # cari_gerhana_bulan_kandidat_ringan() berisi SEMUA waktu
+                    # ijtimak/istiqbal setahun (~12-13 entri) -- kebanyakan
+                    # BUKAN kandidat gerhana sama sekali. Saring dulu di sini
                     # supaya listbox cuma menampilkan entri yang benar2 kandidat
                     # gerhana (index self.kandidat_gerhana tetap sejajar dgn
                     # baris listbox_gerhana, sesuai catatan di __init__).
-                    kandidat_mentah = payload
-                    self.kandidat_gerhana = [
-                        k for k in kandidat_mentah if k["waktu_greatest_eclipse"] is not None
-                    ]
+                    jenis_gerhana, kandidat_mentah = payload
+                    self._jenis_gerhana_terakhir = jenis_gerhana
+
+                    if jenis_gerhana == "bulan":
+                        self.kandidat_gerhana = [
+                            k for k in kandidat_mentah if k["jenis"] != "tidak ada gerhana"
+                        ]
+                    else:
+                        self.kandidat_gerhana = [
+                            k for k in kandidat_mentah if k["waktu_greatest_eclipse"] is not None
+                        ]
+
+                    label_jenis = "matahari" if jenis_gerhana == "matahari" else "bulan"
 
                     if len(self.kandidat_gerhana) == 0:
-                        self._log("Tidak ditemukan kandidat gerhana matahari pada tahun tersebut "
-                                   "(tidak ada ijtimak dengan lintang ekliptika Bulan cukup kecil).")
+                        self._log(f"Tidak ditemukan kandidat gerhana {label_jenis} pada tahun tersebut "
+                                   "(tidak ada ijtimak/istiqbal dengan lintang ekliptika Bulan cukup kecil).")
                     else:
                         for k in self.kandidat_gerhana:
-                            if k.get("kena_bumi"):
-                                ikon, status = "🔴", "Total/Cincin"
+                            if jenis_gerhana == "bulan":
+                                ikon = {"total": "🔴", "sebagian": "🟠",
+                                        "penumbral": "⚪"}.get(k["jenis"], "⚪")
+                                status = k["jenis"].capitalize()
                             else:
-                                ikon, status = "🟡", "Parsial saja"
+                                if k.get("kena_bumi"):
+                                    ikon, status = "🔴", "Total/Cincin"
+                                else:
+                                    ikon, status = "🟡", "Parsial saja"
                             label = (f"{ikon} {format_waktu_ijtimak(k['waktu_greatest_eclipse'])} "
                                      f"— {status}")
                             self.listbox_gerhana.insert("end", label)
                         self.listbox_gerhana.selection_set(0)
                         self.btn_tampilkan_gerhana.config(state="normal")
-                        self._log(f"Ditemukan {len(self.kandidat_gerhana)} kandidat gerhana matahari. "
+                        self._log(f"Ditemukan {len(self.kandidat_gerhana)} kandidat gerhana {label_jenis}. "
                                    "Pilih salah satu di atas.")
 
                     self.btn_cari_gerhana.config(state="normal")
