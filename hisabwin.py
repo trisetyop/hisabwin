@@ -2745,7 +2745,13 @@ def _tentukan_awal_bulan(tanggal_ijtimak, waktu_ijtimak, kriteria, ts, eph,
                                      ts=ts, eph=eph, mode=mode)
             terpenuhi = evaluasi["pkg1_terpenuhi"] or evaluasi["pkg2_terpenuhi"]
         if terpenuhi:
-            return tanggal_cek
+            # Kriteria terpenuhi pada MALAM tanggal_cek (maghrib tanggal_cek
+            # s.d. dini hari berikutnya). Awal bulan Hijriyah dimulai sejak
+            # maghrib itu, dan tanggal Masehi yg lazim diumumkan sbg "1
+            # [bulan]" adalah hari SETELAHNYA (mis. hilal terlihat malam 26,
+            # maka "besok tanggal 27 adalah 1 Muharram") -- bukan tanggal_cek
+            # itu sendiri. Tanpa +1 ini, semua tanggal keluar mundur 1 hari.
+            return tanggal_cek + timedelta(days=1)
     return None   # jaga2 -- semestinya tidak pernah kejadian dlm praktik
 
 
