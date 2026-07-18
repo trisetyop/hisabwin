@@ -5575,26 +5575,34 @@ class HisabWinApp(tk.Tk):
 
         frame_input = ttk.LabelFrame(body, text="3. Masukkan Tanggal")
         frame_input.pack(fill="x", **pad)
+        # Catatan: panel kiri (tab_kontrol) lebarnya TETAP (fixed 340px,
+        # lihat panel_luar), jadi field Hari/Bulan/Tahun TIDAK BOLEH
+        # ditaruh berjajar dalam 1 baris x 6 kolom -- itu meluber ke
+        # kanan dan bikin field "Tahun" ketutup/tenggelam di luar panel
+        # (tidak kelihatan sama sekali). Ditumpuk 3 baris supaya selalu
+        # muat berapa pun lebar panelnya.
+        frame_input.columnconfigure(1, weight=1)
 
         sekarang = datetime.now()
-        ttk.Label(frame_input, text="Hari:").grid(row=0, column=0, padx=6, pady=6, sticky="w")
-        self.entry_konv_hari = ttk.Entry(frame_input, width=6)
+        ttk.Label(frame_input, text="Hari:").grid(row=0, column=0, padx=6, pady=4, sticky="w")
+        self.entry_konv_hari = ttk.Entry(frame_input, width=10)
         self.entry_konv_hari.insert(0, str(sekarang.day))
-        self.entry_konv_hari.grid(row=0, column=1, padx=6, pady=6)
+        self.entry_konv_hari.grid(row=0, column=1, padx=6, pady=4, sticky="w")
 
-        ttk.Label(frame_input, text="Bulan:").grid(row=0, column=2, padx=6, pady=6, sticky="w")
-        self.entry_konv_bulan = ttk.Entry(frame_input, width=6)
+        ttk.Label(frame_input, text="Bulan:").grid(row=1, column=0, padx=6, pady=4, sticky="w")
+        self.entry_konv_bulan = ttk.Entry(frame_input, width=10)
         self.entry_konv_bulan.insert(0, str(sekarang.month))
-        self.entry_konv_bulan.grid(row=0, column=3, padx=6, pady=6)
+        self.entry_konv_bulan.grid(row=1, column=1, padx=6, pady=4, sticky="w")
 
-        ttk.Label(frame_input, text="Tahun:").grid(row=0, column=4, padx=6, pady=6, sticky="w")
-        self.entry_konv_tahun = ttk.Entry(frame_input, width=8)
+        ttk.Label(frame_input, text="Tahun:").grid(row=2, column=0, padx=6, pady=4, sticky="w")
+        self.entry_konv_tahun = ttk.Entry(frame_input, width=10)
         self.entry_konv_tahun.insert(0, str(sekarang.year))
-        self.entry_konv_tahun.grid(row=0, column=5, padx=6, pady=6)
+        self.entry_konv_tahun.grid(row=2, column=1, padx=6, pady=4, sticky="w")
 
         self.label_konv_bulan_nama = ttk.Label(
-            frame_input, text="", font=FONT_KECIL, foreground=WARNA_TEKS_MUTED)
-        self.label_konv_bulan_nama.grid(row=1, column=0, columnspan=6, padx=6, pady=(0, 4), sticky="w")
+            frame_input, text="", font=FONT_KECIL, foreground=WARNA_TEKS_MUTED,
+            justify="left", wraplength=280)
+        self.label_konv_bulan_nama.grid(row=3, column=0, columnspan=2, padx=6, pady=(2, 6), sticky="w")
 
         self.btn_konversi = ttk.Button(
             body, text="Konversi", command=self._on_konversi_kalender, style="Aksen.TButton")
