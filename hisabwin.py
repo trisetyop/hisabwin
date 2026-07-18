@@ -176,6 +176,25 @@ def cari_ijtimak_tahun(tahun, ts, eph, mode="jpl"):
     return ijtimak_times
 
 
+def cari_istiqbal_tahun(tahun, ts, eph, mode="jpl"):
+    """Analog cari_ijtimak_tahun() di atas, tapi utk waktu ISTIQBAL
+    (oposisi geosentris/purnama -- fase=2 di almanac.moon_phases: 0=bulan
+    baru, 1=perbani awal, 2=purnama, 3=perbani akhir) sepanjang tahun tsb.
+    Dipakai sbg basis waktu kandidat gerhana BULAN mode Presisi (analog
+    cari_ijtimak_tahun dipakai gerhana Matahari).
+    mode='jpl'   -> skyfield + JPL DE421 (presisi tinggi, perlu file .bsp)
+    mode='ringan'-> VSOP87+ELP2000 (tanpa file eksternal), lihat cari_istiqbal_tahun_ringan
+    Return list/array yang tiap elemennya bisa dipanggil ke_utc_datetime(...).
+    """
+    if mode == "ringan":
+        return cari_istiqbal_tahun_ringan(tahun)
+    t0 = ts.utc(tahun, 1, 1)
+    t1 = ts.utc(tahun + 1, 1, 1)
+    t, y = almanac.find_discrete(t0, t1, almanac.moon_phases(eph))
+    istiqbal_times = t[y == 2]
+    return istiqbal_times
+
+
 def equation_of_time_menit(tanggal):
     """
     Perkiraan Equation of Time (menit) memakai formula Spencer (1971).
@@ -736,10 +755,27 @@ _ECC2_BUMI = 1 - (RE_KUTUB_KM / RE_EKUATOR_KM) ** 2
 AU_KM = 149597870.7
 
 
-def _vektor_matahari_bulan_gast(waktu):
+def _vektor_matahari_bulan_gast(waktu, mode="ringan", ts=None, eph=None):
     """Posisi geosentris Matahari & Bulan dalam Kartesian ekuator langit (km),
-    plus GAST (derajat), pada satu waktu (datetime UTC). Dipakai bersama oleh
-    _jarak_sumbu_ke_pusat_bumi() dan _titik_bayangan_ellipsoid()."""
+    plus GAST (derajat) & beta (lintang ekliptika Bulan, derajat), pada satu
+    waktu (datetime UTC). Dipakai bersama oleh HAMPIR SEMUA fungsi gerhana
+    di file ini (langsung atau lewat versi batch-nya) -- makanya menambah
+    mode='jpl' di SINI SAJA (+ versi batch-nya) otomatis membuat SELURUH
+    pipeline gerhana (kandidat, lintasan, kontak, dsb) presisi, TANPA perlu
+    mengubah geometri/logika di fungsi manapun yg memanggilnya -- mereka
+    semua cuma konsumsi (P_sun, P_moon, gast, beta), tidak peduli dari
+    mana asalnya.
+
+    mode='ringan' (default) -> VSOP87 ringkas + ELP2000-82B (fungsi ini
+    sendiri, TANPA file eksternal apapun).
+    mode='jpl' -> didelegasikan ke _vektor_matahari_bulan_gast_jpl()
+    (Skyfield + ephemeris JPL DE421 penuh, butuh ts & eph -- app.ts/app.eph
+    yg sudah dimuat di tempat lain, SAMA persis yg dipakai mode Presisi di
+    tab2 lain spt Efemeris/Waktu Sholat).
+    """
+    if mode == "jpl":
+        return _vektor_matahari_bulan_gast_jpl(waktu, ts, eph)
+
     jd_ut = julian_day(waktu.year, waktu.month,
                         waktu.day + (waktu.hour + waktu.minute / 60.0
                                      + waktu.second / 3600.0) / 24.0)
@@ -772,7 +808,38 @@ def _vektor_matahari_bulan_gast(waktu):
     return P_sun, P_moon, gast, float(np.ravel(beta)[0])
 
 
-def _vektor_matahari_bulan_gast_batch(waktu_dasar, menit_offset):
+def _vektor_matahari_bulan_gast_jpl(waktu, ts, eph):
+    """Versi PRESISI (Skyfield + ephemeris JPL DE421) dari
+    _vektor_matahari_bulan_gast() -- KONTRAK OUTPUT SAMA PERSIS (P_sun,
+    P_moon geosentris Kartesian ekuator-langit-tanggal km, gast derajat,
+    beta lintang ekliptika Bulan-tanggal derajat) supaya bisa saling
+    ditukar tanpa mengubah kode geometri di pemanggilnya. Posisi
+    Matahari/Bulan dihitung APPARENT (geometris+cahaya+aberasi, dari
+    Bumi) dgn RA/Dec EKUATOR TANGGAL (epoch='date') -- konsisten dgn
+    RA versi 'ringan' (dari equinox tanggal itu sendiri, bukan J2000)."""
+    earth, sun, moon = eph["earth"], eph["sun"], eph["moon"]
+    t = ts.utc(waktu.year, waktu.month, waktu.day,
+               waktu.hour, waktu.minute, waktu.second + waktu.microsecond / 1e6)
+
+    astro_sun = earth.at(t).observe(sun).apparent()
+    astro_moon = earth.at(t).observe(moon).apparent()
+    ra_sun, dec_sun, dist_sun = astro_sun.radec(epoch='date')
+    ra_moon, dec_moon, dist_moon = astro_moon.radec(epoch='date')
+    beta_moon, _, _ = astro_moon.ecliptic_latlon(epoch='date')
+    gast = float(t.gast) * 15.0   # jam -> derajat
+
+    def _ke_kartesian(ra_deg, dec_deg, r):
+        rar, decr = np.radians(ra_deg), np.radians(dec_deg)
+        return np.array([r * np.cos(decr) * np.cos(rar),
+                          r * np.cos(decr) * np.sin(rar),
+                          r * np.sin(decr)])
+
+    P_sun = _ke_kartesian(ra_sun.hours * 15.0, dec_sun.degrees, dist_sun.km)
+    P_moon = _ke_kartesian(ra_moon.hours * 15.0, dec_moon.degrees, dist_moon.km)
+    return P_sun, P_moon, gast, float(beta_moon.degrees)
+
+
+def _vektor_matahari_bulan_gast_batch(waktu_dasar, menit_offset, mode="ringan", ts=None, eph=None):
     """Versi VEKTOR (numpy) dari _vektor_matahari_bulan_gast() -- hitung
     SEKALIGUS utk banyak titik waktu (waktu_dasar + menit_offset[i] menit),
     bukan for-loop Python manggil versi skalar berkali-kali.
@@ -788,8 +855,15 @@ def _vektor_matahari_bulan_gast_batch(waktu_dasar, menit_offset):
     bukan jam/menit, jadi aman dipakai bersama utk seluruh jendela +-4 jam
     yg dipakai fungsi2 pemindaian gerhana di file ini.
 
+    mode='jpl' -> didelegasikan ke _vektor_matahari_bulan_gast_batch_jpl()
+    (butuh ts & eph), lihat catatan lengkap soal kenapa mode ditambahkan
+    di sini di docstring _vektor_matahari_bulan_gast().
+
     Return: P_sun (N,3 km), P_moon (N,3 km), gast (N, derajat), beta (N, derajat).
     """
+    if mode == "jpl":
+        return _vektor_matahari_bulan_gast_batch_jpl(waktu_dasar, menit_offset, ts, eph)
+
     menit_offset = np.asarray(menit_offset, dtype=float)
 
     dt_detik = float(delta_t_detik(waktu_dasar.year, waktu_dasar.month))
@@ -821,6 +895,38 @@ def _vektor_matahari_bulan_gast_batch(waktu_dasar, menit_offset):
     P_sun = _ke_kartesian_batch(ra_s, dec_s, R_sun_km)
     P_moon = _ke_kartesian_batch(ra_m, dec_m, R_moon_km)
     return P_sun, P_moon, gast, np.asarray(beta)
+
+
+def _vektor_matahari_bulan_gast_batch_jpl(waktu_dasar, menit_offset, ts, eph):
+    """Versi VEKTOR dari _vektor_matahari_bulan_gast_jpl() -- Skyfield/JPL
+    NATIVE mendukung array waktu (objek Time bisa berisi banyak elemen),
+    jadi satu panggilan .observe()/.apparent() sudah otomatis vektor,
+    TIDAK perlu for-loop Python manggil versi skalar berkali-kali (sama
+    semangatnya dgn _vektor_matahari_bulan_gast_batch() versi ringan)."""
+    menit_offset = np.asarray(menit_offset, dtype=float)
+    earth, sun, moon = eph["earth"], eph["sun"], eph["moon"]
+    t = ts.utc(waktu_dasar.year, waktu_dasar.month, waktu_dasar.day,
+               waktu_dasar.hour, waktu_dasar.minute + menit_offset,
+               waktu_dasar.second + waktu_dasar.microsecond / 1e6)
+
+    astro_sun = earth.at(t).observe(sun).apparent()
+    astro_moon = earth.at(t).observe(moon).apparent()
+    ra_sun, dec_sun, dist_sun = astro_sun.radec(epoch='date')
+    ra_moon, dec_moon, dist_moon = astro_moon.radec(epoch='date')
+    beta_moon, _, _ = astro_moon.ecliptic_latlon(epoch='date')
+    gast = np.asarray(t.gast) * 15.0
+
+    def _ke_kartesian_batch(ra_deg, dec_deg, r):
+        rar, decr = np.radians(ra_deg), np.radians(dec_deg)
+        return np.stack([r * np.cos(decr) * np.cos(rar),
+                          r * np.cos(decr) * np.sin(rar),
+                          r * np.sin(decr)], axis=-1)
+
+    P_sun = _ke_kartesian_batch(np.asarray(ra_sun.hours) * 15.0,
+                                 np.asarray(dec_sun.degrees), np.asarray(dist_sun.km))
+    P_moon = _ke_kartesian_batch(np.asarray(ra_moon.hours) * 15.0,
+                                  np.asarray(dec_moon.degrees), np.asarray(dist_moon.km))
+    return P_sun, P_moon, gast, np.asarray(beta_moon.degrees)
 
 
 def _jarak_sumbu_ke_pusat_bumi_km_batch(P_sun, P_moon):
@@ -959,14 +1065,15 @@ def _jarak_sumbu_ke_pusat_bumi_km(waktu):
     return np.linalg.norm(np.cross(P_sun, d)) / np.linalg.norm(d)
 
 
-def _cari_waktu_greatest_lunar_eclipse(waktu_istiqbal, jendela_menit=180, langkah_menit=3):
+def _cari_waktu_greatest_lunar_eclipse(waktu_istiqbal, jendela_menit=180, langkah_menit=3,
+                                        mode="ringan", ts=None, eph=None):
     """Versi GERHANA BULAN dari _cari_waktu_greatest_eclipse() -- refine
     waktu istiqbal (oposisi geosentris) ke waktu GREATEST ECLIPSE
     sesungguhnya (saat Bulan paling dekat ke sumbu bayangan Bumi). Struktur
     & alasan PERSIS sama dgn versi Matahari, cuma jarak yg diminimalkan
     beda (jarak Bulan-ke-sumbu, bukan jarak sumbu-ke-pusat-Bumi)."""
     offset = np.arange(-jendela_menit, jendela_menit + langkah_menit, langkah_menit, dtype=float)
-    P_sun, P_moon, _, _ = _vektor_matahari_bulan_gast_batch(waktu_istiqbal, offset)
+    P_sun, P_moon, _, _ = _vektor_matahari_bulan_gast_batch(waktu_istiqbal, offset, mode, ts, eph)
     jarak, _, _ = _jarak_bulan_ke_sumbu_bayangan_bumi_km_batch(P_sun, P_moon)
     i = int(np.argmin(jarak))
 
@@ -981,7 +1088,8 @@ def _cari_waktu_greatest_lunar_eclipse(waktu_istiqbal, jendela_menit=180, langka
     return waktu_istiqbal + timedelta(minutes=float(offset_halus))
 
 
-def _cari_waktu_greatest_eclipse(waktu_ijtimak, jendela_menit=180, langkah_menit=3):
+def _cari_waktu_greatest_eclipse(waktu_ijtimak, jendela_menit=180, langkah_menit=3,
+                                  mode="ringan", ts=None, eph=None):
     """Refine waktu ijtimak GEOSENTRIS ke waktu GREATEST ECLIPSE sesungguhnya
     (saat sumbu bayangan paling dekat ke pusat Bumi) -- KEDUANYA bisa beda
     (terverifikasi lewat pengujian manual thd gerhana asli: offsetnya kecil,
@@ -996,7 +1104,7 @@ def _cari_waktu_greatest_eclipse(waktu_ijtimak, jendela_menit=180, langkah_menit
     rapat).
     """
     offset = np.arange(-jendela_menit, jendela_menit + langkah_menit, langkah_menit, dtype=float)
-    P_sun, P_moon, _, _ = _vektor_matahari_bulan_gast_batch(waktu_ijtimak, offset)
+    P_sun, P_moon, _, _ = _vektor_matahari_bulan_gast_batch(waktu_ijtimak, offset, mode, ts, eph)
     jarak = _jarak_sumbu_ke_pusat_bumi_km_batch(P_sun, P_moon)
     i = int(np.argmin(jarak))
 
@@ -1012,14 +1120,14 @@ def _cari_waktu_greatest_eclipse(waktu_ijtimak, jendela_menit=180, langkah_menit
     return waktu_ijtimak + timedelta(minutes=float(offset_halus))
 
 
-def _titik_bayangan_ellipsoid(waktu):
+def _titik_bayangan_ellipsoid(waktu, mode="ringan", ts=None, eph=None):
     """Titik potong garis sumbu bayangan (Matahari-Bulan diperpanjang) dgn
     permukaan ELLIPSOID WGS84 Bumi, di waktu tertentu (idealnya waktu
     greatest eclipse hasil _cari_waktu_greatest_eclipse(), bukan waktu
     ijtimak mentah). Return (lat_geodetik, lon, gamma_radius_bumi) atau
     None kalau garis tidak menyentuh ellipsoid (gerhana parsial-saja,
     umbra lewat di luar Bumi)."""
-    P_sun, P_moon, gast, _ = _vektor_matahari_bulan_gast(waktu)
+    P_sun, P_moon, gast, _ = _vektor_matahari_bulan_gast(waktu, mode, ts, eph)
     d = P_moon - P_sun
 
     Px, Py, Pz = P_sun
@@ -1043,13 +1151,13 @@ def _titik_bayangan_ellipsoid(waktu):
     return lat_geodetik, lon_hit, gamma
 
 
-def _subtitik_sumbu_bayangan(waktu):
+def _subtitik_sumbu_bayangan(waktu, mode="ringan", ts=None, eph=None):
     """Titik pusat proyeksi bayangan pada permukaan Bumi (lat geodetik, lon).
     Jika sumbu bayangan menembus Bumi, mengembalikan titik perpotongan (sisi dekat).
     Jika meleset, mengembalikan proyeksi radial dari titik terdekat sumbu bayangan
     ke pusat Bumi (sebagai pendekatan terdekat).
     """
-    P_sun, P_moon, gast, _ = _vektor_matahari_bulan_gast(waktu)
+    P_sun, P_moon, gast, _ = _vektor_matahari_bulan_gast(waktu, mode, ts, eph)
     d = P_moon - P_sun
 
     Px, Py, Pz = P_sun
@@ -1080,7 +1188,7 @@ R_MATAHARI_KM = 696000.0   # radius fisik Matahari
 R_BULAN_KM = 1737.4        # radius fisik Bulan
 
 
-def _radius_bayangan_km(waktu):
+def _radius_bayangan_km(waktu, mode="ringan", ts=None, eph=None):
     """Radius umbra & penumbra (km) pada bidang tegak lurus sumbu bayangan
     yang melewati titik sumbu TERDEKAT ke pusat Bumi (titik yang sama dipakai
     _jarak_sumbu_ke_pusat_bumi_km) -- dihitung dari geometri kerucut bayangan
@@ -1102,7 +1210,7 @@ def _radius_bayangan_km(waktu):
                        sbg "bayangan gelap/cincin menyentuh Bumi".
       r_penumbra_km : radius penumbra pada bidang tsb (km), selalu positif.
     """
-    P_sun, P_moon, _, _ = _vektor_matahari_bulan_gast(waktu)
+    P_sun, P_moon, _, _ = _vektor_matahari_bulan_gast(waktu, mode, ts, eph)
     d = P_moon - P_sun
     d_sm = np.linalg.norm(d)          # jarak Matahari-Bulan
     u = d / d_sm                       # arah sumbu, dari Matahari menuju Bulan
@@ -1119,9 +1227,11 @@ def _radius_bayangan_km(waktu):
     return float(gamma_km), float(r_umbra_km), float(r_penumbra_km)
 
 
-def cari_gerhana_matahari_kandidat_ringan(tahun, ambang_beta_derajat=1.8):
+def cari_gerhana_matahari_kandidat_ringan(tahun, ambang_beta_derajat=1.8,
+                                           mode="ringan", ts=None, eph=None):
     """Deteksi KANDIDAT gerhana matahari sepanjang tahun, dari waktu2 ijtimak
-    yang sudah ada (cari_ijtimak_tahun_ringan). Metode:
+    yang sudah ada (cari_ijtimak_tahun_ringan, ATAU cari_ijtimak_tahun mode
+    'jpl' kalau mode='jpl' -- lihat parameter mode di bawah). Metode:
 
     1) FILTER KANDIDAT: pas ijtimak, bujur ekliptika Matahari & Bulan SAMA
        persis (itu definisi konjungsi) -- jadi "jarak sudut" keduanya cuma
@@ -1143,6 +1253,15 @@ def cari_gerhana_matahari_kandidat_ringan(tahun, ambang_beta_derajat=1.8):
        WGS84 Bumi di waktu greatest eclipse hasil refinement (bukan cuma
        arah sub-titik -- lihat _titik_bayangan_ellipsoid()).
 
+    mode='ringan' (default) -> VSOP87+ELP2000, TIDAK butuh ts/eph sama
+    sekali (basis waktu ijtimak dari cari_ijtimak_tahun_ringan).
+    mode='jpl' -> Skyfield + ephemeris JPL DE421 penuh (butuh ts & eph),
+    basis waktu ijtimak dari cari_ijtimak_tahun(mode='jpl') (almanac
+    moon_phases, presisi tinggi) -- SELURUH pipeline geometri di bawahnya
+    (greatest eclipse, radius bayangan, titik jatuh) ikut presisi juga krn
+    semua cuma memanggil _vektor_matahari_bulan_gast(_batch) dgn mode/ts/
+    eph yg sama (lihat catatan di fungsi itu).
+
     Return: list of dict, satu per kandidat, dengan keys:
       'waktu_ijtimak' (datetime), 'waktu_greatest_eclipse' (datetime),
       'beta' (derajat), 'kena_bumi' (bool), 'gamma' (radius Bumi, None
@@ -1152,23 +1271,26 @@ def cari_gerhana_matahari_kandidat_ringan(tahun, ambang_beta_derajat=1.8):
       sekali; umbra/antumbra lewat di luar Bumi tapi penumbra masih bisa
       menyentuh permukaan).
     """
-    ijtimak_list = cari_ijtimak_tahun_ringan(tahun)
+    if mode == "jpl":
+        ijtimak_list = [_ke_naif(ke_utc_datetime(t)) for t in cari_ijtimak_tahun(tahun, ts, eph, mode="jpl")]
+    else:
+        ijtimak_list = cari_ijtimak_tahun_ringan(tahun)
     hasil = []
 
     for waktu_ijtimak in ijtimak_list:
-        _, _, _, beta = _vektor_matahari_bulan_gast(waktu_ijtimak)
+        _, _, _, beta = _vektor_matahari_bulan_gast(waktu_ijtimak, mode, ts, eph)
 
         entri = {"waktu_ijtimak": waktu_ijtimak, "waktu_greatest_eclipse": None,
                  "beta": beta, "kena_bumi": False, "gamma": None,
                  "lat_perkiraan": None, "lon_perkiraan": None}
 
         if abs(beta) < ambang_beta_derajat:
-            waktu_greatest = _cari_waktu_greatest_eclipse(waktu_ijtimak)
-            gamma_km, _, r_penumbra_km = _radius_bayangan_km(waktu_greatest)
+            waktu_greatest = _cari_waktu_greatest_eclipse(waktu_ijtimak, mode=mode, ts=ts, eph=eph)
+            gamma_km, _, r_penumbra_km = _radius_bayangan_km(waktu_greatest, mode, ts, eph)
             if gamma_km <= RE_EKUATOR_KM + r_penumbra_km:
                 entri["waktu_greatest_eclipse"] = waktu_greatest
 
-                titik = _titik_bayangan_ellipsoid(waktu_greatest)
+                titik = _titik_bayangan_ellipsoid(waktu_greatest, mode, ts, eph)
                 if titik is not None:
                     lat_geodetik, lon_hit, gamma = titik
                     entri["kena_bumi"] = True
@@ -1181,12 +1303,21 @@ def cari_gerhana_matahari_kandidat_ringan(tahun, ambang_beta_derajat=1.8):
     return hasil
 
 
-def cari_gerhana_bulan_kandidat_ringan(tahun, ambang_beta_derajat=1.5):
+def cari_gerhana_bulan_kandidat_ringan(tahun, ambang_beta_derajat=1.5,
+                                        mode="ringan", ts=None, eph=None):
     """Deteksi KANDIDAT gerhana BULAN sepanjang tahun, dari waktu2 istiqbal
     (oposisi/purnama). Struktur & filosofi PERSIS sama dgn
     cari_gerhana_matahari_kandidat_ringan(), cuma basis waktunya istiqbal
     (bukan ijtimak) dan geometrinya "Bulan menembus bayangan Bumi" (bukan
     "bayangan Bulan menyentuh Bumi").
+
+    mode='ringan' (default) -> VSOP87+ELP2000, basis waktu istiqbal dari
+    cari_istiqbal_tahun_ringan().
+    mode='jpl' -> Skyfield + ephemeris JPL DE421 penuh (butuh ts & eph),
+    basis waktu istiqbal dari cari_istiqbal_tahun(mode='jpl') (almanac
+    moon_phases) -- lihat catatan lengkap soal alasan/mekanisme ini di
+    docstring cari_gerhana_matahari_kandidat_ringan(), berlaku sama persis
+    di sini.
 
     1) FILTER KANDIDAT: |beta| Bulan pas istiqbal < ambang_beta_derajat.
        Ambang gerhana Bulan (~1.0-1.5 derajat) sedikit beda dari gerhana
@@ -1213,21 +1344,25 @@ def cari_gerhana_bulan_kandidat_ringan(tahun, ambang_beta_derajat=1.5):
       'tidak ada gerhana'), 'magnitudo_umbral', 'magnitudo_penumbral'
       (None kalau tdk lolos filter beta).
     """
-    istiqbal_list = cari_istiqbal_tahun_ringan(tahun)
+    if mode == "jpl":
+        istiqbal_list = [_ke_naif(ke_utc_datetime(t)) for t in cari_istiqbal_tahun(tahun, ts, eph, mode="jpl")]
+    else:
+        istiqbal_list = cari_istiqbal_tahun_ringan(tahun)
     hasil = []
 
     for waktu_istiqbal in istiqbal_list:
-        _, _, _, beta = _vektor_matahari_bulan_gast(waktu_istiqbal)
+        _, _, _, beta = _vektor_matahari_bulan_gast(waktu_istiqbal, mode, ts, eph)
 
         entri = {"waktu_istiqbal": waktu_istiqbal, "waktu_greatest_eclipse": None,
                  "beta": beta, "jenis": "tidak ada gerhana",
                  "magnitudo_umbral": None, "magnitudo_penumbral": None}
 
         if abs(beta) < ambang_beta_derajat:
-            waktu_greatest = _cari_waktu_greatest_lunar_eclipse(waktu_istiqbal)
+            waktu_greatest = _cari_waktu_greatest_lunar_eclipse(waktu_istiqbal, mode=mode, ts=ts, eph=eph)
             entri["waktu_greatest_eclipse"] = waktu_greatest
 
-            P_sun, P_moon, _, _ = _vektor_matahari_bulan_gast_batch(waktu_greatest, np.array([0.0]))
+            P_sun, P_moon, _, _ = _vektor_matahari_bulan_gast_batch(
+                waktu_greatest, np.array([0.0]), mode, ts, eph)
             jarak, r_umbra, r_penumbra = _jarak_bulan_ke_sumbu_bayangan_bumi_km_batch(P_sun, P_moon)
             jarak, r_umbra, r_penumbra = float(jarak[0]), float(r_umbra[0]), float(r_penumbra[0])
 
@@ -3112,12 +3247,16 @@ def hijriyah_kriteria_ke_masehi(tahun_h, bulan_h, hari_h, kriteria, ts, eph, mod
 #  sekitarnya & sambung semua titik yg kena ellipsoid.
 # =========================================================
 
-def hitung_lintasan_gerhana_matahari(waktu_greatest_eclipse, jendela_menit=150, langkah_menit=2):
+def hitung_lintasan_gerhana_matahari(waktu_greatest_eclipse, jendela_menit=150, langkah_menit=2,
+                                      mode="ringan", ts=None, eph=None):
     """Hitung lintasan (central line) gerhana matahari dgn scan waktu di
     sekitar waktu_greatest_eclipse (hasil cari_gerhana_matahari_kandidat_ringan
     utk entri yg kena_bumi=True). Prinsipnya sama persis dgn
     _titik_bayangan_ellipsoid() (satu titik), tinggal diulang tiap
     langkah_menit sepanjang jendela_menit di kedua sisi.
+
+    mode/ts/eph diteruskan apa adanya ke _vektor_matahari_bulan_gast_batch()
+    -- lihat catatan mode Presisi di sana.
 
     jendela_menit default 150 (2.5 jam) cukup utk mencakup durasi umbra/
     antumbra menyentuh Bumi (biasanya <3 jam dari awal sampai akhir lintasan
@@ -3130,7 +3269,7 @@ def hitung_lintasan_gerhana_matahari(waktu_greatest_eclipse, jendela_menit=150, 
     tapi tetap dicek di sini utk keamanan).
     """
     menit = np.arange(-jendela_menit, jendela_menit + langkah_menit, langkah_menit, dtype=float)
-    P_sun, P_moon, gast, _ = _vektor_matahari_bulan_gast_batch(waktu_greatest_eclipse, menit)
+    P_sun, P_moon, gast, _ = _vektor_matahari_bulan_gast_batch(waktu_greatest_eclipse, menit, mode, ts, eph)
     kena_bumi, lat, lon, gamma = _titik_bayangan_ellipsoid_batch(P_sun, P_moon, gast)
 
     lintasan = []
@@ -3141,7 +3280,8 @@ def hitung_lintasan_gerhana_matahari(waktu_greatest_eclipse, jendela_menit=150, 
     return lintasan
 
 
-def hitung_bayangan_penumbra_gerhana_matahari(waktu_greatest_eclipse, jendela_menit=240, langkah_menit=4):
+def hitung_bayangan_penumbra_gerhana_matahari(waktu_greatest_eclipse, jendela_menit=240, langkah_menit=4,
+                                               mode="ringan", ts=None, eph=None):
     """Hitung JEJAK bayangan PENUMBRA (bayang-bayang kabur Bulan) sepanjang
     waktu, dipakai utk menggambar ARSIRAN wilayah yang berpotensi melihat
     gerhana SEBAGIAN di peta dunia -- beda dgn hitung_lintasan_gerhana_matahari
@@ -3176,7 +3316,7 @@ def hitung_bayangan_penumbra_gerhana_matahari(waktu_greatest_eclipse, jendela_me
     """
     Re = RE_EKUATOR_KM
     menit = np.arange(-jendela_menit, jendela_menit + langkah_menit, langkah_menit, dtype=float)
-    P_sun, P_moon, gast, _ = _vektor_matahari_bulan_gast_batch(waktu_greatest_eclipse, menit)
+    P_sun, P_moon, gast, _ = _vektor_matahari_bulan_gast_batch(waktu_greatest_eclipse, menit, mode, ts, eph)
     gamma_km, _r_umbra_km, r_penumbra_km = _radius_bayangan_km_batch(P_sun, P_moon)
     lat, lon = _subtitik_sumbu_bayangan_batch(P_sun, P_moon, gast)
 
@@ -3203,7 +3343,8 @@ def hitung_bayangan_penumbra_gerhana_matahari(waktu_greatest_eclipse, jendela_me
     return jejak
 
 
-def cari_kontak_gerhana_matahari(waktu_greatest_eclipse, jendela_menit=240, langkah_menit=2):
+def cari_kontak_gerhana_matahari(waktu_greatest_eclipse, jendela_menit=240, langkah_menit=2,
+                                  mode="ringan", ts=None, eph=None):
     """Cari 6 waktu "kontak umum" gerhana matahari -- istilah baku yg dipakai
     NASA/BMKG utk PETA LINTASAN SEDUNIA (beda dgn 4 kontak LOKAL C1-C4 utk
     satu titik pengamat tertentu):
@@ -3239,7 +3380,7 @@ def cari_kontak_gerhana_matahari(waktu_greatest_eclipse, jendela_menit=240, lang
     terjadi kalau kandidat sudah lolos filter beta di sana.
     """
     menit = np.arange(-jendela_menit, jendela_menit + langkah_menit, langkah_menit, dtype=float)
-    P_sun, P_moon, _, _ = _vektor_matahari_bulan_gast_batch(waktu_greatest_eclipse, menit)
+    P_sun, P_moon, _, _ = _vektor_matahari_bulan_gast_batch(waktu_greatest_eclipse, menit, mode, ts, eph)
     gamma, r_umbra, r_penumbra = _radius_bayangan_km_batch(P_sun, P_moon)
 
     Re = RE_EKUATOR_KM   # pendekatan BOLA (cukup utk label kontak menit;
@@ -3277,7 +3418,8 @@ def cari_kontak_gerhana_matahari(waktu_greatest_eclipse, jendela_menit=240, lang
     return {"P1": p1, "U1": u1, "U2": u2, "U3": u3, "U4": u4, "P4": p4}
 
 
-def cari_kontak_gerhana_bulan(waktu_greatest_eclipse, jendela_menit=240, langkah_menit=2):
+def cari_kontak_gerhana_bulan(waktu_greatest_eclipse, jendela_menit=240, langkah_menit=2,
+                               mode="ringan", ts=None, eph=None):
     """Versi GERHANA BULAN dari cari_kontak_gerhana_matahari() -- 7 waktu
     kontak standar (istilah baku NASA/BMKG utk gerhana Bulan):
 
@@ -3304,7 +3446,7 @@ def cari_kontak_gerhana_bulan(waktu_greatest_eclipse, jendela_menit=240, langkah
     umbra sama sekali).
     """
     menit = np.arange(-jendela_menit, jendela_menit + langkah_menit, langkah_menit, dtype=float)
-    P_sun, P_moon, _, _ = _vektor_matahari_bulan_gast_batch(waktu_greatest_eclipse, menit)
+    P_sun, P_moon, _, _ = _vektor_matahari_bulan_gast_batch(waktu_greatest_eclipse, menit, mode, ts, eph)
     jarak, r_umbra, r_penumbra = _jarak_bulan_ke_sumbu_bayangan_bumi_km_batch(P_sun, P_moon)
 
     def _kontak_masuk_keluar(radius_km):
@@ -3340,12 +3482,67 @@ def cari_kontak_gerhana_bulan(waktu_greatest_eclipse, jendela_menit=240, langkah
             "U3": u3, "U4": u4, "P4": p4}
 
 
-def buat_figure_lintasan_gerhana_matahari(kandidat_gerhana, jendela_menit=150, langkah_menit=2):
+def _aman_tambah_fitur(ax, feature, **kwargs):
+    """Bungkus ax.add_feature() dengan try/except.
+
+    Cartopy (via GEOS/JTS di baliknya) punya bug lama yang cuma muncul di
+    proyeksi non-persegi-panjang (mis. Orthographic/mode 'globe'): kalau
+    sebuah polygon fitur (LAND/OCEAN/BORDERS dari shapefile Natural Earth)
+    kebetulan tangent/pas menyentuh garis batas piringan proyeksi saat
+    di-clip, GEOS melempar "IllegalArgumentException: point array must
+    contain 0 or > 1 elements" -- exception dari library C internal yang
+    TIDAK bisa dicegah dari sisi data kita (beda kasus dgn radius horizon
+    gerhana Bulan yang memang bisa diperbaiki, lihat RADIUS_HORIZON_M).
+    Di mode 'datar' (PlateCarree) praktis tidak pernah kena krn tidak ada
+    "tepi piringan" utk di-tangent-i.
+
+    Daripada satu fitur "sial" bikin SELURUH peta gagal tampil (dan user
+    kena dialog error tanpa peta sama sekali), fitur yg gagal cukup
+    dilewati -- peta tetap muncul, cuma tanpa lapis itu."""
+    try:
+        ax.add_feature(feature, **kwargs)
+        return True
+    except Exception as e:
+        print(f"[peringatan] Lapis peta dilewati (gagal digambar): {e}")
+        return False
+
+
+def _aman_tambah_geometri(ax, geoms, crs, **kwargs):
+    """Versi _aman_tambah_fitur() utk ax.add_geometries() (lingkaran
+    penumbra/horizon buatan sendiri, bukan shapefile Natural Earth) --
+    bug GEOS yang sama bisa juga kena di sini kalau lingkarannya kebetulan
+    tangent ke tepi piringan proyeksi Orthographic."""
+    try:
+        ax.add_geometries(geoms, crs, **kwargs)
+        return True
+    except Exception as e:
+        print(f"[peringatan] Geometri peta dilewati (gagal digambar): {e}")
+        return False
+
+
+def buat_figure_lintasan_gerhana_matahari(kandidat_gerhana, jendela_menit=150, langkah_menit=2,
+                                           mode_peta="datar", mode="ringan", ts=None, eph=None):
     """Peta dunia gerhana matahari, dari satu entri kandidat hasil
-    cari_gerhana_matahari_kandidat_ringan(). Style peta konsisten dgn
+    cari_gerhana_matahari_kandidat_ringan().
+
+    mode/ts/eph: mode perhitungan astronomi ('ringan'/'jpl') yang DIPAKAI
+    ULANG di sini utk semua perhitungan detail (kontak umum, lintasan,
+    jejak penumbra, titik sumbu bayangan) -- idealnya SAMA dengan mode yang
+    dipakai saat mencari kandidat_gerhana ini (cari_gerhana_matahari_kandidat_
+    ringan), supaya seluruh peta konsisten satu tingkat presisi. Style peta konsisten dgn
     buat_figure_mabims/muhammadiyah (PlateCarree, LAND/OCEAN/COASTLINE
     dipatok .with_scale("110m") -- lihat catatan di
     _gambar_peta_dasar_indonesia soal kenapa ini penting).
+
+    mode_peta: 'datar' (default, PlateCarree/proyeksi persegi panjang biasa,
+    seluruh dunia sekali pandang) atau 'globe' (Orthographic -- proyeksi
+    bola 3D, dipusatkan PERSIS di titik greatest eclipse, mensimulasikan
+    Bumi dilihat dari sudut pandang si titik tsb menghadap penuh ke
+    pengamat). SEMUA data (lintasan, arsiran penumbra, marker) memakai
+    transform=ccrs.PlateCarree()/Geodetic() apa adanya -- itu CRS data
+    (lat/lon biasa), bukan proyeksi tampilan, jadi kode penggambarannya
+    TIDAK perlu diubah sama sekali antara dua mode; cukup ganti proyeksi
+    axes-nya saja.
 
     Menggambar DUA lapis informasi sekaligus:
       1) ARSIRAN wilayah penumbra (bayang-bayang kabur Bulan) -- daerah yang
@@ -3365,7 +3562,20 @@ def buat_figure_lintasan_gerhana_matahari(kandidat_gerhana, jendela_menit=150, l
     """
     waktu_greatest = kandidat_gerhana["waktu_greatest_eclipse"]
     kena_bumi = bool(kandidat_gerhana.get("kena_bumi"))
-    kontak = cari_kontak_gerhana_matahari(waktu_greatest)
+    kontak = cari_kontak_gerhana_matahari(waktu_greatest, mode=mode, ts=ts, eph=eph)
+
+    # Titik pusat "greatest eclipse" -- dihitung DULU (sebelum axes dibuat),
+    # karena ccrs.Orthographic butuh central_longitude/central_latitude
+    # SAAT KONSTRUKSI, tidak bisa diubah belakangan. Sumbernya SAMA dengan
+    # yang dipakai buat marker bintang di bawah (lat_perkiraan/lon_perkiraan
+    # utk kena_bumi=True, atau proyeksi radial _subtitik_sumbu_bayangan utk
+    # kena_bumi=False) -- supaya "pusat globe" & "titik greatest eclipse"
+    # SELALU sama persis, bukan dua sumber yang bisa beda.
+    if kena_bumi:
+        lat_pusat = kandidat_gerhana["lat_perkiraan"]
+        lon_pusat = kandidat_gerhana["lon_perkiraan"]
+    else:
+        lat_pusat, lon_pusat = _subtitik_sumbu_bayangan(waktu_greatest, mode, ts, eph)
 
     # Jendela dipakai utk memindai jejak (lintasan & penumbra) diperlebar
     # otomatis kalau perlu, supaya SELALU mencakup penuh P1..P4 (bukan cuma
@@ -3379,15 +3589,27 @@ def buat_figure_lintasan_gerhana_matahari(kandidat_gerhana, jendela_menit=150, l
     jendela_efektif = max(jendela_menit, _menit_offset(kontak["P1"]), _menit_offset(kontak["P4"])) + 10
 
     jejak_penumbra = hitung_bayangan_penumbra_gerhana_matahari(
-        waktu_greatest, jendela_menit=jendela_efektif, langkah_menit=max(langkah_menit * 2, 4))
+        waktu_greatest, jendela_menit=jendela_efektif, langkah_menit=max(langkah_menit * 2, 4),
+        mode=mode, ts=ts, eph=eph)
 
-    fig = plt.figure(figsize=(13, 7.2), constrained_layout=True)
-    ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
-    ax.set_extent([-180, 180, -90, 90], crs=ccrs.PlateCarree())
-    ax.add_feature(cfeature.LAND.with_scale("110m"), facecolor="lightgray")
-    ax.add_feature(cfeature.OCEAN.with_scale("110m"), facecolor="lightblue")
-    ax.add_feature(cfeature.BORDERS.with_scale("110m"), linewidth=0.4, edgecolor="dimgray")
-    ax.coastlines(resolution="110m", linewidth=0.5)
+    if mode_peta == "globe":
+        proyeksi = ccrs.Orthographic(central_longitude=lon_pusat, central_latitude=lat_pusat)
+        fig = plt.figure(figsize=(9.5, 9), constrained_layout=True)
+    else:
+        proyeksi = ccrs.PlateCarree()
+        fig = plt.figure(figsize=(13, 7.2), constrained_layout=True)
+    ax = fig.add_subplot(1, 1, 1, projection=proyeksi)
+    if mode_peta == "globe":
+        ax.set_global()
+    else:
+        ax.set_extent([-180, 180, -90, 90], crs=ccrs.PlateCarree())
+    _aman_tambah_fitur(ax, cfeature.LAND.with_scale("110m"), facecolor="lightgray")
+    _aman_tambah_fitur(ax, cfeature.OCEAN.with_scale("110m"), facecolor="lightblue")
+    _aman_tambah_fitur(ax, cfeature.BORDERS.with_scale("110m"), linewidth=0.4, edgecolor="dimgray")
+    try:
+        ax.coastlines(resolution="110m", linewidth=0.5)
+    except Exception as e:
+        print(f"[peringatan] Garis pantai dilewati (gagal digambar): {e}")
 
     import cartopy.geodesic as cgeo
     geodesic = cgeo.Geodesic()
@@ -3401,8 +3623,8 @@ def buat_figure_lintasan_gerhana_matahari(kandidat_gerhana, jendela_menit=150, l
     for p in jejak_penumbra:
         lingkaran = geodesic.circle(lon=p["lon"], lat=p["lat"], radius=p["r_penumbra_km"] * 1000, n_samples=60)
         poly = shapely.Polygon(lingkaran)
-        ax.add_geometries([poly], crs=ccrs.Geodetic(), facecolor="dimgray", edgecolor="none",
-                          alpha=0.045, zorder=2)
+        _aman_tambah_geometri(ax, [poly], ccrs.Geodetic(), facecolor="dimgray", edgecolor="none",
+                              alpha=0.045, zorder=2)
 
     # Batas terluar arsiran (lingkaran penumbra pertama=P1 & terakhir=P4)
     # digambar ulang dgn pola HATCH supaya "tepi wilayah terdampak" terlihat
@@ -3410,11 +3632,12 @@ def buat_figure_lintasan_gerhana_matahari(kandidat_gerhana, jendela_menit=150, l
     for p in ([jejak_penumbra[0], jejak_penumbra[-1]] if jejak_penumbra else []):
         lingkaran = geodesic.circle(lon=p["lon"], lat=p["lat"], radius=p["r_penumbra_km"] * 1000, n_samples=60)
         poly = shapely.Polygon(lingkaran)
-        ax.add_geometries([poly], crs=ccrs.Geodetic(), facecolor="none", edgecolor="dimgray",
-                          linewidth=0.6, hatch="////", alpha=0.55, zorder=3)
+        _aman_tambah_geometri(ax, [poly], ccrs.Geodetic(), facecolor="none", edgecolor="dimgray",
+                              linewidth=0.6, hatch="////", alpha=0.55, zorder=3)
 
     # ---- Lapis 2: lintasan garis tengah (hanya kalau kena_bumi) ----
-    lintasan = hitung_lintasan_gerhana_matahari(waktu_greatest, jendela_efektif, langkah_menit) \
+    lintasan = hitung_lintasan_gerhana_matahari(waktu_greatest, jendela_efektif, langkah_menit,
+                                                 mode=mode, ts=ts, eph=eph) \
         if kena_bumi else []
     lats = [p["lat"] for p in lintasan]
     lons = [p["lon"] for p in lintasan]
@@ -3456,15 +3679,18 @@ def buat_figure_lintasan_gerhana_matahari(kandidat_gerhana, jendela_menit=150, l
         # (memang None). Tetap tandai titik greatest eclipse supaya peta
         # tidak kosong dari penanda -- pakai proyeksi radial sumbu bayangan
         # (_subtitik_sumbu_bayangan, SELALU ada titik) sbg perkiraan lokasi
-        # "puncak" gerhana sebagian ini.
-        lat_g, lon_g = _subtitik_sumbu_bayangan(waktu_greatest)
-        ax.plot(lon_g, lat_g, marker="*", color="darkred", markersize=16,
+        # "puncak" gerhana sebagian ini. (lat_pusat/lon_pusat sudah dihitung
+        # di atas -- titik yang sama persis dipakai sbg pusat mode 'globe'.)
+        ax.plot(lon_pusat, lat_pusat, marker="*", color="darkred", markersize=16,
                 transform=ccrs.PlateCarree(),
                 label="Greatest eclipse (perkiraan, parsial saja)", zorder=6)
 
-    gl = ax.gridlines(draw_labels=True, linewidth=0.3, alpha=0.5)
-    gl.top_labels = False
-    gl.right_labels = False
+    if mode_peta == "globe":
+        ax.gridlines(draw_labels=False, linewidth=0.3, alpha=0.5)
+    else:
+        gl = ax.gridlines(draw_labels=True, linewidth=0.3, alpha=0.5)
+        gl.top_labels = False
+        gl.right_labels = False
 
     judul_jenis = "Lintasan Gerhana Matahari" if kena_bumi else "Gerhana Matahari Sebagian (Parsial Saja)"
     ax.set_title(f"{judul_jenis} — {waktu_greatest.strftime('%d %B %Y')}\n"
@@ -3511,7 +3737,7 @@ def buat_figure_lintasan_gerhana_matahari(kandidat_gerhana, jendela_menit=150, l
     return fig
 
 
-def _subtitik_bulan(waktu):
+def _subtitik_bulan(waktu, mode="ringan", ts=None, eph=None):
     """Titik di Bumi tempat Bulan tepat di zenith (posisi pengamat terbaik
     utk melihat gerhana Bulan pas waktu itu). KONSEPNYA BEDA dari
     _subtitik_sumbu_bayangan() (dipakai gerhana Matahari -- itu titik di
@@ -3519,19 +3745,31 @@ def _subtitik_bulan(waktu):
     kepala", dipakai sbg pusat lingkaran wilayah visibilitas gerhana Bulan
     (yg SELALU meliputi hampir separuh Bumi -- beda total dari gerhana
     Matahari yg jalurnya sempit)."""
-    _, P_moon, gast, _ = _vektor_matahari_bulan_gast(waktu)
+    _, P_moon, gast, _ = _vektor_matahari_bulan_gast(waktu, mode, ts, eph)
     x, y, z = P_moon
     lat = np.degrees(np.arcsin(z / np.linalg.norm(P_moon)))
     lon = ((np.degrees(np.arctan2(y, x)) - gast + 180) % 360) - 180
     return float(lat), float(lon)
 
 
-def buat_figure_visibilitas_gerhana_bulan(kandidat_gerhana, kontak=None):
+def buat_figure_visibilitas_gerhana_bulan(kandidat_gerhana, kontak=None, mode_peta="datar",
+                                           mode="ringan", ts=None, eph=None):
     """Peta dunia wilayah visibilitas gerhana Bulan. KONSEP PETANYA BEDA
+
+    mode/ts/eph: mode perhitungan astronomi ('ringan'/'jpl'), idealnya SAMA
+    dengan mode yang dipakai saat mencari kandidat_gerhana ini
+    (cari_gerhana_bulan_kandidat_ringan) -- lihat catatan yang sama di
+    buat_figure_lintasan_gerhana_matahari().
     TOTAL dari gerhana Matahari (yg jalur totalitasnya sempit, cuma
     beberapa ratus km lebar): gerhana Bulan SELALU terlihat SERENTAK dari
     SELURUH belahan Bumi yg sedang malam & Bulan-nya di atas horizon --
     jadi yg digambar bukan "lintasan", tapi WILAYAH (hampir separuh Bumi).
+
+    mode_peta: 'datar' (default, PlateCarree) atau 'globe' (Orthographic,
+    dipusatkan di titik Bulan tepat di zenith saat greatest eclipse --
+    "greatest point" versi gerhana Bulan) -- lihat catatan lengkap soal
+    kenapa kode penggambaran datanya tidak perlu berubah sama sekali di
+    buat_figure_lintasan_gerhana_matahari().
 
     Dua lapis lingkaran horizon (radius geodesic 90 derajat dari
     _subtitik_bulan(), pakai cartopy.geodesic sama seperti arsiran
@@ -3555,38 +3793,62 @@ def buat_figure_visibilitas_gerhana_bulan(kandidat_gerhana, kontak=None):
 
     waktu_greatest = kandidat_gerhana["waktu_greatest_eclipse"]
     if kontak is None:
-        kontak = cari_kontak_gerhana_bulan(waktu_greatest)
+        kontak = cari_kontak_gerhana_bulan(waktu_greatest, mode=mode, ts=ts, eph=eph)
 
     import cartopy.geodesic as cgeo
     geodesic = cgeo.Geodesic()
     RE_RATA_RATA_M = 6371000.0
-    RADIUS_HORIZON_M = (np.pi / 2) * RE_RATA_RATA_M   # seperempat keliling Bumi = batas horizon
+    # Seperempat keliling Bumi (90 derajat) = batas horizon SEBENARNYA.
+    # TAPI 90 derajat persis = TEPAT di tepi piringan proyeksi Orthographic
+    # (mode 'globe') -- lingkaran yg menyentuh persis batas piringan itu
+    # memicu bug clipping GEOS/JTS di cartopy ("IllegalArgumentException:
+    # point array must contain 0 or > 1 elements", muncul saat proyeksi
+    # meng-clip polygon yg tangent/pas di garis batas). Dikecilkan 0.1%
+    # (99.9%) supaya sedikit di DALAM piringan -- beda visual tidak
+    # signifikan (<0.1% radius) tapi menghindari kasus tangent tsb sama
+    # sekali, di mode 'datar' maupun 'globe'.
+    RADIUS_HORIZON_M = (np.pi / 2) * 0.999 * RE_RATA_RATA_M
 
     def _lingkaran_horizon(waktu):
-        lat, lon = _subtitik_bulan(waktu)
+        lat, lon = _subtitik_bulan(waktu, mode, ts, eph)
         titik = geodesic.circle(lon=lon, lat=lat, radius=RADIUS_HORIZON_M, n_samples=120)
         return shapely.Polygon(titik), lat, lon
 
-    fig = plt.figure(figsize=(13, 7.2), constrained_layout=True)
-    ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
-    ax.set_extent([-180, 180, -90, 90], crs=ccrs.PlateCarree())
-    ax.add_feature(cfeature.LAND.with_scale("110m"), facecolor="lightgray")
-    ax.add_feature(cfeature.OCEAN.with_scale("110m"), facecolor="lightblue")
-    ax.add_feature(cfeature.BORDERS.with_scale("110m"), linewidth=0.4, edgecolor="dimgray")
-    ax.coastlines(resolution="110m", linewidth=0.5)
+    # Titik pusat "greatest eclipse" (Bulan tepat di zenith) -- dihitung DULU,
+    # sebelum axes dibuat, sama alasannya dgn versi gerhana Matahari.
+    lat_pusat, lon_pusat = _subtitik_bulan(waktu_greatest, mode, ts, eph)
+
+    if mode_peta == "globe":
+        proyeksi = ccrs.Orthographic(central_longitude=lon_pusat, central_latitude=lat_pusat)
+        fig = plt.figure(figsize=(9.5, 9), constrained_layout=True)
+    else:
+        proyeksi = ccrs.PlateCarree()
+        fig = plt.figure(figsize=(13, 7.2), constrained_layout=True)
+    ax = fig.add_subplot(1, 1, 1, projection=proyeksi)
+    if mode_peta == "globe":
+        ax.set_global()
+    else:
+        ax.set_extent([-180, 180, -90, 90], crs=ccrs.PlateCarree())
+    _aman_tambah_fitur(ax, cfeature.LAND.with_scale("110m"), facecolor="lightgray")
+    _aman_tambah_fitur(ax, cfeature.OCEAN.with_scale("110m"), facecolor="lightblue")
+    _aman_tambah_fitur(ax, cfeature.BORDERS.with_scale("110m"), linewidth=0.4, edgecolor="dimgray")
+    try:
+        ax.coastlines(resolution="110m", linewidth=0.5)
+    except Exception as e:
+        print(f"[peringatan] Garis pantai dilewati (gagal digambar): {e}")
 
     # ---- Lapis 1: batas horizon terluar (P1 & P4, kalau ada) ----
     for t in (kontak.get("P1"), kontak.get("P4")):
         if t is not None:
             poly, _, _ = _lingkaran_horizon(t)
-            ax.add_geometries([poly], crs=ccrs.Geodetic(), facecolor="none",
-                              edgecolor="darkorange", linewidth=1.3, linestyle="--",
-                              alpha=0.85, zorder=3)
+            _aman_tambah_geometri(ax, [poly], ccrs.Geodetic(), facecolor="none",
+                                  edgecolor="darkorange", linewidth=1.3, linestyle="--",
+                                  alpha=0.85, zorder=3)
 
     # ---- Lapis 2: wilayah utama, greatest eclipse ----
     poly_greatest, lat_g, lon_g = _lingkaran_horizon(waktu_greatest)
-    ax.add_geometries([poly_greatest], crs=ccrs.Geodetic(), facecolor="navy",
-                      edgecolor="darkblue", linewidth=1.5, alpha=0.25, zorder=2)
+    _aman_tambah_geometri(ax, [poly_greatest], ccrs.Geodetic(), facecolor="navy",
+                          edgecolor="darkblue", linewidth=1.5, alpha=0.25, zorder=2)
 
     ax.plot(lon_g, lat_g, marker="*", color="gold", markeredgecolor="black",
             markeredgewidth=0.8, markersize=17, transform=ccrs.PlateCarree(), zorder=6)
@@ -4038,6 +4300,559 @@ def hitung_waktu_sholat_otomatis(tanggal, lat_deg, lon_deg, zona_offset_jam, mod
         return hitung_waktu_sholat_skyfield(tanggal, lat_deg, lon_deg, zona_offset_jam,
                                              ts, eph, **kwargs)
     return hitung_waktu_sholat(tanggal, lat_deg, lon_deg, zona_offset_jam, **kwargs)
+
+
+def _label_jam_dari_desimal(jam_desimal):
+    """'HH:MM' dari jam desimal (0-24), dibulatkan ke menit terdekat."""
+    jl = jam_desimal % 24.0
+    hh = int(jl)
+    mm = int(round((jl - hh) * 60))
+    if mm == 60:
+        mm = 0
+        hh = (hh + 1) % 24
+    return f"{hh:02d}:{mm:02d}"
+
+
+def _cari_rts_dari_sampel(jam_lokal_arr, alt_arr, ambang_deg=-0.8333):
+    """Dari sampel altitude (apparent, sudah terefraksi) sepanjang satu hari
+    -- jam_lokal_arr (jam desimal 0..24) & alt_arr (derajat, boleh berisi
+    None untuk titik yang gagal dibaca) -- cari waktu TERBIT (naik lewat
+    ambang), TRANSIT (kulminasi atas / altitude maksimum), & TERBENAM
+    (turun lewat ambang), semua dalam jam desimal LOKAL. Dipakai oleh mode
+    Ringan & Online (Horizons); mode Presisi/JPL pakai fungsi almanac
+    bawaan Skyfield sendiri (lihat _hitung_rts_jpl), yang tidak butuh
+    sampling manual.
+
+    ambang_deg default -0.8333 derajat: konvensi yang sama dipakai di
+    seluruh HisabWin untuk ambang terbit/terbenam Matahari (refraksi +
+    semi-diameter standar, lihat SUDUT_TERBIT_TERBENAM/hitung_waktu_sholat)
+    -- dipakai juga untuk Bulan di sini sebagai pendekatan yang cukup
+    akurat untuk kebutuhan tabel (selisih semi-diameter & parallax Bulan
+    terhadap ambang Matahari umumnya < 1 menit busur, di bawah presisi
+    interpolasi linear antar sampel).
+
+    Rise/set dicari lewat interpolasi LINEAR antara dua sampel yang
+    mengapit perlintasan ambang (hanya perlintasan PERTAMA yang diambil,
+    cukup untuk kasus lintang rendah/menengah tanpa hari kutub). Transit
+    dicari dari sampel altitude tertinggi, lalu diperhalus lewat fit
+    parabola 3-titik di sekitarnya. Return dict {"terbit":.., "transit":..,
+    "terbenam":..} (nilai None kalau ambang tidak pernah dilintasi, mis.
+    Bulan yang sedang circumpolar/tidak pernah terbit di hari itu)."""
+    n = len(alt_arr)
+    terbit = None
+    terbenam = None
+    for i in range(n - 1):
+        a1, a2 = alt_arr[i], alt_arr[i + 1]
+        if a1 is None or a2 is None:
+            continue
+        if terbit is None and a1 < ambang_deg <= a2:
+            frac = (ambang_deg - a1) / (a2 - a1)
+            terbit = jam_lokal_arr[i] + frac * (jam_lokal_arr[i + 1] - jam_lokal_arr[i])
+        if terbenam is None and a1 >= ambang_deg > a2:
+            frac = (a1 - ambang_deg) / (a1 - a2)
+            terbenam = jam_lokal_arr[i] + frac * (jam_lokal_arr[i + 1] - jam_lokal_arr[i])
+
+    alt_valid = [(-999.0 if a is None else a) for a in alt_arr]
+    idx_max = int(np.argmax(alt_valid))
+    transit = float(jam_lokal_arr[idx_max])
+    if 0 < idx_max < n - 1 and alt_valid[idx_max] > -999.0:
+        y0, y1, y2 = alt_valid[idx_max - 1], alt_valid[idx_max], alt_valid[idx_max + 1]
+        if y0 > -999.0 and y2 > -999.0:
+            denom = (y0 - 2 * y1 + y2)
+            if denom != 0:
+                delta = 0.5 * (y0 - y2) / denom
+                langkah = jam_lokal_arr[idx_max + 1] - jam_lokal_arr[idx_max]
+                transit = float(jam_lokal_arr[idx_max] + delta * langkah)
+
+    return {"terbit": terbit, "transit": transit, "terbenam": terbenam}
+
+
+def _hitung_rts_ringan(tanggal, lat_deg, lon_deg, zona_offset_jam, elevasi_m=0.0):
+    """RTS (terbit/transit/terbenam) Matahari & Bulan mode RINGAN.
+
+    Matahari: pakai formula sudut-jam TERTUTUP (_sudut_jam_matahari, lewat
+    hitung_waktu_sholat) -- deklinasi Matahari nyaris konstan sepanjang
+    hari jadi tidak perlu iterasi/sampling, presisinya identik dengan
+    waktu terbit/dzuhur/maghrib yang sudah dipakai di tab Waktu Sholat.
+
+    Bulan: deklinasi & parallax berubah cukup cepat sepanjang hari (beda
+    dengan Matahari), jadi TIDAK dipakai formula tertutup -- disampling
+    tiap ~2 menit (721 titik, vektor numpy, BUKAN loop Python) sepanjang
+    hari lalu dicari lewat _cari_rts_dari_sampel(), pola yang sama dengan
+    hitung_tabel_efemeris_ringan()."""
+    sholat = hitung_waktu_sholat(tanggal, lat_deg, lon_deg, zona_offset_jam,
+                                  elevasi_m=elevasi_m, ihtiyat_menit=0.0)
+    matahari = {"terbit": sholat["terbit"], "transit": sholat["dzuhur"], "terbenam": sholat["maghrib"]}
+
+    n = 721
+    jam_lokal = np.linspace(0.0, 24.0, n)
+    jam_utc = jam_lokal - zona_offset_jam
+    tahun_a = np.full(jam_utc.shape, tanggal.year, dtype=float)
+    bulan_a = np.full(jam_utc.shape, tanggal.month, dtype=float)
+    hari_a = tanggal.day + jam_utc / 24.0
+
+    jd_ut = julian_day(tahun_a, bulan_a, hari_a)
+    dt_hari = delta_t_detik(tanggal.year, tanggal.month) / 86400.0
+    T = (jd_ut + dt_hari - 2451545.0) / 36525.0
+
+    ra_m, dec_m, _, _, _, par_m = posisi_bulan(T)
+    dpsi, deps = nutasi_singkat(T)
+    eps = (23 + 26 / 60 + 21.448 / 3600 - (46.8150 * T) / 3600) + deps
+    gast = gast_derajat(jd_ut, T, dpsi, eps)
+    lst = (gast + lon_deg) % 360
+    H_moon = ((lst - ra_m + 180) % 360) - 180
+
+    alt_moon_geo = altitude_geosentris(lat_deg, dec_m, H_moon)
+    alt_moon_true = altitude_topocentris_bulan(alt_moon_geo, par_m)
+    alt_moon_app = alt_moon_true + koreksi_refraksi(alt_moon_true)
+
+    bulan = _cari_rts_dari_sampel(list(jam_lokal), list(alt_moon_app))
+    return {"matahari": matahari, "bulan": bulan}
+
+
+def _jam_lokal_dari_time_jika_hari_ini(t, zona_offset_jam, tanggal_lokal):
+    """Konversi waktu Skyfield/datetime UTC 't' ke jam desimal LOKAL, TAPI
+    hanya kalau tanggal lokalnya sama dengan tanggal_lokal -- kalau jatuh
+    di hari sebelum/sesudahnya (bisa terjadi karena jendela pencarian
+    _hitung_rts_jpl() sengaja dilebarkan), return None supaya tidak salah
+    ambil kejadian hari lain."""
+    dt_utc = ke_utc_datetime(t)
+    dt_lokal = dt_utc + timedelta(hours=zona_offset_jam)
+    if dt_lokal.date() != tanggal_lokal.date():
+        return None
+    return dt_lokal.hour + dt_lokal.minute / 60.0 + dt_lokal.second / 3600.0
+
+
+def _hitung_rts_jpl(tanggal, lat_deg, lon_deg, zona_offset_jam, ts, eph, elevasi_m=0.0):
+    """RTS mode Presisi: pakai almanac.find_risings/find_settings/
+    find_transits BAWAAN Skyfield (horizon_degrees dibiarkan default/None
+    -> Skyfield otomatis pakai ambang standar KHUSUS PER TARGET, refraksi +
+    jari-jari piringan sudah diperhitungkan sendiri berdasarkan jarak
+    aktual target -- lebih presisi daripada ambang tunggal -0.8333 yang
+    dipakai mode Ringan/Online, dan tidak butuh sampling manual sama
+    sekali). Jendela pencarian dilebarkan +-6 jam dari batas hari lokal
+    supaya kejadian yang jatuh persis di sekitar tengah malam lokal tetap
+    tertangkap, lalu difilter balik ke tanggal lokal yang diminta."""
+    observer, _ = _observer_skyfield(eph, lat_deg, lon_deg, elevasi_m)
+    sun = eph["sun"]
+    moon = eph["moon"]
+
+    awal_lokal = datetime(tanggal.year, tanggal.month, tanggal.day) - timedelta(hours=6)
+    akhir_lokal = awal_lokal + timedelta(hours=36)
+    awal_utc = awal_lokal - timedelta(hours=zona_offset_jam)
+    akhir_utc = akhir_lokal - timedelta(hours=zona_offset_jam)
+    t0 = ts.utc(awal_utc.year, awal_utc.month, awal_utc.day, awal_utc.hour, awal_utc.minute, awal_utc.second)
+    t1 = ts.utc(akhir_utc.year, akhir_utc.month, akhir_utc.day, akhir_utc.hour, akhir_utc.minute, akhir_utc.second)
+
+    def _pilih_hari_ini(t_arr):
+        for t in t_arr:
+            jam = _jam_lokal_dari_time_jika_hari_ini(t, zona_offset_jam, tanggal)
+            if jam is not None:
+                return jam
+        return None
+
+    def _proses(target):
+        t_naik, _ = almanac.find_risings(observer, target, t0, t1)
+        t_turun, _ = almanac.find_settings(observer, target, t0, t1)
+        t_transit = almanac.find_transits(observer, target, t0, t1)
+        return {
+            "terbit": _pilih_hari_ini(t_naik),
+            "transit": _pilih_hari_ini(t_transit),
+            "terbenam": _pilih_hari_ini(t_turun),
+        }
+
+    return {"matahari": _proses(sun), "bulan": _proses(moon)}
+
+
+def _hitung_rts_horizons(tanggal, lat_deg, lon_deg, zona_offset_jam, elevasi_m=0.0,
+                          interval_menit_rts=5):
+    """RTS mode Online (JPL Horizons): sampling altitude apparent
+    (REFRACTED, lewat _minta_horizons) tiap `interval_menit_rts` menit
+    (default 5 menit -- SENGAJA lebih halus dari interval tabel utama yang
+    dipilih user, supaya waktu naik/transit/turun cukup presisi walau
+    tabelnya sendiri mis. per jam) sepanjang hari, lalu dicari lewat
+    _cari_rts_dari_sampel() -- pola sama dengan mode Ringan, supaya ketiga
+    mode sebanding. WAJIB koneksi internet: 2 request HTTP TAMBAHAN (di
+    luar 2 request tabel utama), satu per benda langit."""
+    n_langkah = int(round(24.0 * 60.0 / interval_menit_rts))
+    jam_lokal = np.linspace(0.0, 24.0, n_langkah + 1)
+    waktu_mulai_utc = datetime(tanggal.year, tanggal.month, tanggal.day) - timedelta(hours=zona_offset_jam)
+    waktu_akhir_utc = waktu_mulai_utc + timedelta(hours=24)
+
+    try:
+        import requests
+        teks_sun = _minta_horizons("10", lat_deg, lon_deg, elevasi_m,
+                                    waktu_mulai_utc, waktu_akhir_utc, interval_menit_rts, "4")
+        teks_moon = _minta_horizons("301", lat_deg, lon_deg, elevasi_m,
+                                     waktu_mulai_utc, waktu_akhir_utc, interval_menit_rts, "4")
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(
+            "Gagal menghubungi JPL Horizons (ssd.jpl.nasa.gov) saat mencari waktu "
+            f"terbit/transit/terbenam. Detail teknis: {e}") from e
+
+    baris_sun = _parse_baris_csv_horizons(teks_sun)
+    baris_moon = _parse_baris_csv_horizons(teks_moon)
+
+    def _alt_arr(baris):
+        # QUANTITIES='4' -> HANYA azimuth & elevation apparent, jadi SELALU
+        # 2 kolom TERAKHIR tiap baris. JANGAN gabung dgn kuantitas lain (mis.
+        # '20' utk jarak) di sini -- kalau ada kuantitas lain SETELAH '4',
+        # b[-2:] akan ambil kolom kuantitas itu (mis. delta/deldot), BUKAN
+        # az/el, dan altitude yang dipakai pencarian RTS jadi salah total
+        # (nilainya bukan derajat altitude sama sekali) -- ini bug yang
+        # sempat kejadian saat masih pakai QUANTITIES='4,20'.
+        hasil = []
+        for b in baris:
+            try:
+                _az, el = (float(x) for x in b[-2:])
+            except (ValueError, IndexError):
+                el = None
+            hasil.append(el)
+        return hasil
+
+    return {
+        "matahari": _cari_rts_dari_sampel(list(jam_lokal), _alt_arr(baris_sun)),
+        "bulan": _cari_rts_dari_sampel(list(jam_lokal), _alt_arr(baris_moon)),
+    }
+
+
+def hitung_rts(tanggal, lat_deg, lon_deg, zona_offset_jam, mode="ringan",
+                ts=None, eph=None, elevasi_m=0.0):
+    """Dispatcher RTS (terbit/transit/terbenam Matahari & Bulan): pola sama
+    persis seperti hitung_tabel_efemeris() -- pilih implementasi sesuai
+    mode, mode='jpl' tapi ts/eph belum siap jatuh balik ke mode Ringan,
+    mode='horizons' yang gagal (mis. tidak ada internet) dibiarkan naik apa
+    adanya ke pemanggil. Return dict {"matahari": {...}, "bulan": {...}},
+    tiap isinya {"terbit":.., "transit":.., "terbenam":..} dalam jam
+    desimal LOKAL (atau None kalau tidak melintasi ambang hari itu)."""
+    if mode == "horizons":
+        return _hitung_rts_horizons(tanggal, lat_deg, lon_deg, zona_offset_jam, elevasi_m=elevasi_m)
+    if mode == "jpl" and ts is not None and eph is not None:
+        return _hitung_rts_jpl(tanggal, lat_deg, lon_deg, zona_offset_jam, ts, eph, elevasi_m=elevasi_m)
+    return _hitung_rts_ringan(tanggal, lat_deg, lon_deg, zona_offset_jam, elevasi_m=elevasi_m)
+
+
+def hitung_tabel_efemeris_ringan(tanggal, lat_deg, lon_deg, zona_offset_jam,
+                                  interval_menit=60, elevasi_m=0.0):
+    """Tabel efemeris (posisi Matahari & Bulan) mode RINGAN (VSOP87 +
+    ELP2000-82B, tanpa file eksternal), tiap `interval_menit` menit
+    sepanjang satu hari waktu setempat (00:00 s.d. 24:00, inklusif kedua
+    ujung). Dipakai untuk tab "Tabel Efemeris" di GUI.
+
+    Altitude yang dilaporkan sudah APPARENT (refraksi atmosfer standar
+    ditambahkan; khusus Bulan, paralaks juga sudah dikoreksi) -- posisi
+    yang benar-benar terlihat pengamat, sama pendekatannya dengan
+    alt_moon_topo di _altaz_matahari_bulan().
+
+    Return: list of dict, satu per baris waktu, dengan kunci:
+      jam_lokal (jam desimal), label_jam ('HH:MM'),
+      az_matahari, alt_matahari, dec_matahari (derajat),
+      az_bulan, alt_bulan, dec_bulan (derajat), jarak_bulan_km,
+      elongasi_deg, fraksi_iluminasi_persen.
+    """
+    n_langkah = int(round(24.0 * 60.0 / interval_menit))
+    jam_lokal = np.linspace(0.0, 24.0, n_langkah + 1)
+    jam_utc = jam_lokal - zona_offset_jam
+
+    tahun_a = np.full(jam_utc.shape, tanggal.year, dtype=float)
+    bulan_a = np.full(jam_utc.shape, tanggal.month, dtype=float)
+    hari_a = tanggal.day + jam_utc / 24.0
+
+    jd_ut = julian_day(tahun_a, bulan_a, hari_a)
+    dt_hari = delta_t_detik(tanggal.year, tanggal.month) / 86400.0
+    T = (jd_ut + dt_hari - 2451545.0) / 36525.0
+
+    ra_s, dec_s, _, _ = posisi_matahari(T)
+    ra_m, dec_m, _, _, jarak_m, par_m = posisi_bulan(T)
+    dpsi, deps = nutasi_singkat(T)
+    eps = (23 + 26 / 60 + 21.448 / 3600 - (46.8150 * T) / 3600) + deps
+
+    gast = gast_derajat(jd_ut, T, dpsi, eps)
+    lst = (gast + lon_deg) % 360
+
+    H_sun = ((lst - ra_s + 180) % 360) - 180
+    H_moon = ((lst - ra_m + 180) % 360) - 180
+
+    def _az_alt_geo(dec_deg, H_deg):
+        """Azimuth (dari Utara, searah jarum jam) & altitude geosentris."""
+        lat_r = np.radians(lat_deg)
+        dec_r, H_r = np.radians(dec_deg), np.radians(H_deg)
+        alt = altitude_geosentris(lat_deg, dec_deg, H_deg)
+        alt_r = np.radians(alt)
+        sin_az = -np.sin(H_r) * np.cos(dec_r) / np.cos(alt_r)
+        cos_az = (np.sin(dec_r) - np.sin(alt_r) * np.sin(lat_r)) / (np.cos(alt_r) * np.cos(lat_r))
+        az = np.degrees(np.arctan2(sin_az, cos_az)) % 360
+        return az, alt
+
+    az_sun, alt_sun_geo = _az_alt_geo(dec_s, H_sun)
+    az_moon, alt_moon_geo = _az_alt_geo(dec_m, H_moon)
+
+    alt_sun_app = alt_sun_geo + koreksi_refraksi(alt_sun_geo)
+    alt_moon_true = altitude_topocentris_bulan(alt_moon_geo, par_m)
+    alt_moon_app = alt_moon_true + koreksi_refraksi(alt_moon_true)
+
+    cos_elong = (np.sin(np.radians(dec_s)) * np.sin(np.radians(dec_m))
+                 + np.cos(np.radians(dec_s)) * np.cos(np.radians(dec_m))
+                 * np.cos(np.radians(ra_s - ra_m)))
+    elong = np.degrees(np.arccos(np.clip(cos_elong, -1.0, 1.0)))
+    # Perkiraan fraksi iluminasi piringan Bulan dari elongasi geosentris
+    # (fase Bulan): 0% saat konjungsi (elongasi 0), 100% saat purnama
+    # (elongasi 180) -- pendekatan standar yang mengabaikan sedikit selisih
+    # antara elongasi & sudut fase akibat jarak Bumi-Bulan-Matahari
+    # terhingga (< 0.2% di seluruh siklus, cukup akurat untuk tabel ini).
+    fraksi_iluminasi = (1.0 - np.cos(np.radians(elong))) / 2.0 * 100.0
+
+    hasil = []
+    for i in range(len(jam_lokal)):
+        hasil.append({
+            "jam_lokal": float(jam_lokal[i]),
+            "label_jam": _label_jam_dari_desimal(jam_lokal[i]),
+            "az_matahari": float(az_sun[i]), "alt_matahari": float(alt_sun_app[i]),
+            "dec_matahari": float(dec_s[i]),
+            "az_bulan": float(az_moon[i]), "alt_bulan": float(alt_moon_app[i]),
+            "dec_bulan": float(dec_m[i]), "jarak_bulan_km": float(jarak_m[i]),
+            "elongasi_deg": float(elong[i]),
+            "fraksi_iluminasi_persen": float(fraksi_iluminasi[i]),
+        })
+    return hasil
+
+
+def hitung_tabel_efemeris_jpl(tanggal, lat_deg, lon_deg, zona_offset_jam, ts, eph,
+                               interval_menit=60, elevasi_m=0.0):
+    """Versi presisi tinggi dari hitung_tabel_efemeris_ringan(): posisi
+    Matahari & Bulan topocentric (azimuth/altitude apparent) dihitung
+    langsung dari ephemeris JPL DE421 via Skyfield, dan fraksi iluminasi
+    Bulan memakai almanac.fraction_illuminated() (bukan pendekatan
+    elongasi geosentris). Struktur hasil (list of dict) sama persis
+    dengan versi Ringan, supaya kedua mode bisa dipakai bergantian oleh
+    kode pemanggil (GUI) tanpa perubahan lain."""
+    n_langkah = int(round(24.0 * 60.0 / interval_menit))
+    jam_lokal = np.linspace(0.0, 24.0, n_langkah + 1)
+    jam_utc = jam_lokal - zona_offset_jam
+
+    observer, _ = _observer_skyfield(eph, lat_deg, lon_deg, elevasi_m)
+    earth = eph["earth"]
+    sun = eph["sun"]
+    moon = eph["moon"]
+
+    t = ts.utc(tanggal.year, tanggal.month, tanggal.day, jam_utc)
+
+    # Refraksi atmosfer standar (10°C, 1010 mbar) WAJIB diisi eksplisit di
+    # sini -- tanpa temperature_C/pressure_mbar, altaz() Skyfield cuma
+    # mengembalikan altitude geometris (belum terefraksi), TIDAK konsisten
+    # dengan hitung_tabel_efemeris_ringan() (yang eksplisit menambahkan
+    # koreksi_refraksi() ke alt_matahari & alt_bulan) maupun
+    # hitung_tabel_efemeris_horizons() (yang minta APPARENT=REFRACTED ke
+    # JPL Horizons) -- lihat juga pola yang sama di hitung_grid_jpl().
+    alt_sun, az_sun, _ = observer.at(t).observe(sun).apparent().altaz(
+        temperature_C=10.0, pressure_mbar=1010.0)
+    alt_moon, az_moon, jarak_moon = observer.at(t).observe(moon).apparent().altaz(
+        temperature_C=10.0, pressure_mbar=1010.0)
+
+    # Deklinasi & elongasi dihitung dari posisi GEOSENTRIS (diamati dari
+    # pusat Bumi, bukan dari lokasi pengamat) -- konsisten dengan makna
+    # "deklinasi" & "elongasi" di bagian lain aplikasi ini (mis.
+    # _altaz_matahari_bulan), yang tidak bergantung pada lokasi pengamat.
+    pos_sun_geo = earth.at(t).observe(sun).apparent()
+    pos_moon_geo = earth.at(t).observe(moon).apparent()
+    _, dec_sun, _ = pos_sun_geo.radec(epoch='date')
+    _, dec_moon, _ = pos_moon_geo.radec(epoch='date')
+    elong = pos_sun_geo.separation_from(pos_moon_geo)
+
+    fraksi_iluminasi = almanac.fraction_illuminated(eph, "moon", t) * 100.0
+
+    hasil = []
+    for i in range(len(jam_lokal)):
+        hasil.append({
+            "jam_lokal": float(jam_lokal[i]),
+            "label_jam": _label_jam_dari_desimal(jam_lokal[i]),
+            "az_matahari": float(az_sun.degrees[i]), "alt_matahari": float(alt_sun.degrees[i]),
+            "dec_matahari": float(dec_sun.degrees[i]),
+            "az_bulan": float(az_moon.degrees[i]), "alt_bulan": float(alt_moon.degrees[i]),
+            "dec_bulan": float(dec_moon.degrees[i]), "jarak_bulan_km": float(jarak_moon.km[i]),
+            "elongasi_deg": float(elong.degrees[i]),
+            "fraksi_iluminasi_persen": float(fraksi_iluminasi[i]),
+        })
+    return hasil
+
+
+HORIZONS_API_URL = "https://ssd.jpl.nasa.gov/api/horizons.api"
+HORIZONS_TIMEOUT_DETIK = 25
+HORIZONS_AU_KE_KM = 149597870.7
+
+
+def _minta_horizons(command, lat_deg, lon_deg, elevasi_m, waktu_mulai_utc, waktu_akhir_utc,
+                     interval_menit, quantities):
+    """Satu kali panggilan JPL Horizons API (Observer ephemeris, TOPOSENTRIK
+    persis di lat/lon/elevasi yang diberikan lewat SITE_COORD) -- dipakai
+    oleh hitung_tabel_efemeris_horizons(). Mengembalikan teks respons mentah
+    (format CSV, lihat _parse_baris_csv_horizons). WAJIB koneksi internet;
+    lempar requests.exceptions.RequestException kalau gagal (timeout, DNS,
+    tidak ada internet, dll) -- ditangkap & dijelaskan ulang oleh pemanggil."""
+    try:
+        import requests
+    except ImportError as e:
+        raise RuntimeError(
+            "Mode Online (JPL Horizons API) butuh paket Python 'requests' yang "
+            "belum terpasang. Pasang dulu dengan: pip install requests") from e
+
+    params = {
+        "format": "text",
+        "COMMAND": f"'{command}'",
+        "OBJ_DATA": "NO",
+        "MAKE_EPHEM": "YES",
+        "EPHEM_TYPE": "OBSERVER",
+        "CENTER": "'coord@399'",
+        "COORD_TYPE": "GEODETIC",
+        # SITE_COORD = 'bujur,lintang,elevasi(km)' -- bujur timur positif,
+        # sama konvensinya dengan lon_deg yang dipakai di seluruh HisabWin.
+        "SITE_COORD": f"'{lon_deg:.6f},{lat_deg:.6f},{elevasi_m / 1000.0:.4f}'",
+        "START_TIME": f"'{waktu_mulai_utc.strftime('%Y-%m-%d %H:%M')}'",
+        "STOP_TIME": f"'{waktu_akhir_utc.strftime('%Y-%m-%d %H:%M')}'",
+        "STEP_SIZE": f"'{interval_menit}m'",
+        "QUANTITIES": f"'{quantities}'",
+        "CSV_FORMAT": "YES",
+        "ANG_FORMAT": "DEG",
+        # REFRACTED supaya altitude yang dikembalikan JPL sudah termasuk
+        # koreksi refraksi atmosfer standar -- setara "apparent" di dua
+        # mode lain (Ringan & Presisi lokal), jadi tiga mode bisa
+        # dibandingkan apel-ke-apel.
+        "APPARENT": "REFRACTED",
+        "EXTRA_PREC": "YES",
+    }
+    resp = requests.get(HORIZONS_API_URL, params=params, timeout=HORIZONS_TIMEOUT_DETIK)
+    resp.raise_for_status()
+    return resp.text
+
+
+def _parse_baris_csv_horizons(teks):
+    """Ambil baris data di antara penanda '$$SOE'/'$$EOE' dari respons teks
+    JPL Horizons (CSV_FORMAT=YES), dikembalikan sebagai list of list-of-str
+    (tiap baris sudah displit koma & di-strip, kolom kosong di ujung -- sisa
+    trailing comma bawaan Horizons -- dibuang)."""
+    if "$$SOE" not in teks or "$$EOE" not in teks:
+        raise RuntimeError(
+            "Format respons JPL Horizons tidak dikenali (penanda data "
+            "'$$SOE'/'$$EOE' tidak ditemukan). Kemungkinan parameter query "
+            "keliru atau ada pesan error dari server. Cuplikan respons:\n"
+            + teks[:300])
+    blok = teks.split("$$SOE", 1)[1].split("$$EOE", 1)[0]
+    baris_hasil = []
+    for baris in blok.strip().splitlines():
+        if not baris.strip():
+            continue
+        kolom = [k.strip() for k in baris.split(",")]
+        while kolom and kolom[-1] == "":
+            kolom.pop()
+        baris_hasil.append(kolom)
+    return baris_hasil
+
+
+def hitung_tabel_efemeris_horizons(tanggal, lat_deg, lon_deg, zona_offset_jam,
+                                    interval_menit=60, elevasi_m=0.0):
+    """Versi ONLINE dari tabel efemeris: RA/DEC & azimuth/altitude apparent
+    (topocentric, refraksi standar sudah termasuk) Matahari & Bulan diambil
+    langsung dari JPL Horizons System (SSD/JPL, NASA) lewat API publiknya --
+    https://ssd.jpl.nasa.gov/api/horizons.api -- BUKAN dihitung sendiri oleh
+    HisabWin. WAJIB ADA KONEKSI INTERNET: tiap kali dipanggil, fungsi ini
+    mengirim 2 request HTTP (satu untuk Matahari, satu untuk Bulan) ke
+    server JPL, dan akan gagal kalau tidak ada internet atau server sedang
+    tidak bisa dihubungi.
+
+    Elongasi & fraksi iluminasi Bulan TETAP dihitung sendiri secara
+    geometris dari RA/DEC yang didapat dari Horizons (formula identik
+    dengan mode Ringan/Presisi) -- bukan diambil dari kolom elongasi bawaan
+    Horizons, supaya definisi "elongasi"/"iluminasi" konsisten di ketiga
+    mode, dan supaya parsing tidak bergantung pada kolom gabungan
+    angka+huruf penanda (leading/trailing) yang formatnya kurang baku untuk
+    diandalkan sebagai kontrak API jangka panjang.
+
+    Struktur hasil (list of dict) sama persis dengan dua mode lain, supaya
+    ketiganya bisa dipakai bergantian oleh GUI tanpa perubahan lain.
+    """
+    n_langkah = int(round(24.0 * 60.0 / interval_menit))
+    jam_lokal = np.linspace(0.0, 24.0, n_langkah + 1)
+
+    waktu_mulai_utc = datetime(tanggal.year, tanggal.month, tanggal.day) - timedelta(hours=zona_offset_jam)
+    waktu_akhir_utc = waktu_mulai_utc + timedelta(hours=24)
+
+    # QUANTITIES='2,4,20' -> RA apparent, DEC apparent, Azimuth, Elevation
+    # apparent, jarak (delta, dalam AU) & laju jaraknya (deldot) -- lima
+    # kuantitas ini kolom CSV-nya murni numerik & posisinya baku (SELALU
+    # jadi 6 kolom TERAKHIR tiap baris, apapun kolom lain -- mis. penanda
+    # siang/malam & bulan naik/turun -- yang disisipkan Horizons di depan).
+    # Karena itu diambil dgn indexing negatif (baris[-6:]), bukan dari awal.
+    try:
+        import requests
+        teks_sun = _minta_horizons("10", lat_deg, lon_deg, elevasi_m,
+                                    waktu_mulai_utc, waktu_akhir_utc, interval_menit, "2,4,20")
+        teks_moon = _minta_horizons("301", lat_deg, lon_deg, elevasi_m,
+                                     waktu_mulai_utc, waktu_akhir_utc, interval_menit, "2,4,20")
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(
+            "Gagal menghubungi JPL Horizons (ssd.jpl.nasa.gov). Pastikan "
+            f"komputer ini terhubung ke internet. Detail teknis: {e}") from e
+
+    baris_sun = _parse_baris_csv_horizons(teks_sun)
+    baris_moon = _parse_baris_csv_horizons(teks_moon)
+
+    if len(baris_sun) != n_langkah + 1 or len(baris_moon) != n_langkah + 1:
+        raise RuntimeError(
+            "Jumlah baris data dari JPL Horizons tidak sesuai perkiraan "
+            f"(Matahari: {len(baris_sun)} baris, Bulan: {len(baris_moon)} baris, "
+            f"diharapkan {n_langkah + 1} baris). Coba ulangi lagi, atau pakai "
+            "interval waktu yang lain.")
+
+    def _ambil_kolom_numerik(baris, label):
+        try:
+            ra, dec, az, el, delta_au, _deldot = (float(x) for x in baris[-6:])
+        except (ValueError, IndexError) as e:
+            raise RuntimeError(
+                f"Gagal membaca baris data {label} dari JPL Horizons -- format "
+                f"respons tidak sesuai dugaan. Baris mentah: {baris}") from e
+        return ra, dec, az, el, delta_au
+
+    hasil = []
+    for i in range(len(jam_lokal)):
+        ra_s, dec_s, az_s, alt_s, _ = _ambil_kolom_numerik(baris_sun[i], "Matahari")
+        ra_m, dec_m, az_m, alt_m, delta_au_m = _ambil_kolom_numerik(baris_moon[i], "Bulan")
+        jarak_m_km = delta_au_m * HORIZONS_AU_KE_KM
+
+        cos_elong = (np.sin(np.radians(dec_s)) * np.sin(np.radians(dec_m))
+                     + np.cos(np.radians(dec_s)) * np.cos(np.radians(dec_m))
+                     * np.cos(np.radians(ra_s - ra_m)))
+        elong = float(np.degrees(np.arccos(np.clip(cos_elong, -1.0, 1.0))))
+        fraksi_iluminasi = (1.0 - np.cos(np.radians(elong))) / 2.0 * 100.0
+
+        hasil.append({
+            "jam_lokal": float(jam_lokal[i]),
+            "label_jam": _label_jam_dari_desimal(jam_lokal[i]),
+            "az_matahari": az_s, "alt_matahari": alt_s, "dec_matahari": dec_s,
+            "az_bulan": az_m, "alt_bulan": alt_m, "dec_bulan": dec_m,
+            "jarak_bulan_km": jarak_m_km,
+            "elongasi_deg": elong,
+            "fraksi_iluminasi_persen": float(fraksi_iluminasi),
+        })
+    return hasil
+
+
+def hitung_tabel_efemeris(tanggal, lat_deg, lon_deg, zona_offset_jam, mode="ringan",
+                           ts=None, eph=None, interval_menit=60, elevasi_m=0.0):
+    """Dispatcher tabel efemeris: pilih sumber data sesuai mode, pola sama
+    seperti hitung_waktu_sholat_otomatis(). mode='jpl' tapi ts/eph belum
+    siap otomatis jatuh balik ke mode Ringan. mode='horizons' memanggil
+    JPL Horizons API online (lihat hitung_tabel_efemeris_horizons) -- kalau
+    gagal (mis. tidak ada internet), exception-nya dibiarkan naik apa
+    adanya ke pemanggil (bukan jatuh balik diam-diam ke mode offline),
+    supaya pengguna tahu datanya BUKAN dari JPL seperti yang diminta."""
+    if mode == "horizons":
+        return hitung_tabel_efemeris_horizons(tanggal, lat_deg, lon_deg, zona_offset_jam,
+                                               interval_menit=interval_menit, elevasi_m=elevasi_m)
+    if mode == "jpl" and ts is not None and eph is not None:
+        return hitung_tabel_efemeris_jpl(tanggal, lat_deg, lon_deg, zona_offset_jam, ts, eph,
+                                          interval_menit=interval_menit, elevasi_m=elevasi_m)
+    return hitung_tabel_efemeris_ringan(tanggal, lat_deg, lon_deg, zona_offset_jam,
+                                         interval_menit=interval_menit, elevasi_m=elevasi_m)
 
 
 def hitung_jadwal_sholat_bulan_jpl_vectorized(tahun, bulan, lat_deg, lon_deg, zona_offset_jam, ts, eph,
@@ -4570,6 +5385,13 @@ class HisabWinApp(tk.Tk):
         # yang harus dipanggil utk kandidat yang sedang dipilih di listbox.
         self._jenis_gerhana_terakhir = "matahari"
 
+        # Mode ('ringan'/'jpl') yang dipakai saat pencarian kandidat gerhana
+        # terakhir kali -- dipakai supaya _on_tampilkan_gerhana menghitung
+        # detail peta (lintasan/kontak/dsb) dgn presisi yg SAMA dgn yang
+        # dipakai mencari kandidatnya (bukan otomatis ikut self.mode SAAT
+        # tombol "Tampilkan Peta" ditekan, yang bisa saja sudah berubah).
+        self._mode_gerhana_terakhir = "ringan"
+
         # Flag: apakah perlu otomatis mencari ulang ijtimak setelah ephemeris JPL
         # selesai dimuat (dipicu saat user ganti mode padahal sudah pernah mencari).
         self._auto_cari_pending = False
@@ -4579,6 +5401,12 @@ class HisabWinApp(tk.Tk):
         # bisa mengekspor tanpa menghitung ulang.
         self._hasil_kalbanding_terakhir = None
         self._tab_kalbanding_ditambahkan = False
+
+        # Hasil tabel efemeris (posisi Matahari & Bulan tiap interval waktu)
+        # terakhir: list of dict dari hitung_tabel_efemeris() -- disimpan
+        # supaya tombol "Simpan ke CSV" bisa mengekspor tanpa menghitung ulang.
+        self._hasil_efemeris_terakhir = None
+        self._tab_efemeris_ditambahkan = False
 
         self.antrian = queue.Queue()
         self._poll_after_id = None  # id job after() yg sedang terjadwal (lihat _on_close)
@@ -4634,6 +5462,89 @@ class HisabWinApp(tk.Tk):
         except Exception as e:
             print(f"Gagal memuat logo.png: {e}")
             return None
+
+    def _tampilkan_tab_awal(self, wrapper_notebook):
+        """Tampilkan gambar 'bg.png' (dari folder yang sama dengan
+        script/exe ini -- lihat _resource_base_dir) MENUTUPI seluruh area
+        notebook kanan, supaya begitu aplikasi baru dibuka -- SEBELUM user
+        memproses apapun dan SEBELUM ada tab peta/hasil lain sama sekali
+        -- area kanan tidak kosong begitu saja, melainkan menampilkan
+        gambar latar tsb.
+
+        SENGAJA berupa overlay (place() di atas notebook), BUKAN tab
+        notebook sungguhan -- supaya tidak ikut mendapat tombol × bawaan
+        ClosableNotebook (notebook ini semua tabnya closable lewat 1
+        style yang sama, tidak bisa dikecualikan per-tab).
+
+        Overlay ini otomatis dilepas begitu tab "sungguhan" pertama
+        muncul (lihat _hapus_tab_awal, dipanggil dari _tab_peta_frame dan
+        semua _pastikan_tab_*_tampil). Kalau bg.png tidak ada/gagal
+        dibaca, method ini tidak melakukan apa-apa -- BUKAN error fatal,
+        aplikasi tetap jalan normal, cuma notebook kanan tampil kosong
+        seperti sebelumnya."""
+        path_bg = os.path.join(_resource_base_dir(), "bg.png")
+        if not os.path.isfile(path_bg):
+            return
+
+        label_bg = tk.Label(wrapper_notebook, bg=WARNA_PANEL, borderwidth=0, highlightthickness=0)
+
+        try:
+            from PIL import Image, ImageTk
+            img_asli = Image.open(path_bg).convert("RGB")
+        except ImportError:
+            img_asli = None
+            # Tanpa Pillow: tampilkan apa adanya (tanpa resize mengikuti
+            # ukuran jendela) lewat PhotoImage bawaan Tk.
+            try:
+                img_tk = tk.PhotoImage(file=path_bg)
+                label_bg.configure(image=img_tk)
+                label_bg.image = img_tk  # cegah digarbage-collect
+            except Exception as e:
+                print(f"Gagal memuat bg.png (tanpa Pillow): {e}")
+        except Exception as e:
+            img_asli = None
+            print(f"Gagal memuat bg.png: {e}")
+
+        if img_asli is not None:
+            def _render_ulang(event):
+                lebar, tinggi = max(event.width, 1), max(event.height, 1)
+                # mode "cover": diperbesar/diperkecil supaya menutupi
+                # seluruh area tanpa distorsi, kelebihannya dipotong
+                # simetris -- bukan di-stretch paksa jadi gepeng.
+                rasio = max(lebar / img_asli.width, tinggi / img_asli.height)
+                w_baru = max(int(img_asli.width * rasio), 1)
+                h_baru = max(int(img_asli.height * rasio), 1)
+                img_resize = img_asli.resize((w_baru, h_baru), Image.LANCZOS)
+                x_potong = (w_baru - lebar) // 2
+                y_potong = (h_baru - tinggi) // 2
+                img_crop = img_resize.crop((x_potong, y_potong, x_potong + lebar, y_potong + tinggi))
+                img_tk = ImageTk.PhotoImage(img_crop)
+                label_bg.configure(image=img_tk)
+                label_bg.image = img_tk  # cegah digarbage-collect
+
+            label_bg.bind("<Configure>", _render_ulang)
+
+        # place() menumpuk overlay ini PERSIS di atas notebook (yang
+        # dipack fill+expand di wrapper yang sama), menutupinya penuh
+        # sampai dilepas lewat _hapus_tab_awal().
+        label_bg.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._label_bg_awal = label_bg
+
+    def _hapus_tab_awal(self):
+        """Lepas overlay sambutan bg.png (kalau masih ada) -- dipanggil
+        tepat sebelum tab 'sungguhan' pertama (peta/Waktu Sholat/
+        Perbandingan Kalender/Tabel Efemeris) ditambahkan, supaya overlay
+        bg.png tidak lagi menutupi notebook setelah aplikasi mulai
+        benar-benar dipakai."""
+        label_bg = getattr(self, "_label_bg_awal", None)
+        if label_bg is None:
+            return
+        self._label_bg_awal = None
+        try:
+            label_bg.place_forget()
+            label_bg.destroy()
+        except tk.TclError:
+            pass
 
     def _buat_bagian_akordeon(self, parent, judul, buka_awal=True, on_open=None):
         """Bikin satu 'bagian' akordeon yang bisa dilipat/dibuka dengan
@@ -4971,12 +5882,25 @@ class HisabWinApp(tk.Tk):
         self._pasang_scroll_mousewheel(kontrol_canvas, _kontrol_mousewheel)
 
         # --- Panel kanan: notebook berisi tab-tab peta hasil perhitungan ---
-        self.notebook = ClosableNotebook(self.paned)
-        self.paned.add(self.notebook, weight=1)
+        # Dibungkus 1 wrapper frame supaya gambar sambutan bg.png bisa
+        # ditumpuk DI ATAS notebook (overlay lewat place(), lihat
+        # _tampilkan_tab_awal) -- BUKAN dijadikan tab notebook sungguhan,
+        # supaya tidak ikut mendapat tombol × bawaan ClosableNotebook.
+        wrapper_notebook = ttk.Frame(self.paned)
+        self.paned.add(wrapper_notebook, weight=1)
+        self.notebook = ClosableNotebook(wrapper_notebook)
+        self.notebook.pack(fill="both", expand=True)
         self.notebook.bind("<<NotebookTabChanged>>", self._on_ganti_tab_notebook)
         self.notebook.bind("<<NotebookTabClosed>>", self._on_tab_notebook_ditutup)
         self.notebook.bind("<Button-3>", self._on_right_click_tab)
         self.notebook.bind("<Button-2>", self._on_right_click_tab)
+
+        # Overlay sambutan bg.png -- tampil duluan, MENUTUPI notebook,
+        # SEBELUM ada tab lain apapun (peta/Waktu Sholat/dsb). Otomatis
+        # dilepas nanti begitu tab "sungguhan" pertama ditambahkan
+        # (lihat _hapus_tab_awal).
+        self._label_bg_awal = None
+        self._tampilkan_tab_awal(wrapper_notebook)
 
         # --- Log status (selalu tampil paling atas, di LUAR akordeon --
         #     dipakai bersama oleh perhitungan Hilal maupun Waktu Sholat.
@@ -5009,7 +5933,8 @@ class HisabWinApp(tk.Tk):
                 tab_kontrol, "🌙 Visibilitas",
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_sholat(), self._tutup_akordeon_gerhana(),
-                                  self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter()))
+                                  self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter(),
+                                  self._tutup_akordeon_efemeris()))
 
         # --- Langkah 0: mode perhitungan ---
         frame0 = ttk.LabelFrame(body_hilal, text="0. Mode Perhitungan")
@@ -5112,7 +6037,8 @@ class HisabWinApp(tk.Tk):
                 tab_kontrol, "🕌 Waktu Sholat & Kiblat",
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_gerhana(),
-                                  self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter()))
+                                  self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter(),
+                                  self._tutup_akordeon_efemeris()))
 
         # --- Tab tambahan: Waktu Sholat & Arah Kiblat (permanen, selalu ada) ---
         self._bangun_tab_sholat()
@@ -5127,7 +6053,8 @@ class HisabWinApp(tk.Tk):
                 tab_kontrol, "☀️ Gerhana",
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
-                                  self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter()))
+                                  self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter(),
+                                  self._tutup_akordeon_efemeris()))
         self._bangun_akordeon_gerhana(self._body_akordeon_gerhana, pad)
 
         # --- Bagian akordeon ke-4: Perbandingan Kalender MABIMS vs KHGT
@@ -5141,7 +6068,8 @@ class HisabWinApp(tk.Tk):
                 tab_kontrol, "📅 Perbandingan Kalender",
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
-                                  self._tutup_akordeon_gerhana(), self._tutup_akordeon_konverter()))
+                                  self._tutup_akordeon_gerhana(), self._tutup_akordeon_konverter(),
+                                  self._tutup_akordeon_efemeris()))
         self._bangun_akordeon_kalbanding(self._body_akordeon_kalbanding, pad)
 
         # --- Tab hasil perbandingan (permanen, sama seperti tab Waktu
@@ -5164,8 +6092,25 @@ class HisabWinApp(tk.Tk):
                 tab_kontrol, "🔄 Konverter Kalender",
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
-                                  self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding()))
+                                  self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
+                                  self._tutup_akordeon_efemeris()))
         self._bangun_akordeon_konverter(self._body_akordeon_konverter, pad)
+
+        # --- Bagian akordeon ke-6: Tabel Efemeris (posisi Matahari & Bulan
+        #     tiap interval waktu dalam satu hari -- azimuth, tinggi/altitude
+        #     apparent, deklinasi, elongasi & fraksi iluminasi Bulan). Sama
+        #     pola dengan akordeon Perbandingan Kalender: input di sini,
+        #     hasilnya tabel di tab notebook kanan (permanen, dibangun oleh
+        #     _bangun_tab_efemeris()). ---
+        self._body_akordeon_efemeris, self._buka_akordeon_efemeris, self._tutup_akordeon_efemeris = \
+            self._buat_bagian_akordeon(
+                tab_kontrol, "📊 Tabel Efemeris",
+                buka_awal=False,
+                on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
+                                  self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
+                                  self._tutup_akordeon_konverter()))
+        self._bangun_akordeon_efemeris(self._body_akordeon_efemeris, pad)
+        self._bangun_tab_efemeris()
 
     def _on_ganti_tab_notebook(self, event=None):
         """Dipanggil tiap kali tab notebook kanan (peta/Waktu Sholat)
@@ -5192,12 +6137,20 @@ class HisabWinApp(tk.Tk):
             self._tutup_akordeon_hilal()
             self._tutup_akordeon_sholat()
             self._tutup_akordeon_gerhana()
+            self._tutup_akordeon_efemeris()
+        elif "Efemeris" in tab_terpilih:
+            self._buka_akordeon_efemeris()
+            self._tutup_akordeon_hilal()
+            self._tutup_akordeon_sholat()
+            self._tutup_akordeon_gerhana()
+            self._tutup_akordeon_kalbanding()
         else:
             # Tab peta Hilal (MABIMS, Muhammadiyah, Indonesia, dll)
             self._buka_akordeon_hilal()
             self._tutup_akordeon_sholat()
             self._tutup_akordeon_gerhana()
             self._tutup_akordeon_kalbanding()
+            self._tutup_akordeon_efemeris()
 
     def _on_tab_notebook_ditutup(self, event=None):
         """Dipanggil begitu user klik tombol × di salah satu tab notebook
@@ -5233,6 +6186,14 @@ class HisabWinApp(tk.Tk):
             # terakhir tetap dipertahankan (lihat _pastikan_tab_kalbanding_tampil).
             self.notebook.forget(tab_id)
             self._tab_kalbanding_ditambahkan = False
+            return
+
+        if widget_tab is not None and widget_tab is getattr(self, "_frame_efemeris", None):
+            # Sama seperti tab Perbandingan Kalender di atas -- tab
+            # "Tabel Efemeris" cuma disembunyikan, tabel hasil terakhir
+            # tetap dipertahankan (lihat _pastikan_tab_efemeris_tampil).
+            self.notebook.forget(tab_id)
+            self._tab_efemeris_ditambahkan = False
             return
 
         # Selain itu berarti salah satu tab peta (mabims/muhammadiyah/
@@ -5323,6 +6284,7 @@ class HisabWinApp(tk.Tk):
             self.notebook.tab(info["frame"], text=judul_tab)
             return info["frame"]
 
+        self._hapus_tab_awal()
         frame = ttk.Frame(self.notebook)
         self.notebook.add(frame, text=judul_tab)
         self._tab_peta[nama_tab] = {"frame": frame, "fig": None}
@@ -5346,6 +6308,7 @@ class HisabWinApp(tk.Tk):
         salah satu tombol Hitung di bagian akordeon Waktu Sholat), lalu
         pindah ke tab tsb supaya hasilnya langsung terlihat."""
         if not self._tab_sholat_ditambahkan:
+            self._hapus_tab_awal()
             self.notebook.add(self._frame_sholat, text="🕌 Waktu Sholat & Kiblat")
             self._tab_sholat_ditambahkan = True
         self.notebook.select(self._frame_sholat)
@@ -5359,19 +6322,22 @@ class HisabWinApp(tk.Tk):
     # ---------------- Gerhana Matahari (kandidat & lintasan) ----------------
 
     def _bangun_akordeon_gerhana(self, body, pad):
-        """Isi badan akordeon "☀️ Gerhana Matahari": pilih tahun -> cari
-        kandidat (memakai cari_gerhana_matahari_kandidat_ringan(), mode
-        Ringan / VSOP87+ELP2000 -- tidak butuh ephemeris JPL) -> pilih satu
-        kandidat -> tampilkan peta lintasan (hitung_lintasan_gerhana_matahari
-        + buat_figure_lintasan_gerhana_matahari(), sudah ada, tidak diubah
-        sama sekali di sini -- method2 di bawah cuma pembungkus GUI-nya."""
+        """Isi badan akordeon "☀️ Gerhana Matahari/🌑 Bulan": pilih tahun ->
+        cari kandidat (cari_gerhana_matahari_kandidat_ringan() /
+        cari_gerhana_bulan_kandidat_ringan(), memakai self.mode/self.ts/
+        self.eph global -- SAMA seperti bagian 🌙 Visibilitas & tab lain,
+        lihat _on_ganti_mode) -> pilih satu kandidat -> tampilkan peta
+        lintasan/visibilitas (hitung_lintasan_gerhana_matahari + buat_figure_*,
+        sudah ada, tidak diubah sama sekali di sini -- method2 di bawah cuma
+        pembungkus GUI-nya."""
 
         ttk.Label(
             body,
-            text="Deteksi kandidat gerhana matahari sepanjang satu tahun "
-                 "Masehi, lalu gambar peta lintasan (garis tengah) gerhana "
-                 "total/cincin untuk kandidat yang terpilih. Selalu memakai "
-                 "mode Ringan (VSOP87 + ELP2000-82B), tanpa perlu ephemeris JPL.",
+            text="Deteksi kandidat gerhana matahari/bulan sepanjang satu "
+                 "tahun Masehi, lalu gambar peta lintasan/visibilitasnya "
+                 "untuk kandidat yang terpilih. Memakai Mode Perhitungan "
+                 "yang sama seperti bagian 🌙 Visibilitas di atas "
+                 "(Ringan/Presisi).",
             font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left",
             wraplength=280,
         ).pack(fill="x", padx=10, pady=(4, 6))
@@ -5400,6 +6366,30 @@ class HisabWinApp(tk.Tk):
             frame1, text="Cari Gerhana", command=self._on_cari_gerhana,
             style="Aksen.TButton")
         self.btn_cari_gerhana.grid(row=1, column=2, padx=6, pady=6)
+
+        # Mode tampilan peta: "datar" (PlateCarree, seluruh dunia sekali
+        # pandang) atau "globe" (Orthographic, dipusatkan PERSIS di titik
+        # greatest eclipse -- lihat buat_figure_lintasan_gerhana_matahari/
+        # buat_figure_visibilitas_gerhana_bulan, param mode_peta sudah ada
+        # di sana, di sini cuma menyalurkan pilihan user ke situ).
+        #
+        # Dipecah jadi label + radio DI BARIS TERPISAH (bukan satu baris
+        # panjang) -- panel akordeon di sidebar cuma ~280px, sedangkan versi
+        # satu-baris sebelumnya (label + 2 radio, salah satunya berteks
+        # "Globe (pusat greatest eclipse)") melebihi itu & kepotong/tumpang
+        # tindih di tepi panel.
+        self.var_mode_peta_gerhana = tk.StringVar(value="datar")
+        ttk.Label(frame1, text="Tampilan peta:").grid(
+            row=2, column=0, columnspan=3, padx=6, pady=(4, 0), sticky="w")
+        frame_mode_peta = ttk.Frame(frame1)
+        frame_mode_peta.grid(row=3, column=0, columnspan=3, padx=6, pady=(0, 2), sticky="w")
+        ttk.Radiobutton(frame_mode_peta, text="🗺️ Datar", value="datar",
+                         variable=self.var_mode_peta_gerhana).pack(side="left", padx=(0, 16))
+        ttk.Radiobutton(frame_mode_peta, text="🌐 Globe", value="globe",
+                         variable=self.var_mode_peta_gerhana).pack(side="left")
+        ttk.Label(frame1, text="(mode Globe dipusatkan di titik greatest eclipse)",
+                  font=FONT_KECIL, foreground=WARNA_TEKS_MUTED).grid(
+            row=4, column=0, columnspan=3, padx=6, pady=(0, 6), sticky="w")
 
         # --- Langkah 2: pilih kandidat ---
         frame2 = ttk.LabelFrame(body, text="2. Pilih Gerhana")
@@ -5440,6 +6430,16 @@ class HisabWinApp(tk.Tk):
 
         tahun = int(teks_tahun)
         jenis = self.var_jenis_gerhana.get()  # "matahari" atau "bulan"
+        mode = self.mode.get()
+
+        if mode == "jpl" and self.eph is None:
+            messagebox.showwarning(
+                "Ephemeris belum siap",
+                "Mode Presisi (JPL DE421) dipilih di bagian Visibilitas, tapi "
+                "ephemeris-nya belum selesai dimuat. Tunggu sebentar, atau "
+                "beralih ke Mode Ringan dulu di bagian 🌙 Visibilitas.")
+            return
+
         self.btn_cari_gerhana.config(state="disabled")
         self.btn_tampilkan_gerhana.config(state="disabled")
         self.listbox_gerhana.delete(0, "end")
@@ -5447,19 +6447,21 @@ class HisabWinApp(tk.Tk):
         label_jenis = "matahari" if jenis == "matahari" else "bulan"
         self._log(f"Mencari kandidat gerhana {label_jenis} tahun {tahun}...")
 
-        threading.Thread(target=self._cari_gerhana_thread, args=(tahun, jenis), daemon=True).start()
+        threading.Thread(target=self._cari_gerhana_thread, args=(tahun, jenis, mode), daemon=True).start()
 
-    def _cari_gerhana_thread(self, tahun, jenis="matahari"):
+    def _cari_gerhana_thread(self, tahun, jenis="matahari", mode="ringan"):
         try:
-            # Fungsi astronomi (sudah ada, tidak diubah) -- selalu mode Ringan
-            # (VSOP87+ELP2000-82B), makanya tidak butuh self.ts/self.eph sama
-            # sekali di jalur gerhana ini. jenis menentukan fungsi mana yang
-            # dipanggil: gerhana Matahari (ijtimak) atau gerhana Bulan (istiqbal).
+            # Fungsi astronomi (sudah ada, tidak diubah) -- mode/self.ts/
+            # self.eph diteruskan apa adanya ke fungsi kandidat yang sesuai.
+            # jenis menentukan fungsi mana yang dipanggil: gerhana Matahari
+            # (ijtimak) atau gerhana Bulan (istiqbal).
             if jenis == "bulan":
-                kandidat_mentah = cari_gerhana_bulan_kandidat_ringan(tahun)
+                kandidat_mentah = cari_gerhana_bulan_kandidat_ringan(
+                    tahun, mode=mode, ts=self.ts, eph=self.eph)
             else:
-                kandidat_mentah = cari_gerhana_matahari_kandidat_ringan(tahun)
-            self.antrian.put(("gerhana_ok", (jenis, kandidat_mentah)))
+                kandidat_mentah = cari_gerhana_matahari_kandidat_ringan(
+                    tahun, mode=mode, ts=self.ts, eph=self.eph)
+            self.antrian.put(("gerhana_ok", (jenis, kandidat_mentah, mode)))
         except Exception as e:
             # Sengaja pakai jenis pesan KHUSUS ("gerhana_error"), bukan "error"
             # generik -- handler "error" generik cuma me-re-enable btn_cari
@@ -5494,11 +6496,19 @@ class HisabWinApp(tk.Tk):
             # perlu thread terpisah -- konsisten dgn aturan app ini bahwa SEMUA
             # pembuatan figure matplotlib harus di thread utama.
             tgl_str = kandidat["waktu_greatest_eclipse"].strftime("%d %B %Y")
+            mode_peta = self.var_mode_peta_gerhana.get()  # "datar" atau "globe"
+            # mode/ts/eph SAMA dgn yang dipakai mencari kandidat ini (lihat
+            # catatan self._mode_gerhana_terakhir) -- bukan self.mode saat ini,
+            # supaya tidak ada mismatch presisi kalau user sempat ganti mode
+            # di antara "Cari Gerhana" & "Tampilkan Peta Lintasan".
+            mode = self._mode_gerhana_terakhir
             if self._jenis_gerhana_terakhir == "bulan":
-                fig = buat_figure_visibilitas_gerhana_bulan(kandidat)
+                fig = buat_figure_visibilitas_gerhana_bulan(
+                    kandidat, mode_peta=mode_peta, mode=mode, ts=self.ts, eph=self.eph)
                 judul_tab = f"🌑 Gerhana Bulan — {tgl_str}"
             else:
-                fig = buat_figure_lintasan_gerhana_matahari(kandidat)
+                fig = buat_figure_lintasan_gerhana_matahari(
+                    kandidat, mode_peta=mode_peta, mode=mode, ts=self.ts, eph=self.eph)
                 judul_tab = f"☀️ Gerhana Matahari — {tgl_str}"
             frame = self._tampilkan_peta("gerhana", judul_tab, fig)
             self.notebook.select(frame)
@@ -5640,6 +6650,7 @@ class HisabWinApp(tk.Tk):
 
     def _pastikan_tab_kalbanding_tampil(self):
         if not self._tab_kalbanding_ditambahkan:
+            self._hapus_tab_awal()
             self.notebook.add(self._frame_kalbanding, text="📅 Perbandingan Kalender")
             self._tab_kalbanding_ditambahkan = True
         self.notebook.select(self._frame_kalbanding)
@@ -5937,6 +6948,350 @@ class HisabWinApp(tk.Tk):
         except OSError as e:
             messagebox.showerror("Gagal menyimpan", f"Tidak bisa menulis file CSV:\n{e}")
 
+    # =====================================================
+    #  Akordeon ke-6: Tabel Efemeris
+    # =====================================================
+    def _bangun_akordeon_efemeris(self, body, pad):
+        """Isi badan akordeon "📊 Tabel Efemeris": koordinat lokasi, tanggal,
+        zona waktu & interval waktu, lalu tombol untuk menghitung tabel
+        posisi Matahari & Bulan (azimuth, tinggi/altitude apparent,
+        deklinasi, elongasi, fraksi iluminasi Bulan) tiap interval waktu
+        sepanjang satu hari. Memakai Mode Perhitungan yang sama seperti
+        bagian 🌙 Visibilitas di atas (Ringan/Presisi), sama seperti pola
+        di 📅 Perbandingan Kalender."""
+
+        ttk.Label(
+            body,
+            text="Tabel posisi Matahari & Bulan (azimuth, tinggi/altitude, "
+                 "deklinasi, elongasi & fraksi iluminasi Bulan) tiap interval "
+                 "waktu sepanjang satu hari, untuk koordinat & tanggal tertentu.",
+            font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left",
+            wraplength=280,
+        ).pack(fill="x", padx=10, pady=(4, 6))
+
+        frame_koord = ttk.LabelFrame(body, text="1. Koordinat Lokasi")
+        frame_koord.pack(fill="x", **pad)
+        ttk.Label(frame_koord, text="Lintang:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        self.entry_lat_efemeris = ttk.Entry(frame_koord, width=12)
+        self.entry_lat_efemeris.insert(0, "-6.2")
+        self.entry_lat_efemeris.grid(row=0, column=1, padx=4, pady=4)
+        ttk.Label(frame_koord, text="° (+LU / -LS)", font=FONT_KECIL,
+                  foreground=WARNA_TEKS_MUTED).grid(row=0, column=2, sticky="w")
+        ttk.Label(frame_koord, text="Bujur:").grid(row=1, column=0, sticky="w", padx=6, pady=4)
+        self.entry_lon_efemeris = ttk.Entry(frame_koord, width=12)
+        self.entry_lon_efemeris.insert(0, "106.8")
+        self.entry_lon_efemeris.grid(row=1, column=1, padx=4, pady=4)
+        ttk.Label(frame_koord, text="° (+BT / -BB)", font=FONT_KECIL,
+                  foreground=WARNA_TEKS_MUTED).grid(row=1, column=2, sticky="w")
+        ttk.Label(frame_koord, text="Elevasi (mdpl):").grid(row=2, column=0, sticky="w", padx=6, pady=4)
+        self.entry_elevasi_efemeris = ttk.Entry(frame_koord, width=12)
+        self.entry_elevasi_efemeris.insert(0, "0")
+        self.entry_elevasi_efemeris.grid(row=2, column=1, padx=4, pady=4)
+
+        frame_zona = ttk.LabelFrame(body, text="2. Zona Waktu")
+        frame_zona.pack(fill="x", **pad)
+        self.var_zona_label_efemeris = tk.StringVar(value=ZONA_WAKTU_PILIHAN[0][0])
+        combo_zona_efemeris = ttk.Combobox(
+            frame_zona, textvariable=self.var_zona_label_efemeris, state="readonly",
+            values=[z[0] for z in ZONA_WAKTU_PILIHAN], width=16)
+        combo_zona_efemeris.grid(row=0, column=0, padx=6, pady=6, sticky="w")
+        combo_zona_efemeris.bind("<<ComboboxSelected>>", self._on_ganti_zona_efemeris)
+        ttk.Label(frame_zona, text="Offset UTC (jam):").grid(row=0, column=1, padx=(10, 4))
+        # PENTING: entry dibuat dulu dalam state NORMAL, baru di-insert, baru
+        # di-disable setelahnya -- ttk.Entry MENOLAK .insert() kalau widget
+        # sudah dalam state="disabled" saat konstruksi (gagal diam-diam,
+        # tanpa error), makanya kalau langsung state="disabled" dari awal
+        # kotak offset UTC-nya akan tampil KOSONG walau sudah di-insert("7").
+        self.entry_zona_custom_efemeris = ttk.Entry(frame_zona, width=6)
+        self.entry_zona_custom_efemeris.insert(0, "7")
+        self.entry_zona_custom_efemeris.config(state="disabled")
+        self.entry_zona_custom_efemeris.grid(row=0, column=2, padx=4)
+
+        frame_tgl = ttk.LabelFrame(body, text="3. Tanggal")
+        frame_tgl.pack(fill="x", **pad)
+        hari_ini = datetime.now()
+        ttk.Label(frame_tgl, text="Tanggal:").grid(row=0, column=0, padx=4, pady=6)
+        self.entry_tgl_hari_efemeris = ttk.Entry(frame_tgl, width=4)
+        self.entry_tgl_hari_efemeris.insert(0, str(hari_ini.day))
+        self.entry_tgl_hari_efemeris.grid(row=0, column=1, padx=2)
+        ttk.Label(frame_tgl, text="Bulan:").grid(row=0, column=2, padx=4)
+        self.entry_tgl_bulan_efemeris = ttk.Entry(frame_tgl, width=4)
+        self.entry_tgl_bulan_efemeris.insert(0, str(hari_ini.month))
+        self.entry_tgl_bulan_efemeris.grid(row=0, column=3, padx=2)
+        ttk.Label(frame_tgl, text="Tahun:").grid(row=0, column=4, padx=4)
+        self.entry_tgl_tahun_efemeris = ttk.Entry(frame_tgl, width=6)
+        self.entry_tgl_tahun_efemeris.insert(0, str(hari_ini.year))
+        self.entry_tgl_tahun_efemeris.grid(row=0, column=5, padx=2)
+
+        frame_interval = ttk.LabelFrame(body, text="4. Interval Waktu")
+        frame_interval.pack(fill="x", **pad)
+        self.var_interval_efemeris = tk.StringVar(value="60 menit")
+        combo_interval = ttk.Combobox(
+            frame_interval, textvariable=self.var_interval_efemeris, state="readonly",
+            values=["10 menit", "15 menit", "30 menit", "60 menit", "120 menit"], width=12)
+        combo_interval.grid(row=0, column=0, padx=6, pady=6, sticky="w")
+
+        frame_sumber = ttk.LabelFrame(body, text="5. Sumber Data")
+        frame_sumber.pack(fill="x", **pad)
+        self.var_mode_sumber_efemeris = tk.StringVar(value="ringan")
+        ttk.Radiobutton(
+            frame_sumber, text="Ringan (VSOP87+ELP2000, offline)",
+            variable=self.var_mode_sumber_efemeris, value="ringan",
+            command=self._on_ganti_sumber_efemeris,
+        ).pack(anchor="w", padx=6, pady=(6, 0))
+        ttk.Radiobutton(
+            frame_sumber, text="Presisi -- Skyfield + JPL DE421 (offline, file lokal)",
+            variable=self.var_mode_sumber_efemeris, value="jpl",
+            command=self._on_ganti_sumber_efemeris,
+        ).pack(anchor="w", padx=6)
+        ttk.Radiobutton(
+            frame_sumber, text="JPL Horizons API (online, ssd.jpl.nasa.gov)",
+            variable=self.var_mode_sumber_efemeris, value="horizons",
+            command=self._on_ganti_sumber_efemeris,
+        ).pack(anchor="w", padx=6)
+        self.label_peringatan_sumber_efemeris = ttk.Label(
+            frame_sumber, text="", font=FONT_KECIL, foreground=WARNA_TEKS_MUTED,
+            justify="left", wraplength=280,
+        )
+        self.label_peringatan_sumber_efemeris.pack(fill="x", padx=6, pady=(2, 6))
+        self._on_ganti_sumber_efemeris()
+
+        self.btn_buat_efemeris = ttk.Button(
+            body, text="Buat Tabel Efemeris", command=self._on_buat_efemeris,
+            style="Aksen.TButton")
+        self.btn_buat_efemeris.pack(fill="x", padx=10, pady=(4, 10))
+
+    def _on_ganti_zona_efemeris(self, event=None):
+        label = self.var_zona_label_efemeris.get()
+        offset = dict(ZONA_WAKTU_PILIHAN).get(label)
+        if offset is None:  # "Custom..."
+            self.entry_zona_custom_efemeris.config(state="normal")
+        else:
+            self.entry_zona_custom_efemeris.config(state="normal")
+            self.entry_zona_custom_efemeris.delete(0, "end")
+            self.entry_zona_custom_efemeris.insert(0, str(offset))
+            self.entry_zona_custom_efemeris.config(state="disabled")
+
+    def _on_ganti_sumber_efemeris(self):
+        """Perbarui catatan kecil di bawah pilihan Sumber Data, khususnya
+        peringatan kebutuhan internet untuk mode Horizons API."""
+        mode = self.var_mode_sumber_efemeris.get()
+        if mode == "horizons":
+            teks = ("⚠ Mode ini mengirim request ke server JPL (ssd.jpl.nasa.gov) "
+                    "setiap kali tabel dibuat. WAJIB ADA KONEKSI INTERNET aktif "
+                    "-- kalau tidak, proses akan gagal dengan pesan error.")
+        elif mode == "jpl":
+            teks = ("Dihitung dari file ephemeris JPL DE421 yang sudah dibundel "
+                    "bersama aplikasi (de421.bsp) -- tidak perlu internet, tapi "
+                    "perlu ephemeris-nya sudah selesai dimuat di awal aplikasi.")
+        else:
+            teks = ("Dihitung sendiri (VSOP87+ELP2000) tanpa file eksternal "
+                    "maupun koneksi internet sama sekali.")
+        self.label_peringatan_sumber_efemeris.config(text=teks)
+
+    def _on_buat_efemeris(self):
+        try:
+            try:
+                lat = float(self.entry_lat_efemeris.get().strip().replace(",", "."))
+                lon = float(self.entry_lon_efemeris.get().strip().replace(",", "."))
+            except ValueError:
+                raise ValueError("Koordinat tidak valid. Contoh format: -6.200000")
+            if not (-90 <= lat <= 90):
+                raise ValueError("Lintang harus di antara -90 dan 90 derajat.")
+            if not (-180 <= lon <= 180):
+                raise ValueError("Bujur harus di antara -180 dan 180 derajat.")
+            try:
+                elevasi = float(self.entry_elevasi_efemeris.get().strip().replace(",", ".") or "0")
+            except ValueError:
+                raise ValueError("Elevasi tidak valid. Isi angka (mdpl), atau kosongkan/isi 0.")
+            try:
+                zona_offset = float(self.entry_zona_custom_efemeris.get().strip().replace(",", "."))
+            except ValueError:
+                raise ValueError("Offset UTC zona waktu tidak valid. Contoh: 7 atau 7.5")
+            try:
+                hari = int(self.entry_tgl_hari_efemeris.get())
+                bulan = int(self.entry_tgl_bulan_efemeris.get())
+                tahun = int(self.entry_tgl_tahun_efemeris.get())
+                tanggal = datetime(tahun, bulan, hari)
+            except ValueError:
+                raise ValueError("Tanggal tidak valid. Pastikan hari/bulan/tahun berupa angka & tanggal ada.")
+        except ValueError as e:
+            messagebox.showerror("Input tidak valid", str(e))
+            return
+
+        interval_menit = int(self.var_interval_efemeris.get().split()[0])
+        mode = self.var_mode_sumber_efemeris.get()
+
+        if mode == "jpl" and self.eph is None:
+            messagebox.showwarning(
+                "Ephemeris belum siap",
+                "Sumber Data 'Presisi (JPL DE421)' dipilih, tapi ephemeris "
+                "lokalnya belum selesai dimuat. Tunggu sebentar, atau pilih "
+                "sumber data 'Ringan' / 'JPL Horizons API' dulu.")
+            return
+
+        self.btn_buat_efemeris.config(state="disabled")
+        self._log(f"\nMenghitung tabel efemeris untuk {tanggal.strftime('%d %B %Y')} "
+                   f"({lat:.4f}, {lon:.4f})...")
+
+        threading.Thread(
+            target=self._buat_efemeris_thread,
+            args=(tanggal, lat, lon, zona_offset, elevasi, interval_menit, mode),
+            daemon=True).start()
+
+    def _buat_efemeris_thread(self, tanggal, lat, lon, zona_offset, elevasi, interval_menit, mode):
+        try:
+            hasil = hitung_tabel_efemeris(
+                tanggal, lat, lon, zona_offset, mode=mode, ts=self.ts, eph=self.eph,
+                interval_menit=interval_menit, elevasi_m=elevasi)
+            rts = hitung_rts(
+                tanggal, lat, lon, zona_offset, mode=mode, ts=self.ts, eph=self.eph,
+                elevasi_m=elevasi)
+            self.antrian.put(("efemeris_ok", (tanggal, lat, lon, zona_offset, mode, hasil, rts)))
+        except Exception as e:
+            self.antrian.put(("efemeris_error", f"Gagal menghitung tabel efemeris: {e}"))
+
+    def _bangun_tab_efemeris(self):
+        """Bangun (sekali saja, permanen) frame tab hasil Tabel Efemeris --
+        pola sama seperti _bangun_tab_kalbanding: dibuat di awal, baru
+        dimasukkan ke notebook kanan begitu ada hasil pertama kali (lihat
+        _pastikan_tab_efemeris_tampil)."""
+        frame = ttk.Frame(self.notebook)
+        self._frame_efemeris = frame
+
+        panel_hasil = ttk.Frame(frame)
+        panel_hasil.pack(fill="both", expand=True, padx=8, pady=8)
+
+        self.label_judul_efemeris = ttk.Label(
+            panel_hasil, text="Belum ada tabel efemeris dihitung.", font=FONT_UTAMA_BOLD)
+        self.label_judul_efemeris.pack(anchor="w", pady=(0, 4))
+
+        self.label_rts_efemeris = ttk.Label(
+            panel_hasil, text="", font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left")
+        self.label_rts_efemeris.pack(anchor="w", pady=(0, 8))
+
+        kolom = ("jam", "az_matahari", "alt_matahari", "dec_matahari",
+                 "az_bulan", "alt_bulan", "dec_bulan", "elongasi", "fraksi_iluminasi")
+        judul_kolom = {
+            "jam": "Jam (Lokal)", "az_matahari": "Az. Matahari", "alt_matahari": "Tinggi Matahari",
+            "dec_matahari": "Dek. Matahari", "az_bulan": "Az. Bulan", "alt_bulan": "Tinggi Bulan",
+            "dec_bulan": "Dek. Bulan", "elongasi": "Elongasi", "fraksi_iluminasi": "Iluminasi Bulan",
+        }
+        self.tree_efemeris = ttk.Treeview(
+            panel_hasil, columns=kolom, show="headings", height=20)
+        for kunci in kolom:
+            self.tree_efemeris.heading(kunci, text=judul_kolom[kunci])
+            lebar = 90 if kunci == "jam" else 120
+            self.tree_efemeris.column(kunci, width=lebar, anchor="center")
+        self.tree_efemeris.tag_configure("siang", background="#FFF9E6")
+        self.tree_efemeris.tag_configure("malam", background=WARNA_PANEL)
+
+        scroll_tree_y = ttk.Scrollbar(panel_hasil, orient="vertical",
+                                       command=self.tree_efemeris.yview)
+        self.tree_efemeris.configure(yscrollcommand=scroll_tree_y.set)
+        self.tree_efemeris.pack(side="left", fill="both", expand=True)
+        scroll_tree_y.pack(side="left", fill="y")
+
+        panel_bawah = ttk.Frame(frame)
+        panel_bawah.pack(fill="x", padx=8, pady=(0, 8))
+        ttk.Label(
+            panel_bawah,
+            text="🟨 Baris kuning = Matahari di atas ufuk (siang hari) pada jam tsb.",
+            font=FONT_KECIL, foreground=WARNA_TEKS_MUTED,
+        ).pack(anchor="w")
+        self.btn_simpan_csv_efemeris = ttk.Button(
+            panel_bawah, text="Simpan ke File .csv",
+            command=self._on_simpan_csv_efemeris, state="disabled")
+        self.btn_simpan_csv_efemeris.pack(anchor="e", pady=(6, 0))
+
+    def _pastikan_tab_efemeris_tampil(self):
+        if not self._tab_efemeris_ditambahkan:
+            self._hapus_tab_awal()
+            self.notebook.add(self._frame_efemeris, text="📊 Tabel Efemeris")
+            self._tab_efemeris_ditambahkan = True
+        self.notebook.select(self._frame_efemeris)
+
+    def _tampilkan_efemeris(self, tanggal, lat, lon, zona_offset, mode, hasil, rts):
+        self._hasil_efemeris_terakhir = (tanggal, lat, lon, zona_offset, mode, hasil, rts)
+
+        def _fmt(jam):
+            return _label_jam_dari_desimal(jam) if jam is not None else "--:--"
+
+        m, b = rts["matahari"], rts["bulan"]
+        self.label_rts_efemeris.config(
+            text=f"☀ Matahari — Terbit {_fmt(m['terbit'])}  |  Transit {_fmt(m['transit'])}  |  "
+                 f"Terbenam {_fmt(m['terbenam'])}     "
+                 f"🌙 Bulan — Terbit {_fmt(b['terbit'])}  |  Transit {_fmt(b['transit'])}  |  "
+                 f"Terbenam {_fmt(b['terbenam'])}")
+
+        self.tree_efemeris.delete(*self.tree_efemeris.get_children())
+        for b in hasil:
+            tag = "siang" if b["alt_matahari"] > 0 else "malam"
+            self.tree_efemeris.insert("", "end", tags=(tag,), values=(
+                b["label_jam"],
+                f"{b['az_matahari']:.2f}°", f"{b['alt_matahari']:+.2f}°", f"{b['dec_matahari']:+.2f}°",
+                f"{b['az_bulan']:.2f}°", f"{b['alt_bulan']:+.2f}°", f"{b['dec_bulan']:+.2f}°",
+                f"{b['elongasi_deg']:.2f}°", f"{b['fraksi_iluminasi_persen']:.1f}%",
+            ))
+
+        metode_label = {
+            "jpl": "Presisi -- Skyfield + JPL DE421 (offline)",
+            "horizons": "Online -- JPL Horizons API (ssd.jpl.nasa.gov)",
+        }.get(mode, "Ringan (VSOP87+ELP2000, offline)")
+        self.label_judul_efemeris.config(
+            text=f"Tabel Efemeris — {tanggal.strftime('%d %B %Y')}  |  "
+                 f"Lokasi: {lat:.4f}, {lon:.4f} (UTC{zona_offset:+g})  |  "
+                 f"Metode: {metode_label}  |  {len(hasil)} baris")
+
+        self.btn_simpan_csv_efemeris.config(state="normal" if hasil else "disabled")
+        self._pastikan_tab_efemeris_tampil()
+        self._log(f"Tabel efemeris {tanggal.strftime('%d %B %Y')} selesai ({len(hasil)} baris).")
+        self.btn_buat_efemeris.config(state="normal")
+
+    def _on_simpan_csv_efemeris(self):
+        if not self._hasil_efemeris_terakhir:
+            messagebox.showwarning("Belum ada data", "Buat tabel efemeris terlebih dahulu.")
+            return
+        tanggal, lat, lon, zona_offset, mode, hasil, rts = self._hasil_efemeris_terakhir
+        nama_default = f"tabel_efemeris_{tanggal.strftime('%Y%m%d')}.csv"
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV (Comma-separated)", "*.csv"), ("Semua File", "*.*")],
+            initialfile=nama_default,
+            title="Simpan Tabel Efemeris")
+        if not path:
+            return
+
+        def _fmt(jam):
+            return _label_jam_dari_desimal(jam) if jam is not None else ""
+
+        try:
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                penulis = csv.writer(f)
+                penulis.writerow([f"Tabel Efemeris {tanggal.strftime('%d-%m-%Y')}",
+                                   f"Lokasi {lat:.6f},{lon:.6f}", f"UTC{zona_offset:+g}"])
+                penulis.writerow(["Matahari", "Terbit", _fmt(rts["matahari"]["terbit"]),
+                                   "Transit", _fmt(rts["matahari"]["transit"]),
+                                   "Terbenam", _fmt(rts["matahari"]["terbenam"])])
+                penulis.writerow(["Bulan", "Terbit", _fmt(rts["bulan"]["terbit"]),
+                                   "Transit", _fmt(rts["bulan"]["transit"]),
+                                   "Terbenam", _fmt(rts["bulan"]["terbenam"])])
+                penulis.writerow([])
+                penulis.writerow(["Jam (Lokal)", "Azimuth Matahari", "Tinggi Matahari",
+                                   "Deklinasi Matahari", "Azimuth Bulan", "Tinggi Bulan",
+                                   "Deklinasi Bulan", "Jarak Bulan (km)", "Elongasi",
+                                   "Fraksi Iluminasi Bulan (%)"])
+                for b in hasil:
+                    penulis.writerow([
+                        b["label_jam"], f"{b['az_matahari']:.3f}", f"{b['alt_matahari']:.3f}",
+                        f"{b['dec_matahari']:.3f}", f"{b['az_bulan']:.3f}", f"{b['alt_bulan']:.3f}",
+                        f"{b['dec_bulan']:.3f}", f"{b['jarak_bulan_km']:.0f}",
+                        f"{b['elongasi_deg']:.3f}", f"{b['fraksi_iluminasi_persen']:.1f}",
+                    ])
+            messagebox.showinfo("Tersimpan", f"Tabel efemeris disimpan ke:\n{path}")
+        except OSError as e:
+            messagebox.showerror("Gagal menyimpan", f"Tidak bisa menulis file CSV:\n{e}")
+
     # ---------------- Tab Waktu Sholat & Arah Kiblat ----------------
 
     def _path_file_lokasi(self):
@@ -6080,8 +7435,11 @@ class HisabWinApp(tk.Tk):
         combo_zona.bind("<<ComboboxSelected>>", self._on_ganti_zona_sholat)
 
         ttk.Label(frame_zona, text="Offset UTC (jam):").grid(row=0, column=1, padx=(10, 4))
-        self.entry_zona_custom = ttk.Entry(frame_zona, width=6, state="disabled")
+        # Sama seperti entry_zona_custom_efemeris -- lihat catatan di sana
+        # soal kenapa urutannya harus normal -> insert -> disable.
+        self.entry_zona_custom = ttk.Entry(frame_zona, width=6)
         self.entry_zona_custom.insert(0, "7")
+        self.entry_zona_custom.config(state="disabled")
         self.entry_zona_custom.grid(row=0, column=2, padx=4)
 
         # --- Tanggal (untuk perhitungan harian) ---
@@ -6844,8 +8202,9 @@ class HisabWinApp(tk.Tk):
                     # supaya listbox cuma menampilkan entri yang benar2 kandidat
                     # gerhana (index self.kandidat_gerhana tetap sejajar dgn
                     # baris listbox_gerhana, sesuai catatan di __init__).
-                    jenis_gerhana, kandidat_mentah = payload
+                    jenis_gerhana, kandidat_mentah, mode_gerhana = payload
                     self._jenis_gerhana_terakhir = jenis_gerhana
+                    self._mode_gerhana_terakhir = mode_gerhana
 
                     if jenis_gerhana == "bulan":
                         self.kandidat_gerhana = [
@@ -6953,6 +8312,15 @@ class HisabWinApp(tk.Tk):
                     messagebox.showerror("Terjadi kesalahan", payload)
                     self.btn_bandingkan_kalender.config(state="normal")
 
+                elif jenis == "efemeris_ok":
+                    tanggal, lat, lon, zona_offset, mode, hasil, rts = payload
+                    self._tampilkan_efemeris(tanggal, lat, lon, zona_offset, mode, hasil, rts)
+
+                elif jenis == "efemeris_error":
+                    self._log(f"ERROR: {payload}")
+                    messagebox.showerror("Terjadi kesalahan", payload)
+                    self.btn_buat_efemeris.config(state="normal")
+
                 elif jenis == "konv_kriteria_ok":
                     self.label_hasil_konverter.config(text=payload)
                     self._log(f"Konverter Kalender: {payload.replace(chr(10), '  ')}")
@@ -7000,3 +8368,4 @@ class HisabWinApp(tk.Tk):
 if __name__ == "__main__":
     app = HisabWinApp()
     app.mainloop()
+

@@ -72,6 +72,7 @@ jobs:
           --exclude-module jupyter `
           --exclude-module notebook `
           --add-data "logo.png;." `
+          --add-data "bg.png;." `
           --add-data "mainland_amerika_mask.npz;." `
           --add-data "de421.bsp;." `
           --add-data "cartopy_data;cartopy_data" `
@@ -178,6 +179,7 @@ jobs:
           --exclude-module jupyter \
           --exclude-module notebook \
           --add-data "logo.png:." \
+          --add-data "bg.png:." \
           --add-data "mainland_amerika_mask.npz:." \
           --add-data "de421.bsp:." \
           --add-data "cartopy_data:cartopy_data" \
