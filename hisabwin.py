@@ -105,6 +105,8 @@ skyfield.timelib.iau2000a_radians = iau2000b_radians
 BULAN_ID = ["Januari", "Februari", "Maret", "April", "Mei", "Juni",
             "Juli", "Agustus", "September", "Oktober", "November", "Desember"]
 
+HARI_ID = ["Minggu", "Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu"]
+
 # =========================================================
 #  TEMA TAMPILAN (modern & sederhana -- flat, palet terbatas)
 #  Cuma warna & font, TIDAK ada perubahan logika apapun di bawah ini.
@@ -284,6 +286,46 @@ def julian_day(tahun, bulan, hari_desimal):
     B = 2 - A + np.floor(A / 4.0)
     jd = np.floor(365.25 * (Y + 4716)) + np.floor(30.6001 * (M + 1)) + D + B - 1524.5
     return jd
+
+
+def jd_ke_gregorian(jd):
+    """Kebalikan dari julian_day(): JD (UT, skalar) -> (tahun, bulan, hari_int)
+    kalender Gregorian -- algoritma standar Meeus Ch.7. Bagian jam/menit
+    dari JD dibuang (dibulatkan ke hari kalender terdekat), karena
+    konverter kalender di GUI cuma butuh presisi tanggal, bukan jam."""
+    jd = jd + 0.5
+    Z = math.floor(jd)
+    F = jd - Z
+    if Z < 2299161:
+        A = Z
+    else:
+        alpha = math.floor((Z - 1867216.25) / 36524.25)
+        A = Z + 1 + alpha - math.floor(alpha / 4.0)
+    B = A + 1524
+    C = math.floor((B - 122.1) / 365.25)
+    D = math.floor(365.25 * C)
+    E = math.floor((B - D) / 30.6001)
+    hari_desimal = B - D - math.floor(30.6001 * E) + F
+    bulan = int(E - 1) if E < 14 else int(E - 13)
+    tahun = int(C - 4716) if bulan > 2 else int(C - 4715)
+    hari = int(round(hari_desimal))
+    # Penanganan tepi: pembulatan hari_desimal bisa melewati batas bulan
+    # (mis. 30.999 -> dibulatkan 31 padahal bulan itu cuma 30 hari).
+    if hari > _hari_dalam_bulan_gregorian(tahun, bulan):
+        hari = 1
+        bulan += 1
+        if bulan > 12:
+            bulan = 1
+            tahun += 1
+    return tahun, bulan, hari
+
+
+def _hari_dalam_bulan_gregorian(tahun, bulan):
+    """Jumlah hari dalam satu bulan Gregorian (memperhitungkan tahun kabisat)."""
+    if bulan == 2:
+        kabisat = (tahun % 4 == 0 and tahun % 100 != 0) or (tahun % 400 == 0)
+        return 29 if kabisat else 28
+    return [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][bulan - 1]
 
 
 def delta_t_detik(tahun, bulan=1):
@@ -661,6 +703,31 @@ def beri_label_hijriyah(ijtimak_list):
                       "bulan_h": bulan_h, "nama_bulan_h": _NAMA_BULAN_HIJRIYAH[bulan_h - 1]})
     return hasil
 
+
+
+def masehi_ke_hijriyah_urfi(tahun, bulan, hari):
+    """Konversi tanggal Masehi (Gregorian) -> tanggal Hijriyah URFI/tabular
+    (tipe IIa/Kuwaiti, siklus 30-tahun) -- BUKAN hasil rukyat/hisab
+    astronomis (ijtimak asli), melainkan perkiraan kalender tabular yang
+    umum dipakai utk konversi cepat. Return (tahun_h, bulan_h, hari_h)."""
+    jd = julian_day(tahun, bulan, float(hari))
+    jd = float(np.asarray(jd).reshape(()))
+    return _jd_ke_urfi(jd)
+
+
+def hijriyah_urfi_ke_masehi(tahun_h, bulan_h, hari_h):
+    """Kebalikan dari masehi_ke_hijriyah_urfi(): tanggal Hijriyah URFI/tabular
+    -> tanggal Masehi (Gregorian). Return (tahun, bulan, hari)."""
+    jd = _urfi_ke_jd(tahun_h, bulan_h, hari_h)
+    return jd_ke_gregorian(jd)
+
+
+def nama_hari_dari_jd(jd):
+    """Nama hari (Indonesia) dari sebuah Julian Day. Formula standar:
+    floor(JD + 1.5) mod 7 -> 0=Minggu, 1=Senin, ..., 6=Sabtu (JD 2451545.0,
+    1 Jan 2000 12:00 TT, jatuh Sabtu -- dipakai sbg patokan validasi)."""
+    indeks = int(math.floor(jd + 1.5)) % 7
+    return HARI_ID[indeks]
 
 
 RE_EKUATOR_KM = 6378.137   # WGS84
@@ -2809,6 +2876,119 @@ def bandingkan_kalender_mabims_khgt(tahun_h, ts=None, eph=None, mode="ringan",
     return hasil
 
 
+def _cari_ijtimak_sekitar_tanggal(tanggal_masehi):
+    """Kumpulkan & urutkan semua ijtimak (ringan) dari tahun Masehi
+    tanggal_masehi -1/+0/+1 -- cukup sbg 'kolam pencarian' utk dapat ijtimak
+    tepat sebelum & sesudah tanggal_masehi (margin 1 tahun krn kalender
+    Hijriyah bergeser ~11 hari/tahun Masehi, jadi ijtimak yg relevan hampir
+    selalu ada di tahun Masehi yg sama, tapi kadang nyerempet ke tahun
+    sebelah -- terutama dekat 1 Januari)."""
+    ijtimak_semua = []
+    for tahun_m in (tanggal_masehi.year - 1, tanggal_masehi.year, tanggal_masehi.year + 1):
+        ijtimak_semua.extend(cari_ijtimak_tahun_ringan(tahun_m))
+    ijtimak_semua.sort()
+    return ijtimak_semua
+
+
+def masehi_ke_hijriyah_kriteria(tahun, bulan, hari, kriteria, ts, eph, mode="ringan",
+                                 progress_cb=lambda msg: None):
+    """Konversi tanggal Masehi -> Hijriyah menurut kriteria astronomis ASLI
+    ('mabims' atau 'khgt'), BUKAN kalender urfi/tabular. TIDAK menghitung
+    tabel setahun penuh -- cukup cari IJTIMAK YANG BARU SAJA LEWAT sebelum
+    tanggal target sbg titik acuan, panggil _tentukan_awal_bulan() (fungsi
+    asli, TIDAK diubah) sekali utk dapat awal bulan itu, dan sekali lagi
+    utk ijtimak berikutnya sbg batas atas -- kalau tanggal target ada di
+    antara keduanya, itu bulannya. Kalau ternyata di luar rentang itu
+    (kasus tepi, jarang), coba geser mundur/maju satu ijtimak.
+
+    Return dict {'tahun_h', 'bulan_h', 'nama_bulan_h', 'hari_h',
+    'tanggal_awal_bulan'}. Raises ValueError kalau tak ditemukan."""
+    target = datetime(tahun, bulan, hari)
+    ijtimak_semua = _cari_ijtimak_sekitar_tanggal(target)
+
+    # index ijtimak TERAKHIR yg tanggalnya (hari kalender) sudah <= target --
+    # itulah ijtimak acuan yg "baru saja lewat".
+    idx_acuan = None
+    for i, waktu_ij in enumerate(ijtimak_semua):
+        if datetime(waktu_ij.year, waktu_ij.month, waktu_ij.day) <= target:
+            idx_acuan = i
+        else:
+            break
+    if idx_acuan is None:
+        raise ValueError("Tidak ada ijtimak yang ditemukan sebelum tanggal ini.")
+
+    def _awal_bulan(i):
+        waktu_ij = ijtimak_semua[i]
+        tanggal_ij = datetime(waktu_ij.year, waktu_ij.month, waktu_ij.day)
+        return _tentukan_awal_bulan(tanggal_ij, waktu_ij, kriteria, ts, eph, mode=mode)
+
+    # Coba idx_acuan dulu (kasus normal), lalu geser mundur/maju 1 ijtimak
+    # sbg jaga2 kasus tepi (mis. kriteria baru terpenuhi H+1/H+2 setelah
+    # ijtimak, jadi awal bulan versi kriteria bisa "menjorok" lewat batas
+    # tanggal ijtimak berikutnya).
+    for i in (idx_acuan, idx_acuan - 1, idx_acuan + 1):
+        if not (0 <= i < len(ijtimak_semua)):
+            continue
+        awal = _awal_bulan(i)
+        if awal is None:
+            continue
+        akhir = _awal_bulan(i + 1) if i + 1 < len(ijtimak_semua) else None
+        if awal <= target and (akhir is None or target < akhir):
+            waktu_ij = ijtimak_semua[i]
+            jd_ij = julian_day(waktu_ij.year, waktu_ij.month,
+                                waktu_ij.day + (waktu_ij.hour + waktu_ij.minute / 60.0
+                                                 + waktu_ij.second / 3600.0) / 24.0)
+            jd_ij = float(np.asarray(jd_ij).reshape(()))
+            tahun_h, bulan_h = _cari_label_hijriyah_urfi(jd_ij)
+            return {"tahun_h": tahun_h, "bulan_h": bulan_h,
+                    "nama_bulan_h": _NAMA_BULAN_HIJRIYAH[bulan_h - 1],
+                    "hari_h": (target - awal).days + 1, "tanggal_awal_bulan": awal}
+
+    raise ValueError("Tidak ditemukan bulan Hijriyah yang mengandung tanggal ini "
+                      "menurut kriteria terpilih.")
+
+
+def hijriyah_kriteria_ke_masehi(tahun_h, bulan_h, hari_h, kriteria, ts, eph, mode="ringan",
+                                 progress_cb=lambda msg: None):
+    """Kebalikan dari masehi_ke_hijriyah_kriteria(): tanggal Hijriyah (tahun_h,
+    bulan_h, hari_h) menurut kriteria astronomis ASLI ('mabims'/'khgt') ->
+    tanggal Masehi. Sama seperti versi m2h, TIDAK menghitung tabel setahun
+    penuh -- cukup cari SATU ijtimak yg berlabel (tahun_h, bulan_h) sbg
+    acuan (dgn beri_label_hijriyah(), fungsi asli), lalu _tentukan_awal_bulan()
+    sekali utk ijtimak itu & sekali utk ijtimak berikutnya (batas atas/
+    panjang bulan). Return (tahun, bulan, hari). Raises ValueError kalau
+    bulan tsb tak ditemukan atau hari_h melebihi panjang bulan sesungguhnya."""
+    # Perkiraan kasar (urfi) tanggal Masehi bulan ini, cuma dipakai utk
+    # menentukan tahun Masehi mana yg perlu dicari ijtimak-nya -- BUKAN
+    # sumber tanggal akhir.
+    tahun_m_kasar, bulan_m_kasar, hari_m_kasar = hijriyah_urfi_ke_masehi(tahun_h, bulan_h, 1)
+    ijtimak_semua = _cari_ijtimak_sekitar_tanggal(datetime(tahun_m_kasar, bulan_m_kasar, hari_m_kasar))
+
+    label_semua = beri_label_hijriyah(ijtimak_semua)
+    idx = next((i for i, l in enumerate(label_semua)
+                if l["tahun_h"] == tahun_h and l["bulan_h"] == bulan_h), None)
+    if idx is None:
+        raise ValueError(f"Bulan ke-{bulan_h} tahun {tahun_h} H tidak ditemukan "
+                          "menurut kriteria terpilih.")
+
+    def _awal_bulan(i):
+        waktu_ij = label_semua[i]["waktu_ijtimak"]
+        tanggal_ij = datetime(waktu_ij.year, waktu_ij.month, waktu_ij.day)
+        return _tentukan_awal_bulan(tanggal_ij, waktu_ij, kriteria, ts, eph, mode=mode)
+
+    awal = _awal_bulan(idx)
+    if awal is None:
+        raise ValueError("Kriteria tidak pernah terpenuhi setelah ijtimak bulan ini "
+                          "(seharusnya tidak terjadi dlm praktik).")
+    akhir = _awal_bulan(idx + 1) if idx + 1 < len(label_semua) else None
+    panjang_bulan = (akhir - awal).days if akhir is not None else 30
+    if not (1 <= hari_h <= panjang_bulan):
+        raise ValueError(f"Bulan ini cuma {panjang_bulan} hari menurut kriteria terpilih.")
+
+    tanggal_masehi = awal + timedelta(days=hari_h - 1)
+    return tanggal_masehi.year, tanggal_masehi.month, tanggal_masehi.day
+
+
 
     lon_mesh, lat_mesh = grids["lon_mesh"], grids["lat_mesh"]
     elong_grid, geo_alt_grid, hours_utc_grid = (
@@ -4659,7 +4839,7 @@ class HisabWinApp(tk.Tk):
                 tab_kontrol, "🌙 Visibilitas",
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_sholat(), self._tutup_akordeon_gerhana(),
-                                  self._tutup_akordeon_kalbanding()))
+                                  self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter()))
 
         # --- Langkah 0: mode perhitungan ---
         frame0 = ttk.LabelFrame(body_hilal, text="0. Mode Perhitungan")
@@ -4762,7 +4942,7 @@ class HisabWinApp(tk.Tk):
                 tab_kontrol, "🕌 Waktu Sholat & Kiblat",
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_gerhana(),
-                                  self._tutup_akordeon_kalbanding()))
+                                  self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter()))
 
         # --- Tab tambahan: Waktu Sholat & Arah Kiblat (permanen, selalu ada) ---
         self._bangun_tab_sholat()
@@ -4777,7 +4957,7 @@ class HisabWinApp(tk.Tk):
                 tab_kontrol, "☀️ Gerhana",
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
-                                  self._tutup_akordeon_kalbanding()))
+                                  self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter()))
         self._bangun_akordeon_gerhana(self._body_akordeon_gerhana, pad)
 
         # --- Bagian akordeon ke-4: Perbandingan Kalender MABIMS vs KHGT
@@ -4791,7 +4971,7 @@ class HisabWinApp(tk.Tk):
                 tab_kontrol, "📅 Perbandingan Kalender",
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
-                                  self._tutup_akordeon_gerhana()))
+                                  self._tutup_akordeon_gerhana(), self._tutup_akordeon_konverter()))
         self._bangun_akordeon_kalbanding(self._body_akordeon_kalbanding, pad)
 
         # --- Tab hasil perbandingan (permanen, sama seperti tab Waktu
@@ -4799,6 +4979,23 @@ class HisabWinApp(tk.Tk):
         #     notebook kanan begitu tombol "Bandingkan" pertama kali
         #     menghasilkan sesuatu, lihat _pastikan_tab_kalbanding_tampil). ---
         self._bangun_tab_kalbanding()
+
+        # --- Bagian akordeon ke-5: Konverter Kalender Masehi <-> Hijriyah
+        #     (terlipat di awal juga, mengikuti pola 4 akordeon sebelumnya).
+        #     Konversi murni tabular/urfi (siklus 30-tahun tipe IIa/Kuwaiti),
+        #     BUKAN hasil rukyat/hisab ijtimak -- cukup akurat & instan utk
+        #     kebutuhan konversi tanggal sehari-hari (bukan penentuan awal
+        #     bulan resmi, yang tetap memakai bagian 🌙 Visibilitas /
+        #     📅 Perbandingan Kalender di atas). Tidak perlu tab notebook
+        #     terpisah -- hasilnya cukup ditampilkan sbg label di badan
+        #     akordeon ini sendiri (tidak ada peta/tabel yang perlu digambar). ---
+        self._body_akordeon_konverter, self._buka_akordeon_konverter, self._tutup_akordeon_konverter = \
+            self._buat_bagian_akordeon(
+                tab_kontrol, "🔄 Konverter Kalender",
+                buka_awal=False,
+                on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
+                                  self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding()))
+        self._bangun_akordeon_konverter(self._body_akordeon_konverter, pad)
 
     def _on_ganti_tab_notebook(self, event=None):
         """Dipanggil tiap kali tab notebook kanan (peta/Waktu Sholat)
@@ -5313,6 +5510,224 @@ class HisabWinApp(tk.Tk):
         self._log(f"Perbandingan kalender {tahun_h} H selesai "
                    f"({jumlah_beda} dari {len(hasil)} bulan berbeda).")
         self.btn_bandingkan_kalender.config(state="normal")
+
+    # =====================================================
+    #  Akordeon ke-5: Konverter Kalender Masehi <-> Hijriyah
+    # =====================================================
+    def _bangun_akordeon_konverter(self, body, pad):
+        """Isi badan akordeon "🔄 Konverter Kalender": dua arah konversi
+        (Masehi -> Hijriyah / Hijriyah -> Masehi), dengan 3 pilihan kriteria:
+        - Urfi (cepat): kalender tabular (masehi_ke_hijriyah_urfi() /
+          hijriyah_urfi_ke_masehi()) -- instan, sinkron, tanpa astronomi.
+        - MABIMS / KHGT Muhammadiyah: kriteria astronomis ASLI, dibangun di
+          atas bandingkan_kalender_mabims_khgt() yg sudah ada lewat
+          masehi_ke_hijriyah_kriteria()/hijriyah_kriteria_ke_masehi() --
+          perlu dihitung di thread terpisah (bisa perlu beberapa detik,
+          krn menjalankan pencarian ijtimak & evaluasi kriteria hilal
+          sungguhan), pola sama seperti "📅 Perbandingan Kalender"."""
+
+        ttk.Label(
+            body,
+            text="Konversi tanggal Masehi <-> Hijriyah. Kriteria Urfi = "
+                 "kalender tabular (instan, perkiraan). Kriteria MABIMS/KHGT "
+                 "= dari hasil hisab ijtimak & kriteria hilal ASLI (sama "
+                 "seperti bagian 📅 Perbandingan Kalender), lebih akurat tapi "
+                 "perlu waktu hitung beberapa detik.",
+            font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left",
+            wraplength=280,
+        ).pack(fill="x", padx=10, pady=(4, 6))
+
+        self.arah_konverter = tk.StringVar(value="m2h")
+        self.kriteria_konverter = tk.StringVar(value="urfi")
+
+        frame_arah = ttk.LabelFrame(body, text="1. Arah Konversi")
+        frame_arah.pack(fill="x", **pad)
+        ttk.Radiobutton(
+            frame_arah, text="Masehi → Hijriyah", value="m2h",
+            variable=self.arah_konverter, command=self._on_ganti_arah_konverter,
+        ).grid(row=0, column=0, padx=10, pady=4, sticky="w")
+        ttk.Radiobutton(
+            frame_arah, text="Hijriyah → Masehi", value="h2m",
+            variable=self.arah_konverter, command=self._on_ganti_arah_konverter,
+        ).grid(row=1, column=0, padx=10, pady=4, sticky="w")
+
+        frame_kriteria = ttk.LabelFrame(body, text="2. Kriteria")
+        frame_kriteria.pack(fill="x", **pad)
+        ttk.Radiobutton(
+            frame_kriteria, text="Urfi / Tabular (cepat, perkiraan)", value="urfi",
+            variable=self.kriteria_konverter,
+        ).grid(row=0, column=0, padx=10, pady=4, sticky="w")
+        ttk.Radiobutton(
+            frame_kriteria, text="MABIMS (Indonesia)", value="mabims",
+            variable=self.kriteria_konverter,
+        ).grid(row=1, column=0, padx=10, pady=4, sticky="w")
+        ttk.Radiobutton(
+            frame_kriteria, text="KHGT (Muhammadiyah)", value="khgt",
+            variable=self.kriteria_konverter,
+        ).grid(row=2, column=0, padx=10, pady=4, sticky="w")
+        ttk.Label(
+            frame_kriteria,
+            text="MABIMS/KHGT memakai Mode Perhitungan yang sama seperti "
+                 "bagian 🌙 Visibilitas di atas (Ringan/Presisi).",
+            font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left",
+            wraplength=280,
+        ).grid(row=3, column=0, padx=10, pady=(0, 4), sticky="w")
+
+        frame_input = ttk.LabelFrame(body, text="3. Masukkan Tanggal")
+        frame_input.pack(fill="x", **pad)
+
+        sekarang = datetime.now()
+        ttk.Label(frame_input, text="Hari:").grid(row=0, column=0, padx=6, pady=6, sticky="w")
+        self.entry_konv_hari = ttk.Entry(frame_input, width=6)
+        self.entry_konv_hari.insert(0, str(sekarang.day))
+        self.entry_konv_hari.grid(row=0, column=1, padx=6, pady=6)
+
+        ttk.Label(frame_input, text="Bulan:").grid(row=0, column=2, padx=6, pady=6, sticky="w")
+        self.entry_konv_bulan = ttk.Entry(frame_input, width=6)
+        self.entry_konv_bulan.insert(0, str(sekarang.month))
+        self.entry_konv_bulan.grid(row=0, column=3, padx=6, pady=6)
+
+        ttk.Label(frame_input, text="Tahun:").grid(row=0, column=4, padx=6, pady=6, sticky="w")
+        self.entry_konv_tahun = ttk.Entry(frame_input, width=8)
+        self.entry_konv_tahun.insert(0, str(sekarang.year))
+        self.entry_konv_tahun.grid(row=0, column=5, padx=6, pady=6)
+
+        self.label_konv_bulan_nama = ttk.Label(
+            frame_input, text="", font=FONT_KECIL, foreground=WARNA_TEKS_MUTED)
+        self.label_konv_bulan_nama.grid(row=1, column=0, columnspan=6, padx=6, pady=(0, 4), sticky="w")
+
+        self.btn_konversi = ttk.Button(
+            body, text="Konversi", command=self._on_konversi_kalender, style="Aksen.TButton")
+        self.btn_konversi.pack(pady=6)
+
+        frame_hasil = ttk.LabelFrame(body, text="Hasil")
+        frame_hasil.pack(fill="x", **pad)
+        self.label_hasil_konverter = ttk.Label(
+            frame_hasil, text="Belum ada konversi.", font=FONT_UTAMA_BOLD,
+            justify="left", wraplength=280)
+        self.label_hasil_konverter.pack(anchor="w", padx=10, pady=10)
+
+        self._on_ganti_arah_konverter()
+
+    def _on_ganti_arah_konverter(self):
+        """Perbarui label bantu nama bulan sesuai arah konversi yang
+        dipilih -- Masehi pakai BULAN_ID, Hijriyah pakai _NAMA_BULAN_HIJRIYAH."""
+        if self.arah_konverter.get() == "m2h":
+            teks = "Isi tanggal Masehi (Gregorian), mis. bulan 1=Januari ... 12=Desember."
+        else:
+            nama_bulan = ", ".join(f"{i + 1}={n}" for i, n in enumerate(_NAMA_BULAN_HIJRIYAH))
+            teks = f"Isi tanggal Hijriyah, bulan: {nama_bulan}."
+        self.label_konv_bulan_nama.config(text=teks)
+
+    def _on_konversi_kalender(self):
+        teks_hari = self.entry_konv_hari.get().strip()
+        teks_bulan = self.entry_konv_bulan.get().strip()
+        teks_tahun = self.entry_konv_tahun.get().strip()
+
+        if not (teks_hari.isdigit() and teks_bulan.isdigit() and
+                teks_tahun.isdigit() and len(teks_tahun) <= 5):
+            messagebox.showerror(
+                "Input tidak valid", "Isi Hari/Bulan/Tahun dengan angka, mis. 18 / 7 / 2026.")
+            return
+
+        hari, bulan, tahun = int(teks_hari), int(teks_bulan), int(teks_tahun)
+        if not (1 <= bulan <= 12):
+            messagebox.showerror("Input tidak valid", "Bulan harus di antara 1 dan 12.")
+            return
+        if not (1 <= hari <= 30):
+            messagebox.showerror("Input tidak valid", "Tanggal harus di antara 1 dan 30.")
+            return
+
+        arah = self.arah_konverter.get()
+        kriteria = self.kriteria_konverter.get()
+
+        if arah == "m2h" and kriteria == "urfi" and \
+                hari > _hari_dalam_bulan_gregorian(tahun, bulan):
+            messagebox.showerror(
+                "Input tidak valid",
+                f"{BULAN_ID[bulan - 1]} {tahun} cuma punya "
+                f"{_hari_dalam_bulan_gregorian(tahun, bulan)} hari.")
+            return
+
+        if kriteria == "urfi":
+            # --- Jalur cepat (sinkron): kalender tabular, tidak butuh
+            #     ijtimak/ephemeris apapun, jadi langsung dihitung di sini. ---
+            try:
+                if arah == "m2h":
+                    tahun_h, bulan_h, hari_h = masehi_ke_hijriyah_urfi(tahun, bulan, hari)
+                    jd = julian_day(tahun, bulan, float(hari))
+                    jd = float(np.asarray(jd).reshape(()))
+                    nama_hari = nama_hari_dari_jd(jd)
+                    teks_hasil = (
+                        f"{nama_hari}, {hari:02d} {BULAN_ID[bulan - 1]} {tahun} M\n"
+                        f"=  {hari_h:02d} {_NAMA_BULAN_HIJRIYAH[bulan_h - 1]} {tahun_h} H "
+                        f"(kriteria Urfi)")
+                else:
+                    tahun_m, bulan_m, hari_m = hijriyah_urfi_ke_masehi(tahun, bulan, hari)
+                    jd = _urfi_ke_jd(tahun, bulan, hari)
+                    nama_hari = nama_hari_dari_jd(jd)
+                    teks_hasil = (
+                        f"{hari:02d} {_NAMA_BULAN_HIJRIYAH[bulan - 1]} {tahun} H (kriteria Urfi)\n"
+                        f"=  {nama_hari}, {hari_m:02d} {BULAN_ID[bulan_m - 1]} {tahun_m} M")
+            except (ValueError, IndexError) as e:
+                messagebox.showerror("Gagal konversi", f"Tanggal tidak bisa dikonversi: {e}")
+                return
+
+            self.label_hasil_konverter.config(text=teks_hasil)
+            self._log(f"Konverter Kalender: {teks_hasil.replace(chr(10), '  ')}")
+            return
+
+        # --- Jalur MABIMS/KHGT: kriteria astronomis ASLI, perlu hitung
+        #     ijtimak & evaluasi kriteria hilal (bisa perlu beberapa detik)
+        #     -- dijalankan di thread terpisah, sama seperti
+        #     _on_bandingkan_kalender(), supaya GUI tidak macet. ---
+        mode = self.mode.get()
+        if mode == "jpl" and self.eph is None:
+            messagebox.showwarning(
+                "Ephemeris belum siap",
+                "Mode Presisi (JPL DE421) dipilih di bagian Visibilitas, tapi "
+                "ephemeris-nya belum selesai dimuat. Tunggu sebentar, atau "
+                "beralih ke Mode Ringan dulu di bagian 🌙 Visibilitas.")
+            return
+
+        self.btn_konversi.config(state="disabled")
+        label_kriteria = "MABIMS" if kriteria == "mabims" else "KHGT Muhammadiyah"
+        self._log(f"\nMenghitung konversi kalender (kriteria {label_kriteria})...")
+
+        threading.Thread(target=self._konversi_kriteria_thread,
+                          args=(arah, kriteria, tahun, bulan, hari, mode), daemon=True).start()
+
+    def _konversi_kriteria_thread(self, arah, kriteria, tahun, bulan, hari, mode):
+        label_kriteria = "MABIMS" if kriteria == "mabims" else "KHGT Muhammadiyah"
+        try:
+            progress_cb = lambda msg: self.antrian.put(("progress", msg))
+            if arah == "m2h":
+                info = masehi_ke_hijriyah_kriteria(
+                    tahun, bulan, hari, kriteria, self.ts, self.eph, mode=mode,
+                    progress_cb=progress_cb)
+                jd = julian_day(tahun, bulan, float(hari))
+                jd = float(np.asarray(jd).reshape(()))
+                nama_hari = nama_hari_dari_jd(jd)
+                teks_hasil = (
+                    f"{nama_hari}, {hari:02d} {BULAN_ID[bulan - 1]} {tahun} M\n"
+                    f"=  {info['hari_h']:02d} {info['nama_bulan_h']} {info['tahun_h']} H "
+                    f"(kriteria {label_kriteria})")
+            else:
+                tahun_m, bulan_m, hari_m = hijriyah_kriteria_ke_masehi(
+                    tahun, bulan, hari, kriteria, self.ts, self.eph, mode=mode,
+                    progress_cb=progress_cb)
+                jd = julian_day(tahun_m, bulan_m, float(hari_m))
+                jd = float(np.asarray(jd).reshape(()))
+                nama_hari = nama_hari_dari_jd(jd)
+                teks_hasil = (
+                    f"{hari:02d} {_NAMA_BULAN_HIJRIYAH[bulan - 1]} {tahun} H "
+                    f"(kriteria {label_kriteria})\n"
+                    f"=  {nama_hari}, {hari_m:02d} {BULAN_ID[bulan_m - 1]} {tahun_m} M")
+            self.antrian.put(("konv_kriteria_ok", teks_hasil))
+        except (ValueError, IndexError) as e:
+            self.antrian.put(("konv_kriteria_error", f"Tanggal tidak bisa dikonversi: {e}"))
+        except Exception as e:
+            self.antrian.put(("konv_kriteria_error", f"Gagal menghitung konversi: {e}"))
 
     def _on_simpan_csv_kalbanding(self):
         if not self._hasil_kalbanding_terakhir:
@@ -6359,6 +6774,16 @@ class HisabWinApp(tk.Tk):
                     self._log(f"ERROR: {payload}")
                     messagebox.showerror("Terjadi kesalahan", payload)
                     self.btn_bandingkan_kalender.config(state="normal")
+
+                elif jenis == "konv_kriteria_ok":
+                    self.label_hasil_konverter.config(text=payload)
+                    self._log(f"Konverter Kalender: {payload.replace(chr(10), '  ')}")
+                    self.btn_konversi.config(state="normal")
+
+                elif jenis == "konv_kriteria_error":
+                    self._log(f"ERROR: {payload}")
+                    messagebox.showerror("Terjadi kesalahan", payload)
+                    self.btn_konversi.config(state="normal")
 
                 elif jenis == "jadwal_bulan_ok":
                     tahun, bulan, mode_hisab, jadwal = payload
