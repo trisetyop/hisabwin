@@ -4255,6 +4255,114 @@ def format_jam_desimal(jam):
     return f"{jj:02d}:{mm:02d}"
 
 
+def _blend_warna(warna_depan, warna_belakang, alpha):
+    """Campur 'warna_depan' ke atas 'warna_belakang' dgn opacity alpha
+    (0..1), hasilnya berupa SATU warna solid biasa (bukan transparansi
+    sungguhan) -- dipakai sbg trik bikin efek bayangan/shadow lembut,
+    krn tk.PhotoImage cuma dukung transparansi BINER (ada/tidak ada,
+    lewat transparency_set), bukan alpha sebagian. Valid selama warna
+    latar yg dipakai (warna_belakang) memang PASTI itu warna sungguhan
+    di baliknya (makanya selalu dipanggil dgn warna latar yg sudah
+    diketahui pasti, mis. warna isi tab itu sendiri, atau WARNA_BG)."""
+    def _ke_rgb(h):
+        h = h.lstrip("#")
+        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+    r1, g1, b1 = _ke_rgb(warna_depan)
+    r2, g2, b2 = _ke_rgb(warna_belakang)
+    r = round(r1 * alpha + r2 * (1 - alpha))
+    g = round(g1 * alpha + g2 * (1 - alpha))
+    b = round(b1 * alpha + b2 * (1 - alpha))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _pasang_bayangan_kartu(parent, tinggi=6, alpha_puncak=0.16):
+    """Bikin & pasang satu strip tk.Canvas tipis (bayangan lembut,
+    gradasi dari agak gelap di atas memudar ke WARNA_BG di bawah) --
+    dipakai sbg efek "drop shadow" di bawah kartu/panel (mis. tiap
+    bagian akordeon), memberi kesan kartu itu sedikit "terangkat" dari
+    latar. Dipakai Canvas (bukan gambar statis) krn Canvas bisa gambar
+    ulang otomatis mengikuti lebar sungguhan tiap kali di-resize
+    (event <Configure>) -- jadi tidak perlu trik 9-slice segala.
+
+    Return widget canvas-nya: PEMANGGIL WAJIB pack_forget()+pack() ulang
+    widget ini tiap kali urutan tampilan di atasnya berubah (mis. saat
+    akordeon dibuka/ditutup dan body-nya di-pack/pack_forget), supaya
+    bayangan ini tetap "nempel" jadi elemen PALING BAWAH -- pack_forget
+    lalu pack lagi otomatis menaruhnya di akhir urutan tumpukan pack."""
+    kanvas = tk.Canvas(parent, height=tinggi, highlightthickness=0, bd=0, bg=WARNA_BG)
+
+    def _gambar_ulang(event=None):
+        kanvas.delete("all")
+        lebar = kanvas.winfo_width()
+        if lebar <= 1:
+            return
+        for i in range(tinggi):
+            alpha = alpha_puncak * (1 - i / tinggi)
+            warna = _blend_warna("#000000", WARNA_BG, alpha)
+            kanvas.create_rectangle(0, i, lebar, i + 1, fill=warna, outline="")
+
+    kanvas.bind("<Configure>", _gambar_ulang)
+    return kanvas
+
+
+def _buat_gambar_tab_bulat(lebar, tinggi, radius, warna_isi,
+                            tinggi_bayangan=0, alpha_puncak_bayangan=0.22):
+    """Bikin satu tk.PhotoImage (lebar x tinggi) berbentuk tab ala browser
+    modern (Chrome dkk): sudut ATAS membulat (radius px), sudut BAWAH
+    tetap siku (biar nyambung rapi dgn isi/konten di bawah tab). Piksel
+    di luar bentuk itu (ujung sudut atas yg "terpotong") dibuat TRANSPARAN
+    supaya warna asli di belakang tab (latar notebook) tetap kelihatan --
+    itulah yg menciptakan ilusi sudut membulat, tanpa perlu Pillow atau
+    file ikon eksternal apapun (gambar digambar manual pixel-demi-pixel,
+    sama seperti ikon × di ClosableNotebook di bawah).
+
+    Kalau tinggi_bayangan > 0: sejumlah baris PALING BAWAH (di dalam
+    bentuk tab itu sendiri, TIDAK menambah tinggi gambar total) digelapkan
+    bertahap (makin gelap makin dekat ke tepi bawah) -- efek "inner
+    shadow"/emboss sederhana yg memberi kesan tab sedikit cembung/
+    terangkat, tanpa mengubah ukuran gambar sama sekali (jadi TIDAK
+    mengganggu perhitungan tinggi baris tab yg sudah dijaga hati-hati di
+    _terapkan_tema -- lihat komentar di sana soal kenapa ukuran dasar
+    sengaja dibuat besar).
+
+    Dipakai sbg elemen gambar ttk (lihat 'border=radius' di
+    style.element_create pemanggilnya) dgn mode "9-slice": kotak radius
+    px di tiap ujung dijaga tetap tajam, cuma bagian tengahnya yg melar
+    mengikuti lebar tab sungguhan (yg berubah2 sesuai panjang teks
+    label) -- jadi satu gambar kecil ini cukup utk tab selebar apapun.
+    """
+    img = tk.PhotoImage(width=lebar, height=tinggi)
+    pusat_y = radius - 0.5
+    pusat_x_kiri = radius - 0.5
+    pusat_x_kanan = lebar - radius - 0.5
+
+    warna_per_baris = [warna_isi] * tinggi
+    if tinggi_bayangan > 0:
+        for i in range(min(tinggi_bayangan, tinggi)):
+            y = tinggi - 1 - i
+            alpha = alpha_puncak_bayangan * (1 - i / tinggi_bayangan)
+            warna_per_baris[y] = _blend_warna("#000000", warna_isi, alpha)
+
+    for y in range(tinggi):
+        warna_baris = warna_per_baris[y]
+        for x in range(lebar):
+            if y >= radius:
+                isi = True
+            elif x < radius:
+                dx, dy = x - pusat_x_kiri, y - pusat_y
+                isi = (dx * dx + dy * dy) <= radius * radius
+            elif x >= lebar - radius:
+                dx, dy = x - pusat_x_kanan, y - pusat_y
+                isi = (dx * dx + dy * dy) <= radius * radius
+            else:
+                isi = True
+            if isi:
+                img.put(warna_baris, (x, y))
+            else:
+                img.transparency_set(x, y, True)
+    return img
+
+
 # =========================================================
 #  NOTEBOOK YANG TAB-NYA BISA DITUTUP (tombol × kecil di tiap tab)
 #  Dipakai KHUSUS untuk notebook peta hasil perhitungan (self.notebook)
@@ -4353,8 +4461,15 @@ class ClosableNotebook(ttk.Notebook):
         # "width" pada element_create di atas (memberi ruang kosong di
         # sekitar gambar ×, karena gambarnya sendiri transparan).
         style.layout("Closable.TNotebook", style.layout("TNotebook"))
+        # Elemen akar "Rounded.tab" (sudut atas membulat ala Chrome) sudah
+        # dibuat & didaftarkan di HisabWinApp._terapkan_tema() -- fungsi
+        # itu SELALU dipanggil lebih dulu, sebelum notebook manapun
+        # (termasuk ClosableNotebook ini) dibangun, jadi elemen itu
+        # dijamin sudah ada di titik ini. Dipakai lagi di sini (bukan
+        # "Notebook.tab" bawaan) supaya tab yg punya tombol × ini ikut
+        # membulat, konsisten dgn notebook lain.
         style.layout("Closable.TNotebook.Tab", [
-            ("Notebook.tab", {"sticky": "nswe", "children": [
+            ("Rounded.tab", {"sticky": "nswe", "children": [
                 ("Notebook.padding", {"sticky": "nswe", "children": [
                     ("Notebook.focus", {"sticky": "nswe", "children": [
                         ("Notebook.label", {"side": "left", "sticky": ""}),
@@ -4546,6 +4661,13 @@ class HisabWinApp(tk.Tk):
         if buka_awal:
             body.pack(fill="x")
 
+        # Bayangan lembut di BAWAH kartu akordeon ini (lihat
+        # _pasang_bayangan_kartu) -- selalu di-pack_forget()+pack() ulang
+        # di _toggle() supaya tetap jadi elemen PALING BAWAH baik saat
+        # body terbuka maupun tertutup.
+        bayangan = _pasang_bayangan_kartu(wadah, tinggi=6)
+        bayangan.pack(fill="x")
+
         def _toggle(event=None):
             if state["buka"]:
                 body.pack_forget()
@@ -4555,6 +4677,8 @@ class HisabWinApp(tk.Tk):
                 label_panah.config(text="▾")
                 if on_open is not None:
                     on_open()
+            bayangan.pack_forget()
+            bayangan.pack(fill="x")
             state["buka"] = not state["buka"]
 
         def _buka():
@@ -4654,6 +4778,52 @@ class HisabWinApp(tk.Tk):
                   foreground=[("selected", "white"), ("!selected", WARNA_TEKS_MUTED)],
                   font=[("!selected", FONT_UTAMA)],
                   padding=[("!selected", (14, 6))])
+
+        # --- Tab BULAT ala Chrome (sudut ATAS membulat, bawah tetap
+        #     siku spy nyambung rapi dgn isi di bawahnya) -- ttk/tema
+        #     "clam" bawaan cuma bisa gambar tab persegi lewat elemen
+        #     "Notebook.tab", jadi elemen itu diganti dgn elemen gambar
+        #     custom "Rounded.tab" (dibuat manual pixel-demi-pixel,
+        #     TANPA butuh Pillow/file ikon eksternal -- sama seperti
+        #     tombol X di ClosableNotebook di bawah). Gambar dipakai sbg
+        #     "9-slice" (border=RADIUS_TAB) supaya sudut tetap tajam
+        #     berapa pun lebar tab-nya (menyesuaikan panjang teks label),
+        #     cuma bagian tengahnya yg melar. Dipasang di sini (bukan di
+        #     ClosableNotebook) supaya SEMUA notebook di aplikasi ini
+        #     (termasuk notebook_hasil_sholat yg pakai "TNotebook" polos)
+        #     ikut membulat, konsisten.
+        RADIUS_TAB = 10
+        lebar_img_tab, tinggi_img_tab = 4 * RADIUS_TAB, 40
+        img_tab_nonaktif = _buat_gambar_tab_bulat(
+            lebar_img_tab, tinggi_img_tab, RADIUS_TAB, WARNA_PANEL,
+            tinggi_bayangan=5, alpha_puncak_bayangan=0.12)
+        img_tab_aktif = _buat_gambar_tab_bulat(
+            lebar_img_tab, tinggi_img_tab, RADIUS_TAB, WARNA_AKSEN,
+            tinggi_bayangan=7, alpha_puncak_bayangan=0.28)
+        img_tab_hover = _buat_gambar_tab_bulat(
+            lebar_img_tab, tinggi_img_tab, RADIUS_TAB, WARNA_BORDER,
+            tinggi_bayangan=5, alpha_puncak_bayangan=0.12)
+        # Disimpan di instance (bukan variabel lokal) spy tidak dibuang
+        # garbage collector selama style ttk masih memakainya.
+        self._img_tab_bulat = (img_tab_nonaktif, img_tab_aktif, img_tab_hover)
+        style.element_create(
+            "Rounded.tab", "image", img_tab_nonaktif,
+            ("selected", img_tab_aktif),
+            ("active", "!selected", img_tab_hover),
+            border=RADIUS_TAB, sticky="nsew",
+        )
+        # Layout tab biasa ("TNotebook.Tab", dipakai notebook_hasil_sholat
+        # dkk) -- struktur children SAMA seperti bawaan tema clam, cuma
+        # elemen akar "Notebook.tab" diganti "Rounded.tab".
+        style.layout("TNotebook.Tab", [
+            ("Rounded.tab", {"sticky": "nswe", "children": [
+                ("Notebook.padding", {"sticky": "nswe", "children": [
+                    ("Notebook.focus", {"sticky": "nswe", "children": [
+                        ("Notebook.label", {"side": "top", "sticky": ""}),
+                    ]}),
+                ]}),
+            ]}),
+        ])
 
         # --- Scrollbar ---
         style.configure("TScrollbar", background=WARNA_PANEL, troughcolor=WARNA_BG,
