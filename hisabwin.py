@@ -28,6 +28,8 @@ import queue
 import sys
 import threading
 import tkinter as tk
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta
 from tkinter import filedialog, messagebox, ttk
 
@@ -48,6 +50,194 @@ def _resource_base_dir():
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         return sys._MEIPASS
     return os.path.dirname(os.path.abspath(__file__))
+
+
+# =========================================================
+#  MANAJEMEN KERNEL JPL (de421 bawaan + de440/de441 opsional)
+# =========================================================
+#
+# de421.bsp SELALU dibundel bersama aplikasi (lihat _resource_base_dir) --
+# ini tetap jadi default & satu-satunya yang dijamin ada tanpa internet.
+# de440 (lebih presisi, rentang 1550-2650) dan de441 (rentang sangat
+# panjang, dipecah NASA jadi 2 bagian ~1.5GB masing-masing) TIDAK dibundel
+# karena ukurannya besar -- disediakan lewat dialog "Kelola Kernel JPL"
+# supaya user bisa unduh sendiri kalau mau, kapan saja diinginkan.
+#
+# Untuk de441, aplikasi ini HANYA menawarkan de441_part-2.bsp (1969 M -
+# 17191 M) -- cukup untuk hisab hilal masa kini & masa depan -- bukan
+# part-1 (13.200 SM-1969 M) yang jarang relevan utk kalender kamariah dan
+# akan menambah unduhan ~1.5GB lagi kalau ikut diunduh.
+KERNEL_CATALOG = {
+    "de421": {
+        "label": "DE421 (bawaan aplikasi)",
+        "cakupan": "1900 - 2050",
+        "files": [{"nama": "de421.bsp", "url": None, "size_mb": 17}],
+        "bundled": True,
+    },
+    "de440": {
+        "label": "DE440 (lebih presisi)",
+        "cakupan": "1550 - 2650",
+        "files": [{
+            "nama": "de440.bsp",
+            "url": "https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/de440.bsp",
+            "size_mb": 114,
+        }],
+        "bundled": False,
+    },
+    "de441": {
+        "label": "DE441 (rentang sangat panjang, hanya bagian modern)",
+        "cakupan": "1969 M - 17191 M (bagian kuno 13.200 SM-1969 M sengaja tidak ditawarkan, jarang relevan)",
+        "files": [{
+            "nama": "de441_part-2.bsp",
+            "url": "https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/de441_part-2.bsp",
+            "size_mb": 1500,
+        }],
+        "bundled": False,
+    },
+}
+
+KERNEL_DEFAULT_ID = "de421"
+
+
+def _folder_cache_kernel_jpl():
+    """Folder tempat kernel JPL yang DIUNDUH (de440/de441) disimpan --
+    folder CACHE per-user (mis. %LOCALAPPDATA%\\HisabWin\\kernels di
+    Windows), TERPISAH dari folder instalasi/aset bawaan (de421.bsp tetap
+    dibaca dari _resource_base_dir()). Sengaja dipisah supaya:
+      1. Uninstall/reinstall aplikasi tidak ikut menghapus kernel besar
+         yang sudah susah payah diunduh (~114 MB - 1.5 GB).
+      2. Folder instalasi (kadang read-only / butuh admin di Program Files)
+         tidak perlu ditulisi saat runtime.
+    Dibuat otomatis kalau belum ada.
+    """
+    if sys.platform.startswith("win"):
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~\\AppData\\Local")
+    elif sys.platform == "darwin":
+        base = os.path.expanduser("~/Library/Caches")
+    else:
+        base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    folder = os.path.join(base, "HisabWin", "kernels")
+    os.makedirs(folder, exist_ok=True)
+    return folder
+
+
+def _path_preferensi_kernel():
+    """File teks kecil (di folder cache yang sama) yang menyimpan id kernel
+    JPL yang terakhir dipilih user sebagai 'aktif' (mis. 'de440'). Kalau
+    file tidak ada / isinya tidak dikenal, dianggap KERNEL_DEFAULT_ID."""
+    return os.path.join(_folder_cache_kernel_jpl(), "kernel_aktif.txt")
+
+
+def muat_kernel_aktif():
+    """Baca id kernel aktif tersimpan; fallback ke default kalau belum
+    pernah diset atau file rusak/tidak dikenal."""
+    try:
+        with open(_path_preferensi_kernel(), "r", encoding="utf-8") as f:
+            kid = f.read().strip()
+        if kid in KERNEL_CATALOG:
+            return kid
+    except OSError:
+        pass
+    return KERNEL_DEFAULT_ID
+
+
+def simpan_kernel_aktif(kernel_id):
+    """Simpan id kernel aktif terpilih ke file preferensi."""
+    try:
+        with open(_path_preferensi_kernel(), "w", encoding="utf-8") as f:
+            f.write(kernel_id)
+    except OSError:
+        pass
+
+
+def _path_file_kernel(kernel_id, info_file):
+    """Path lokal (baca ATAU tulis) untuk satu file kernel tertentu.
+    de421 (bundled) -> folder aset bawaan (read-only).
+    de440/de441 (unduhan) -> folder cache per-user."""
+    if KERNEL_CATALOG[kernel_id]["bundled"]:
+        return os.path.join(_resource_base_dir(), info_file["nama"])
+    return os.path.join(_folder_cache_kernel_jpl(), info_file["nama"])
+
+
+def status_kernel(kernel_id):
+    """True kalau SEMUA file kernel ini sudah tersedia secara lokal
+    (bundled, atau sudah pernah selesai diunduh)."""
+    info = KERNEL_CATALOG[kernel_id]
+    return all(os.path.isfile(_path_file_kernel(kernel_id, f)) for f in info["files"])
+
+
+def path_utama_kernel(kernel_id):
+    """Path file .bsp utama yang dipakai skyfield.load() untuk kernel ini.
+    (Semua kernel di katalog ini hanya terdiri dari satu file .bsp, jadi
+    cukup ambil file pertama.)"""
+    info = KERNEL_CATALOG[kernel_id]
+    return _path_file_kernel(kernel_id, info["files"][0])
+
+
+def hapus_kernel(kernel_id):
+    """Hapus file kernel yang sudah diunduh (TIDAK berlaku utk de421
+    bawaan -- dijaga supaya tidak sengaja terhapus)."""
+    info = KERNEL_CATALOG[kernel_id]
+    if info["bundled"]:
+        raise ValueError("Kernel bawaan aplikasi tidak boleh dihapus dari sini.")
+    for f in info["files"]:
+        path = _path_file_kernel(kernel_id, f)
+        if os.path.isfile(path):
+            os.remove(path)
+
+
+def unduh_kernel(kernel_id, progress_cb=lambda persen, teks: None, event_batal=None):
+    """Unduh semua file kernel ini satu per satu, lapor progres lewat
+    progress_cb(persen_0_100, teks_status). Ditulis dulu ke '<nama>.part'
+    lalu di-rename ke nama asli setelah SELESAI utuh -- supaya file yang
+    setengah jadi (koneksi putus di tengah jalan) tidak pernah dianggap
+    'sudah lengkap' oleh status_kernel().
+
+    event_batal: threading.Event opsional -- kalau di-set() oleh thread
+    lain (tombol "Batal" di dialog), unduhan dihentikan secepatnya dan
+    file .part yang belum selesai dihapus.
+
+    Melempar Exception dengan pesan yang bisa ditampilkan ke user kalau
+    gagal (jaringan/HTTP/dibatalkan)."""
+    info = KERNEL_CATALOG[kernel_id]
+    if info["bundled"]:
+        raise ValueError("Kernel bawaan tidak perlu (dan tidak bisa) diunduh.")
+
+    n_file = len(info["files"])
+    for idx, f in enumerate(info["files"]):
+        path_final = _path_file_kernel(kernel_id, f)
+        if os.path.isfile(path_final):
+            continue  # file ini sudah ada (mis. lanjutan unduhan multi-file yg sempat berhenti)
+        path_part = path_final + ".part"
+        try:
+            with urllib.request.urlopen(f["url"], timeout=30) as resp:
+                total = resp.length or (f["size_mb"] * 1024 * 1024)
+                sudah = 0
+                with open(path_part, "wb") as out:
+                    while True:
+                        if event_batal is not None and event_batal.is_set():
+                            raise RuntimeError("Unduhan dibatalkan oleh user.")
+                        chunk = resp.read(1024 * 256)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                        sudah += len(chunk)
+                        persen_file = min(99.0, sudah / total * 100.0) if total else 0.0
+                        # progres keseluruhan mempertimbangkan file ke berapa dari n_file
+                        persen_total = (idx * 100.0 + persen_file) / n_file
+                        progress_cb(persen_total,
+                                    f"Mengunduh {f['nama']} — {sudah / (1024 * 1024):.0f} MB"
+                                    + (f" / ~{total / (1024 * 1024):.0f} MB" if total else ""))
+            os.replace(path_part, path_final)
+        except Exception:
+            if os.path.isfile(path_part):
+                try:
+                    os.remove(path_part)
+                except OSError:
+                    pass
+            raise
+    progress_cb(100.0, "Selesai.")
+
 
 matplotlib.use("TkAgg")
 
@@ -5194,6 +5384,250 @@ def _buat_gambar_tab_bulat(lebar, tinggi, radius, warna_isi,
 #  matplotlib, hapus dari self._tab_peta, dsb).
 # =========================================================
 
+# =========================================================
+#  DIALOG: Kelola Kernel JPL (unduh/hapus/pilih de421-de440-de441)
+# =========================================================
+
+class DialogKernelJPL(tk.Toplevel):
+    """Popup modal untuk melihat status, mengunduh, menghapus, dan memilih
+    kernel JPL (.bsp) yang dipakai Mode Presisi. Dipanggil dari HisabWinApp
+    lewat tombol "Kelola Kernel JPL..." di sebelah pilihan Mode Perhitungan.
+
+    on_kernel_diganti: callback tanpa argumen, dipanggil setelah user
+    menekan "Pakai kernel ini" pada kernel yang BEDA dari yang sedang aktif
+    -- HisabWinApp yang menentukan apa yang perlu terjadi selanjutnya
+    (reset self.eph/self.ts, muat ulang di background, dsb)."""
+
+    def __init__(self, parent, on_kernel_diganti=lambda: None):
+        super().__init__(parent)
+        self.title("Kelola Kernel JPL")
+        self.geometry("580x560")
+        self.minsize(480, 360)
+        self.transient(parent)
+        self.configure(bg=WARNA_BG)
+
+        self._on_kernel_diganti = on_kernel_diganti
+        self._antrian = queue.Queue()
+        self._event_batal = None
+        self._kernel_sedang_diunduh = None
+        self._baris_widget = {}  # kernel_id -> dict widget per baris
+
+        ttk.Label(
+            self, text="Kernel JPL yang tersedia",
+            font=FONT_UTAMA_BOLD, foreground=WARNA_TEKS,
+        ).pack(anchor="w", padx=14, pady=(14, 2))
+        ttk.Label(
+            self,
+            text="de421 selalu tersedia (bawaan aplikasi, tanpa internet). "
+                 "de440/de441 opsional -- unduh sekali, dipakai berulang.",
+            foreground=WARNA_TEKS_MUTED, wraplength=520, justify="left",
+        ).pack(anchor="w", padx=14, pady=(0, 10))
+
+        frame_list_luar = ttk.Frame(self)
+        frame_list_luar.pack(fill="both", expand=True, padx=14)
+
+        list_canvas = tk.Canvas(frame_list_luar, highlightthickness=0, bg=WARNA_BG)
+        list_scrollbar = ttk.Scrollbar(frame_list_luar, orient="vertical", command=list_canvas.yview)
+        list_canvas.configure(yscrollcommand=list_scrollbar.set)
+        list_canvas.pack(side="left", fill="both", expand=True)
+        list_scrollbar.pack(side="right", fill="y")
+
+        frame_list = ttk.Frame(list_canvas)
+        list_window = list_canvas.create_window((0, 0), window=frame_list, anchor="nw")
+
+        def _list_on_configure(event):
+            list_canvas.configure(scrollregion=list_canvas.bbox("all"))
+        frame_list.bind("<Configure>", _list_on_configure)
+
+        def _list_canvas_resize(event):
+            list_canvas.itemconfig(list_window, width=event.width)
+        list_canvas.bind("<Configure>", _list_canvas_resize)
+
+        def _list_mousewheel(event):
+            list_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        parent._pasang_scroll_mousewheel(list_canvas, _list_mousewheel)
+
+        kernel_aktif = muat_kernel_aktif()
+        for kernel_id, info in KERNEL_CATALOG.items():
+            self._buat_baris_kernel(frame_list, kernel_id, info, aktif=(kernel_id == kernel_aktif))
+
+        # --- area progres (disembunyikan sampai ada unduhan berjalan) ---
+        self._frame_progres = ttk.Frame(self)
+        self._label_progres = ttk.Label(self._frame_progres, text="", foreground=WARNA_TEKS_MUTED)
+        self._label_progres.pack(anchor="w")
+        self._progressbar = ttk.Progressbar(self._frame_progres, mode="determinate", maximum=100)
+        self._progressbar.pack(fill="x", pady=(2, 4))
+        self._btn_batal = ttk.Button(self._frame_progres, text="Batal Unduh", command=self._on_batal)
+        self._btn_batal.pack(anchor="e")
+
+        ttk.Button(self, text="Tutup", command=self.destroy).pack(anchor="e", padx=14, pady=12)
+
+        self.protocol("WM_DELETE_WINDOW", self._on_tutup)
+        self._poll_antrian()
+
+    # ---------------- baris per kernel ----------------
+
+    def _buat_baris_kernel(self, parent, kernel_id, info, aktif):
+        frame = ttk.LabelFrame(parent, text=info["label"])
+        frame.pack(fill="x", pady=6)
+
+        total_mb = sum(f["size_mb"] for f in info["files"])
+        ttk.Label(frame, text=f"Cakupan: {info['cakupan']}", foreground=WARNA_TEKS_MUTED
+                  ).grid(row=0, column=0, sticky="w", padx=8, pady=(6, 0))
+        ttk.Label(frame, text=f"Ukuran unduhan: ~{total_mb} MB" if not info["bundled"] else "Sudah tersimpan di aplikasi",
+                  foreground=WARNA_TEKS_MUTED).grid(row=1, column=0, sticky="w", padx=8, pady=(0, 6))
+
+        label_status = ttk.Label(frame, text="", font=FONT_UTAMA_BOLD)
+        label_status.grid(row=0, column=1, rowspan=2, sticky="e", padx=8)
+
+        frame_tombol = ttk.Frame(frame)
+        frame_tombol.grid(row=2, column=0, columnspan=2, sticky="e", padx=8, pady=(0, 8))
+        btn_unduh = ttk.Button(frame_tombol, text="Unduh", command=lambda k=kernel_id: self._on_unduh(k))
+        btn_hapus = ttk.Button(frame_tombol, text="Hapus", command=lambda k=kernel_id: self._on_hapus(k))
+        btn_pakai = ttk.Button(frame_tombol, text="Pakai kernel ini", style="Aksen.TButton",
+                                command=lambda k=kernel_id: self._on_pakai(k))
+        btn_unduh.pack(side="left", padx=3)
+        btn_hapus.pack(side="left", padx=3)
+        btn_pakai.pack(side="left", padx=3)
+
+        frame.columnconfigure(0, weight=1)
+        self._baris_widget[kernel_id] = {
+            "label_status": label_status, "btn_unduh": btn_unduh,
+            "btn_hapus": btn_hapus, "btn_pakai": btn_pakai,
+        }
+        self._refresh_baris(kernel_id, aktif=aktif)
+
+    def _refresh_baris(self, kernel_id, aktif=None):
+        info = KERNEL_CATALOG[kernel_id]
+        w = self._baris_widget[kernel_id]
+        tersedia = status_kernel(kernel_id)
+        if aktif is None:
+            aktif = (muat_kernel_aktif() == kernel_id)
+
+        if aktif:
+            w["label_status"].config(text="✅ Aktif", foreground=WARNA_AKSEN)
+        elif tersedia:
+            w["label_status"].config(text="Tersedia", foreground=WARNA_TEKS)
+        else:
+            w["label_status"].config(text="Belum diunduh", foreground=WARNA_TEKS_MUTED)
+
+        w["btn_unduh"].config(state="disabled" if (info["bundled"] or tersedia) else "normal")
+        w["btn_hapus"].config(state="normal" if (tersedia and not info["bundled"] and not aktif) else "disabled")
+        w["btn_pakai"].config(state="disabled" if (aktif or not tersedia) else "normal")
+
+    def _refresh_semua_baris(self):
+        for kernel_id in KERNEL_CATALOG:
+            self._refresh_baris(kernel_id)
+
+    # ---------------- aksi: unduh ----------------
+
+    def _on_unduh(self, kernel_id):
+        info = KERNEL_CATALOG[kernel_id]
+        total_mb = sum(f["size_mb"] for f in info["files"])
+        if not messagebox.askyesno(
+                "Unduh kernel JPL",
+                f"Unduh {info['label']} (~{total_mb} MB) dari server NASA/NAIF?\n\n"
+                "Butuh koneksi internet dan bisa memakan waktu cukup lama "
+                "tergantung kecepatan jaringan.", parent=self):
+            return
+
+        self._kernel_sedang_diunduh = kernel_id
+        self._event_batal = threading.Event()
+        self._frame_progres.pack(fill="x", padx=14, pady=(0, 4))
+        self._progressbar.config(value=0)
+        self._label_progres.config(text=f"Bersiap mengunduh {info['label']}...")
+        self._set_semua_tombol(state="disabled")
+        self._btn_batal.config(state="normal")
+
+        threading.Thread(target=self._thread_unduh, args=(kernel_id, self._event_batal), daemon=True).start()
+
+    def _thread_unduh(self, kernel_id, event_batal):
+        def progress_cb(persen, teks):
+            self._antrian.put(("progres", persen, teks))
+        try:
+            unduh_kernel(kernel_id, progress_cb=progress_cb, event_batal=event_batal)
+            self._antrian.put(("unduh_ok", kernel_id))
+        except Exception as e:
+            self._antrian.put(("unduh_gagal", kernel_id, str(e)))
+
+    def _on_batal(self):
+        if self._event_batal is not None:
+            self._event_batal.set()
+        self._btn_batal.config(state="disabled")
+        self._label_progres.config(text="Membatalkan...")
+
+    def _set_semua_tombol(self, state):
+        for w in self._baris_widget.values():
+            for key in ("btn_unduh", "btn_hapus", "btn_pakai"):
+                try:
+                    w[key].config(state=state)
+                except tk.TclError:
+                    pass
+
+    # ---------------- aksi: hapus & pakai ----------------
+
+    def _on_hapus(self, kernel_id):
+        info = KERNEL_CATALOG[kernel_id]
+        if not messagebox.askyesno(
+                "Hapus kernel JPL",
+                f"Hapus file {info['label']} yang sudah diunduh? "
+                "Kamu perlu mengunduhnya lagi kalau ingin memakainya lagi.", parent=self):
+            return
+        try:
+            hapus_kernel(kernel_id)
+            self._refresh_semua_baris()
+        except (OSError, ValueError) as e:
+            messagebox.showerror("Gagal menghapus", str(e), parent=self)
+
+    def _on_pakai(self, kernel_id):
+        simpan_kernel_aktif(kernel_id)
+        self._refresh_semua_baris()
+        self._on_kernel_diganti()
+
+    # ---------------- polling hasil thread unduhan ----------------
+
+    def _poll_antrian(self):
+        try:
+            while True:
+                pesan = self._antrian.get_nowait()
+                tipe = pesan[0]
+                if tipe == "progres":
+                    _, persen, teks = pesan
+                    self._progressbar.config(value=persen)
+                    self._label_progres.config(text=teks)
+                elif tipe == "unduh_ok":
+                    _, kernel_id = pesan
+                    self._frame_progres.pack_forget()
+                    self._set_semua_tombol(state="normal")
+                    self._refresh_semua_baris()
+                    self._kernel_sedang_diunduh = None
+                    messagebox.showinfo(
+                        "Selesai", f"{KERNEL_CATALOG[kernel_id]['label']} berhasil diunduh.",
+                        parent=self)
+                elif tipe == "unduh_gagal":
+                    _, kernel_id, pesan_error = pesan
+                    self._frame_progres.pack_forget()
+                    self._set_semua_tombol(state="normal")
+                    self._refresh_semua_baris()
+                    self._kernel_sedang_diunduh = None
+                    messagebox.showerror("Unduhan gagal/dibatalkan", pesan_error, parent=self)
+        except queue.Empty:
+            pass
+        if self.winfo_exists():
+            self.after(150, self._poll_antrian)
+
+    def _on_tutup(self):
+        if self._kernel_sedang_diunduh is not None:
+            if not messagebox.askyesno(
+                    "Unduhan sedang berjalan",
+                    "Kernel masih sedang diunduh. Tutup jendela ini dan batalkan unduhan?",
+                    parent=self):
+                return
+            if self._event_batal is not None:
+                self._event_batal.set()
+        self.destroy()
+
+
 class ClosableNotebook(ttk.Notebook):
     _style_sudah_disiapkan = False
 
@@ -5506,8 +5940,8 @@ class HisabWinApp(tk.Tk):
             print(f"Gagal memuat bg.png: {e}")
 
         if img_asli is not None:
-            def _render_ulang(event):
-                lebar, tinggi = max(event.width, 1), max(event.height, 1)
+            def _render(lebar, tinggi):
+                lebar, tinggi = max(lebar, 1), max(tinggi, 1)
                 # mode "cover": diperbesar/diperkecil supaya menutupi
                 # seluruh area tanpa distorsi, kelebihannya dipotong
                 # simetris -- bukan di-stretch paksa jadi gepeng.
@@ -5522,6 +5956,21 @@ class HisabWinApp(tk.Tk):
                 label_bg.configure(image=img_tk)
                 label_bg.image = img_tk  # cegah digarbage-collect
 
+            def _render_ulang(event):
+                try:
+                    _render(event.width, event.height)
+                except Exception as e:
+                    # ImageTk.PhotoImage/Image.resize bisa gagal (mis. ukuran
+                    # 0 sesaat, atau Tcl/Tk versi tertentu di build PyInstaller
+                    # yang beda dari lingkungan dev) -- Tkinter MENELAN
+                    # exception dari callback <Configure> ini secara diam-diam
+                    # (cuma print ke stderr, tak terlihat di build --windowed),
+                    # jadi overlay bisa kosong TANPA error apapun yang
+                    # kelihatan. Log eksplisit di sini supaya kalau masih
+                    # bermasalah, penyebabnya jelas kelihatan (jalankan build
+                    # TANPA --windowed sekali utk melihat console-nya).
+                    print(f"Gagal merender bg.png: {e}")
+
             label_bg.bind("<Configure>", _render_ulang)
 
         # place() menumpuk overlay ini PERSIS di atas notebook (yang
@@ -5529,6 +5978,25 @@ class HisabWinApp(tk.Tk):
         # sampai dilepas lewat _hapus_tab_awal().
         label_bg.place(relx=0, rely=0, relwidth=1, relheight=1)
         self._label_bg_awal = label_bg
+
+        if img_asli is not None:
+            # Paksa render PERTAMA secara langsung -- jangan cuma andalkan
+            # event <Configure>, yang di beberapa versi Tcl/Tk (terutama di
+            # dalam ttk.PanedWindow) bisa telat/tidak terpicu sama sekali
+            # saat widget pertama kali dibuat, sehingga overlay tetap kosong
+            # walau bg.png berhasil dimuat & tidak ada error apapun.
+            label_bg.update_idletasks()
+            lebar_awal = label_bg.winfo_width()
+            tinggi_awal = label_bg.winfo_height()
+            if lebar_awal > 1 and tinggi_awal > 1:
+                try:
+                    _render(lebar_awal, tinggi_awal)
+                except Exception as e:
+                    print(f"Gagal merender bg.png (render awal): {e}")
+            # Kalau lebar/tinggi masih 1x1 di titik ini (window belum
+            # sempat di-layout sama sekali), biarkan -- binding
+            # <Configure> di atas akan menangkap ukuran valid pertama yang
+            # benar-benar terjadi begitu window benar-benar tampil.
 
     def _hapus_tab_awal(self):
         """Lepas overlay sambutan bg.png (kalau masih ada) -- dipanggil
@@ -5824,6 +6292,33 @@ class HisabWinApp(tk.Tk):
                 self._auto_cari_pending = pernah_mencari and tahun_valid
                 threading.Thread(target=self._muat_ephemeris, daemon=True).start()
 
+    def _on_kelola_kernel_jpl(self):
+        DialogKernelJPL(self, on_kernel_diganti=self._on_kernel_jpl_diganti)
+
+    def _on_kernel_jpl_diganti(self):
+        """Dipanggil dari DialogKernelJPL setelah user menekan "Pakai
+        kernel ini" pada kernel yang berbeda dari yang sedang aktif.
+
+        Kernel .bsp yang dipakai skyfield.load() hanya diambil SEKALI saat
+        _muat_ephemeris dipanggil dan disimpan di self.eph -- jadi ganti
+        preferensi saja TIDAK otomatis membuat perhitungan berikutnya
+        memakai kernel baru. self.eph/self.ts di-reset di sini supaya
+        _muat_ephemeris() dipanggil ulang (baik sekarang kalau sedang mode
+        Presisi, atau nanti begitu user pindah ke mode Presisi)."""
+        self.eph = None
+        self.ts = None
+        self._log("Kernel JPL aktif diganti. Ephemeris akan dimuat ulang.")
+        if self.mode.get() == "jpl":
+            pernah_mencari = self.ijtimak_times is not None
+            teks_tahun = self.entry_tahun.get().strip()
+            tahun_valid = teks_tahun.isdigit() and len(teks_tahun) == 4
+            self.ijtimak_times = None
+            self.listbox_ijtimak.delete(0, "end")
+            self.btn_proses.config(state="disabled")
+            self.btn_cari.config(state="disabled")
+            self._auto_cari_pending = pernah_mencari and tahun_valid
+            threading.Thread(target=self._muat_ephemeris, daemon=True).start()
+
     # ---------------- UI ----------------
 
     def _bangun_ui(self):
@@ -5956,6 +6451,9 @@ class HisabWinApp(tk.Tk):
                  "gunakan mode Presisi untuk kepastian ekstra.",
             font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left",
         ).grid(row=2, column=0, padx=10, pady=(0, 4), sticky="w")
+        ttk.Button(
+            frame0, text="⚙ Kelola Kernel JPL...", command=self._on_kelola_kernel_jpl,
+        ).grid(row=3, column=0, padx=10, pady=(0, 8), sticky="w")
 
         # --- Langkah 1: tahun ---
         frame1 = ttk.LabelFrame(body_hilal, text="1. Pilih Tahun")
@@ -8012,8 +8510,15 @@ class HisabWinApp(tk.Tk):
 
     def _muat_ephemeris(self):
         try:
+            kernel_id = muat_kernel_aktif()
+            if not status_kernel(kernel_id):
+                # Kernel yang dipilih user ternyata sudah tidak ada di disk
+                # (mis. dihapus manual di luar aplikasi) -- balik ke default
+                # bawaan supaya aplikasi tetap bisa jalan, bukan macet error.
+                simpan_kernel_aktif(KERNEL_DEFAULT_ID)
+                kernel_id = KERNEL_DEFAULT_ID
             ts = load.timescale()
-            path_bsp = os.path.join(_resource_base_dir(), 'de421.bsp')
+            path_bsp = path_utama_kernel(kernel_id)
             eph = load(path_bsp)
             self.antrian.put(("ephemeris_ok", (ts, eph)))
         except Exception as e:
