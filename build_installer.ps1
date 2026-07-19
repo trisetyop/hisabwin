@@ -78,6 +78,7 @@ $UninstallerPyArgs = $pyinstallerArgs + @(
     "--windowed",
     "--name", "HisabWin_Uninstaller",
     "--icon", "$WorkspaceDir\logo.ico",
+    "--collect-data", "ttkbootstrap",
     "--add-data", "$WorkspaceDir\logo.png;.",
     "--add-data", "$WorkspaceDir\logo.ico;."
 ) + $ExcludeModules + @(
@@ -169,6 +170,7 @@ $PyArgs = $pyinstallerArgs + @(
     "--windowed",
     "--name", "HisabWin_Installer",
     "--icon", "$WorkspaceDir\logo.ico",
+    "--collect-data", "ttkbootstrap",
     "--add-data", "$7zExe;.",
     "--add-data", "$7zDll;.",
     "--add-data", "$ZipFile;.",
