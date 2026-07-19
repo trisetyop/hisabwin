@@ -4671,6 +4671,12 @@ def _hitung_rts_horizons(tanggal, lat_deg, lon_deg, zona_offset_jam, elevasi_m=0
 
     try:
         import requests
+    except ImportError as e:
+        raise RuntimeError(
+            "Mode Online (JPL Horizons API) butuh paket Python 'requests' yang "
+            "belum terpasang. Pasang dulu dengan: pip install requests") from e
+
+    try:
         teks_sun = _minta_horizons("10", lat_deg, lon_deg, elevasi_m,
                                     waktu_mulai_utc, waktu_akhir_utc, interval_menit_rts, "4")
         teks_moon = _minta_horizons("301", lat_deg, lon_deg, elevasi_m,
@@ -4974,6 +4980,12 @@ def hitung_tabel_efemeris_horizons(tanggal, lat_deg, lon_deg, zona_offset_jam,
     # Karena itu diambil dgn indexing negatif (baris[-6:]), bukan dari awal.
     try:
         import requests
+    except ImportError as e:
+        raise RuntimeError(
+            "Mode Online (JPL Horizons API) butuh paket Python 'requests' yang "
+            "belum terpasang. Pasang dulu dengan: pip install requests") from e
+
+    try:
         teks_sun = _minta_horizons("10", lat_deg, lon_deg, elevasi_m,
                                     waktu_mulai_utc, waktu_akhir_utc, interval_menit, "2,4,20")
         teks_moon = _minta_horizons("301", lat_deg, lon_deg, elevasi_m,
@@ -5980,23 +5992,32 @@ class HisabWinApp(tk.Tk):
         self._label_bg_awal = label_bg
 
         if img_asli is not None:
-            # Paksa render PERTAMA secara langsung -- jangan cuma andalkan
-            # event <Configure>, yang di beberapa versi Tcl/Tk (terutama di
-            # dalam ttk.PanedWindow) bisa telat/tidak terpicu sama sekali
-            # saat widget pertama kali dibuat, sehingga overlay tetap kosong
-            # walau bg.png berhasil dimuat & tidak ada error apapun.
-            label_bg.update_idletasks()
-            lebar_awal = label_bg.winfo_width()
-            tinggi_awal = label_bg.winfo_height()
-            if lebar_awal > 1 and tinggi_awal > 1:
-                try:
-                    _render(lebar_awal, tinggi_awal)
-                except Exception as e:
-                    print(f"Gagal merender bg.png (render awal): {e}")
-            # Kalau lebar/tinggi masih 1x1 di titik ini (window belum
-            # sempat di-layout sama sekali), biarkan -- binding
-            # <Configure> di atas akan menangkap ukuran valid pertama yang
-            # benar-benar terjadi begitu window benar-benar tampil.
+            def _coba_render_awal(percobaan=0):
+                # Dipanggil lewat after_idle/after (LIHAT catatan di bawah),
+                # BUKAN langsung -- __init__ (tempat method ini akhirnya
+                # dipanggil) berjalan SEBELUM self.mainloop() mulai, jadi
+                # window belum benar-benar di-map oleh window manager.
+                # update_idletasks() saja TIDAK selalu cukup di titik ini,
+                # khususnya untuk widget di dalam ttk.PanedWindow -- ukuran
+                # pane yang valid sering baru pasti tersedia setelah window
+                # benar-benar tampil di layar. Makanya di-retry lewat
+                # after() sampai ukurannya valid (>1x1), bukan cuma dicoba
+                # sekali lalu pasrah ke <Configure>.
+                label_bg.update_idletasks()
+                lebar = label_bg.winfo_width()
+                tinggi = label_bg.winfo_height()
+                if lebar > 1 and tinggi > 1:
+                    try:
+                        _render(lebar, tinggi)
+                    except Exception as e:
+                        print(f"Gagal merender bg.png (render awal): {e}")
+                elif percobaan < 30:
+                    label_bg.after(50, lambda: _coba_render_awal(percobaan + 1))
+                # Kalau 30x percobaan (~1.5 detik) masih 1x1 juga, menyerah
+                # di sini -- binding <Configure> di atas tetap terpasang
+                # sebagai jaring pengaman kalau window akhirnya di-resize.
+
+            label_bg.after_idle(_coba_render_awal)
 
     def _hapus_tab_awal(self):
         """Lepas overlay sambutan bg.png (kalau masih ada) -- dipanggil

@@ -6,3 +6,4 @@ shapely
 ttkbootstrap
 pillow
 pyinstaller
+requests
