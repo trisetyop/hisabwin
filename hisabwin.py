@@ -25,6 +25,7 @@ import math
 import csv
 import os
 import queue
+import re
 import sys
 import threading
 import tkinter as tk
@@ -313,6 +314,13 @@ FONT_UTAMA_BOLD = ("Segoe UI", 10, "bold")
 FONT_JUDUL = ("Segoe UI", 18, "bold")
 FONT_KECIL = ("Segoe UI", 8)
 FONT_TAB_AKTIF = ("Segoe UI", 11, "bold")  # tab notebook yang sedang aktif -- sengaja
+                                            # dibuat lebih BESAR (bukan cuma bold), karena
+                                            # bold-saja lewat style.map tidak kelihatan
+                                            # bedanya di beberapa sistem/render font
+FONT_MONO = ("Consolas", 10)  # dipakai khusus panel Status ("terminal-like")
+WARNA_TERMINAL_BG = "#0D1117"     # nyaris hitam (gaya GitHub dark terminal)
+WARNA_TERMINAL_FG = "#39D353"     # hijau terminal klasik utk teks log
+WARNA_TERMINAL_FG_MUTED = "#3FB950"  # sedikit lebih redup, dipakai prompt/prefix
                                             # dibuat lebih BESAR (bukan cuma bold), karena
                                             # bold-saja lewat style.map tidak kelihatan
                                             # bedanya di beberapa sistem/render font
@@ -4728,8 +4736,79 @@ def hitung_rts(tanggal, lat_deg, lon_deg, zona_offset_jam, mode="ringan",
     return _hitung_rts_ringan(tanggal, lat_deg, lon_deg, zona_offset_jam, elevasi_m=elevasi_m)
 
 
+PLANET_TAMBAHAN_KATALOG = {
+    # id -> (label, kunci_skyfield [untuk mode Presisi, harus persis nama
+    # segmen di kernel DE421/440/441 -- semuanya pakai barycenter planet,
+    # BUKAN badan planetnya sendiri, supaya konsisten dgn command Horizons
+    # di bawah yg juga barycenter), horizons_command (dipakai _minta_horizons)
+    "merkurius": ("Merkurius", "mercury barycenter", "1"),
+    "venus": ("Venus", "venus barycenter", "2"),
+    "mars": ("Mars", "mars barycenter", "4"),
+    "jupiter": ("Jupiter", "jupiter barycenter", "5"),
+    "saturnus": ("Saturnus", "saturn barycenter", "6"),
+    "uranus": ("Uranus", "uranus barycenter", "7"),
+    "neptunus": ("Neptunus", "neptune barycenter", "8"),
+    "pluto": ("Pluto", "pluto barycenter", "9"),
+}
+
+
+def daftar_planet_tersedia_di_eph(eph):
+    """Deteksi SUNGGUHAN (bukan asumsi) planet mana dari
+    PLANET_TAMBAHAN_KATALOG yang benar-benar ada sebagai segmen di kernel
+    JPL yang sedang dimuat (eph). de421/440/441 yang didukung Kernel
+    Manager HisabWin semuanya menyertakan barycenter kesembilan planet,
+    jadi dalam praktiknya hasilnya akan selalu 8 planet lengkap -- tapi
+    dicek betulan di sini (bukan diasumsikan), supaya kalau suatu saat ada
+    kernel custom yang lebih kecil/berbeda (mis. cuma Bumi-Bulan-Matahari),
+    checkbox planet yang ditampilkan otomatis menyesuaikan, bukan malah
+    menampilkan pilihan yang ujung-ujungnya error saat dipakai.
+
+    Return dict {obj_id: (label, kunci_skyfield, horizons_command)}, subset
+    dari PLANET_TAMBAHAN_KATALOG -- cuma isinya yang lolos dicoba diakses
+    langsung ke eph."""
+    tersedia = {}
+    for obj_id, info in PLANET_TAMBAHAN_KATALOG.items():
+        _label, kunci_skyfield, _cmd = info
+        try:
+            eph[kunci_skyfield]
+        except (KeyError, ValueError):
+            continue
+        tersedia[obj_id] = info
+    return tersedia
+
+
+# Baris tabel "Multiple major-bodies match string" yang dikembalikan JPL
+# Horizons kalau COMMAND yang dikirim cocok dengan lebih dari satu badan
+# (dipakai HisabWin SENGAJA sebagai fitur pencarian objek, lewat
+# DialogCariObjekHorizons -- lihat _cari_objek_horizons). Formatnya baku
+# & sudah dipakai publik bertahun-tahun (kolom lebar-tetap dipisah >=2
+# spasi): "     ID#  Nama panjang boleh ada spasi   Designation  aliases".
+# ID# boleh negatif (badan buatan manusia/spacecraft, mis. -125544 = ISS).
+_RE_BARIS_MAJOR_BODY = re.compile(r"^\s*(-?\d+)\s{2,}(\S(?:.*?\S)?)(?:\s{2,}(\S.*))?\s*$")
+
+
+def parse_daftar_objek_horizons(teks):
+    """Ekstrak (id_str, nama) dari tabel "Multiple major-bodies match
+    string" di respons teks mentah JPL Horizons. Baris header/pemisah
+    (mis. "ID#  Name ..." atau "-------  ----...") otomatis tidak lolos
+    regex karena kolom pertamanya bukan angka murni.
+
+    Kalau server TIDAK mengembalikan tabel ambigu ini (mis. COMMAND
+    langsung cocok 1 badan lalu Horizons balik data ephemeris beneran,
+    atau tidak cocok sama sekali) -> list kosong dikembalikan, BUKAN
+    error -- pemanggil (DialogCariObjekHorizons) yang memutuskan cara
+    menjelaskan situasi itu ke user."""
+    hasil = []
+    for baris in teks.splitlines():
+        m = _RE_BARIS_MAJOR_BODY.match(baris)
+        if m:
+            id_str, nama = m.group(1), m.group(2).strip()
+            hasil.append((id_str, nama))
+    return hasil
+
+
 def hitung_tabel_efemeris_ringan(tanggal, lat_deg, lon_deg, zona_offset_jam,
-                                  interval_menit=60, elevasi_m=0.0):
+                                  interval_menit=60, elevasi_m=0.0, objek_tambahan=None):
     """Tabel efemeris (posisi Matahari & Bulan) mode RINGAN (VSOP87 +
     ELP2000-82B, tanpa file eksternal), tiap `interval_menit` menit
     sepanjang satu hari waktu setempat (00:00 s.d. 24:00, inklusif kedua
@@ -4739,6 +4818,10 @@ def hitung_tabel_efemeris_ringan(tanggal, lat_deg, lon_deg, zona_offset_jam,
     ditambahkan; khusus Bulan, paralaks juga sudah dikoreksi) -- posisi
     yang benar-benar terlihat pengamat, sama pendekatannya dengan
     alt_moon_topo di _altaz_matahari_bulan().
+
+    objek_tambahan: SENGAJA DIABAIKAN di mode Ringan -- formula VSOP87/
+    ELP2000 di sini cuma diimplementasikan untuk Matahari & Bulan. GUI yang
+    bertanggung jawab menonaktifkan pilihan planet saat mode Ringan aktif.
 
     Return: list of dict, satu per baris waktu, dengan kunci:
       jam_lokal (jam desimal), label_jam ('HH:MM'),
@@ -4814,14 +4897,24 @@ def hitung_tabel_efemeris_ringan(tanggal, lat_deg, lon_deg, zona_offset_jam,
 
 
 def hitung_tabel_efemeris_jpl(tanggal, lat_deg, lon_deg, zona_offset_jam, ts, eph,
-                               interval_menit=60, elevasi_m=0.0):
+                               interval_menit=60, elevasi_m=0.0, objek_tambahan=None):
     """Versi presisi tinggi dari hitung_tabel_efemeris_ringan(): posisi
     Matahari & Bulan topocentric (azimuth/altitude apparent) dihitung
-    langsung dari ephemeris JPL DE421 via Skyfield, dan fraksi iluminasi
-    Bulan memakai almanac.fraction_illuminated() (bukan pendekatan
-    elongasi geosentris). Struktur hasil (list of dict) sama persis
-    dengan versi Ringan, supaya kedua mode bisa dipakai bergantian oleh
-    kode pemanggil (GUI) tanpa perubahan lain."""
+    langsung dari ephemeris JPL (DE421/DE440/DE441, tergantung kernel aktif
+    -- lihat _muat_ephemeris) via Skyfield, dan fraksi iluminasi Bulan
+    memakai almanac.fraction_illuminated() (bukan pendekatan elongasi
+    geosentris). Struktur hasil (list of dict) sama persis dengan versi
+    Ringan, supaya kedua mode bisa dipakai bergantian oleh kode pemanggil
+    (GUI) tanpa perubahan lain.
+
+    objek_tambahan: list id planet dari PLANET_TAMBAHAN_KATALOG (mis.
+    ["mars", "jupiter"]) -- kalau diisi, tiap baris hasil juga dapat key
+    "planet_tambahan": {id: {"az":.., "alt":.., "dec":..}}. Posisinya
+    dihitung dengan cara & koreksi refraksi yang SAMA persis dengan
+    Matahari/Bulan di atas, jadi bisa dibandingkan apel-ke-apel. Semua
+    kernel DE421/440/441 yang didukung HisabWin sama-sama menyertakan
+    segmen barycenter kesembilan planet, jadi daftar ini konsisten dipakai
+    di kernel manapun yang sedang aktif."""
     n_langkah = int(round(24.0 * 60.0 / interval_menit))
     jam_lokal = np.linspace(0.0, 24.0, n_langkah + 1)
     jam_utc = jam_lokal - zona_offset_jam
@@ -4857,9 +4950,25 @@ def hitung_tabel_efemeris_jpl(tanggal, lat_deg, lon_deg, zona_offset_jam, ts, ep
 
     fraksi_iluminasi = almanac.fraction_illuminated(eph, "moon", t) * 100.0
 
+    # --- planet tambahan (opsional) ---
+    data_planet = {}
+    for obj_id in (objek_tambahan or []):
+        info = PLANET_TAMBAHAN_KATALOG.get(obj_id)
+        if info is None:
+            continue
+        _label, kunci_skyfield, _cmd = info
+        badan = eph[kunci_skyfield]
+        alt_p, az_p, _ = observer.at(t).observe(badan).apparent().altaz(
+            temperature_C=10.0, pressure_mbar=1010.0)
+        pos_p_geo = earth.at(t).observe(badan).apparent()
+        _, dec_p, _ = pos_p_geo.radec(epoch='date')
+        data_planet[obj_id] = {
+            "az": az_p.degrees, "alt": alt_p.degrees, "dec": dec_p.degrees,
+        }
+
     hasil = []
     for i in range(len(jam_lokal)):
-        hasil.append({
+        baris = {
             "jam_lokal": float(jam_lokal[i]),
             "label_jam": _label_jam_dari_desimal(jam_lokal[i]),
             "az_matahari": float(az_sun.degrees[i]), "alt_matahari": float(alt_sun.degrees[i]),
@@ -4868,7 +4977,13 @@ def hitung_tabel_efemeris_jpl(tanggal, lat_deg, lon_deg, zona_offset_jam, ts, ep
             "dec_bulan": float(dec_moon.degrees[i]), "jarak_bulan_km": float(jarak_moon.km[i]),
             "elongasi_deg": float(elong.degrees[i]),
             "fraksi_iluminasi_persen": float(fraksi_iluminasi[i]),
-        })
+        }
+        if data_planet:
+            baris["planet_tambahan"] = {
+                obj_id: {"az": float(d["az"][i]), "alt": float(d["alt"][i]), "dec": float(d["dec"][i])}
+                for obj_id, d in data_planet.items()
+            }
+        hasil.append(baris)
     return hasil
 
 
@@ -4945,15 +5060,16 @@ def _parse_baris_csv_horizons(teks):
 
 
 def hitung_tabel_efemeris_horizons(tanggal, lat_deg, lon_deg, zona_offset_jam,
-                                    interval_menit=60, elevasi_m=0.0):
+                                    interval_menit=60, elevasi_m=0.0, objek_tambahan=None,
+                                    objek_kustom=None):
     """Versi ONLINE dari tabel efemeris: RA/DEC & azimuth/altitude apparent
     (topocentric, refraksi standar sudah termasuk) Matahari & Bulan diambil
     langsung dari JPL Horizons System (SSD/JPL, NASA) lewat API publiknya --
     https://ssd.jpl.nasa.gov/api/horizons.api -- BUKAN dihitung sendiri oleh
     HisabWin. WAJIB ADA KONEKSI INTERNET: tiap kali dipanggil, fungsi ini
-    mengirim 2 request HTTP (satu untuk Matahari, satu untuk Bulan) ke
-    server JPL, dan akan gagal kalau tidak ada internet atau server sedang
-    tidak bisa dihubungi.
+    mengirim 1 request HTTP per objek (Matahari, Bulan, tiap planet
+    tambahan, dan objek kustom kalau diisi) ke server JPL, dan akan gagal
+    kalau tidak ada internet atau server sedang tidak bisa dihubungi.
 
     Elongasi & fraksi iluminasi Bulan TETAP dihitung sendiri secara
     geometris dari RA/DEC yang didapat dari Horizons (formula identik
@@ -4962,6 +5078,20 @@ def hitung_tabel_efemeris_horizons(tanggal, lat_deg, lon_deg, zona_offset_jam,
     mode, dan supaya parsing tidak bergantung pada kolom gabungan
     angka+huruf penanda (leading/trailing) yang formatnya kurang baku untuk
     diandalkan sebagai kontrak API jangka panjang.
+
+    objek_tambahan: list id planet dari PLANET_TAMBAHAN_KATALOG, sama
+    seperti mode Presisi -- lihat hitung_tabel_efemeris_jpl.
+
+    objek_kustom: dict opsional {"label": str, "command": str} -- ID/nama
+    Horizons BEBAS, TIDAK terbatas planet (mis. "-125544" utk ISS,
+    "2000001" utk asteroid Ceres, "-98" utk pesawat New Horizons, dst).
+    Ini satu-satunya mode yang mendukungnya -- Presisi/Ringan cuma bisa
+    menghitung badan yang memang ada di kernel DE421/440/441 (planet
+    tata surya + Matahari/Bulan), sedangkan Horizons API JPL punya
+    katalog badan yang jauh lebih luas (satelit buatan, asteroid, komet,
+    misi luar angkasa). HisabWin TIDAK memvalidasi ID ini sebelum
+    dikirim -- kalau salah/tidak dikenali, pesan error dari JPL Horizons
+    sendiri akan diteruskan apa adanya ke user (lihat _ambil_kolom_numerik).
 
     Struktur hasil (list of dict) sama persis dengan dua mode lain, supaya
     ketiganya bisa dipakai bergantian oleh GUI tanpa perubahan lain.
@@ -4985,25 +5115,36 @@ def hitung_tabel_efemeris_horizons(tanggal, lat_deg, lon_deg, zona_offset_jam,
             "Mode Online (JPL Horizons API) butuh paket Python 'requests' yang "
             "belum terpasang. Pasang dulu dengan: pip install requests") from e
 
+    # Daftar semua objek yang perlu diminta ke Horizons: Matahari & Bulan
+    # SELALU, ditambah planet yang dicentang user, ditambah objek kustom
+    # (kalau diisi) -- masing-masing 1 request HTTP terpisah.
+    daftar_objek = [("matahari", "10"), ("bulan", "301")]
+    for obj_id in (objek_tambahan or []):
+        info = PLANET_TAMBAHAN_KATALOG.get(obj_id)
+        if info is not None:
+            daftar_objek.append((obj_id, info[2]))
+    if objek_kustom and objek_kustom.get("command"):
+        daftar_objek.append(("kustom", objek_kustom["command"]))
+
+    teks_per_objek = {}
     try:
-        teks_sun = _minta_horizons("10", lat_deg, lon_deg, elevasi_m,
-                                    waktu_mulai_utc, waktu_akhir_utc, interval_menit, "2,4,20")
-        teks_moon = _minta_horizons("301", lat_deg, lon_deg, elevasi_m,
-                                     waktu_mulai_utc, waktu_akhir_utc, interval_menit, "2,4,20")
+        for obj_id, command in daftar_objek:
+            teks_per_objek[obj_id] = _minta_horizons(
+                command, lat_deg, lon_deg, elevasi_m,
+                waktu_mulai_utc, waktu_akhir_utc, interval_menit, "2,4,20")
     except requests.exceptions.RequestException as e:
         raise RuntimeError(
             "Gagal menghubungi JPL Horizons (ssd.jpl.nasa.gov). Pastikan "
             f"komputer ini terhubung ke internet. Detail teknis: {e}") from e
 
-    baris_sun = _parse_baris_csv_horizons(teks_sun)
-    baris_moon = _parse_baris_csv_horizons(teks_moon)
+    baris_per_objek = {obj_id: _parse_baris_csv_horizons(teks) for obj_id, teks in teks_per_objek.items()}
 
-    if len(baris_sun) != n_langkah + 1 or len(baris_moon) != n_langkah + 1:
-        raise RuntimeError(
-            "Jumlah baris data dari JPL Horizons tidak sesuai perkiraan "
-            f"(Matahari: {len(baris_sun)} baris, Bulan: {len(baris_moon)} baris, "
-            f"diharapkan {n_langkah + 1} baris). Coba ulangi lagi, atau pakai "
-            "interval waktu yang lain.")
+    for obj_id, baris in baris_per_objek.items():
+        if len(baris) != n_langkah + 1:
+            raise RuntimeError(
+                f"Jumlah baris data dari JPL Horizons untuk objek '{obj_id}' tidak "
+                f"sesuai perkiraan ({len(baris)} baris, diharapkan {n_langkah + 1} "
+                "baris). Coba ulangi lagi, atau pakai interval waktu yang lain.")
 
     def _ambil_kolom_numerik(baris, label):
         try:
@@ -5011,13 +5152,14 @@ def hitung_tabel_efemeris_horizons(tanggal, lat_deg, lon_deg, zona_offset_jam,
         except (ValueError, IndexError) as e:
             raise RuntimeError(
                 f"Gagal membaca baris data {label} dari JPL Horizons -- format "
-                f"respons tidak sesuai dugaan. Baris mentah: {baris}") from e
+                f"respons tidak sesuai dugaan (ID/nama objek salah/tidak "
+                f"dikenali Horizons?). Baris mentah: {baris}") from e
         return ra, dec, az, el, delta_au
 
     hasil = []
     for i in range(len(jam_lokal)):
-        ra_s, dec_s, az_s, alt_s, _ = _ambil_kolom_numerik(baris_sun[i], "Matahari")
-        ra_m, dec_m, az_m, alt_m, delta_au_m = _ambil_kolom_numerik(baris_moon[i], "Bulan")
+        ra_s, dec_s, az_s, alt_s, _ = _ambil_kolom_numerik(baris_per_objek["matahari"][i], "Matahari")
+        ra_m, dec_m, az_m, alt_m, delta_au_m = _ambil_kolom_numerik(baris_per_objek["bulan"][i], "Bulan")
         jarak_m_km = delta_au_m * HORIZONS_AU_KE_KM
 
         cos_elong = (np.sin(np.radians(dec_s)) * np.sin(np.radians(dec_m))
@@ -5026,7 +5168,7 @@ def hitung_tabel_efemeris_horizons(tanggal, lat_deg, lon_deg, zona_offset_jam,
         elong = float(np.degrees(np.arccos(np.clip(cos_elong, -1.0, 1.0))))
         fraksi_iluminasi = (1.0 - np.cos(np.radians(elong))) / 2.0 * 100.0
 
-        hasil.append({
+        baris_hasil = {
             "jam_lokal": float(jam_lokal[i]),
             "label_jam": _label_jam_dari_desimal(jam_lokal[i]),
             "az_matahari": az_s, "alt_matahari": alt_s, "dec_matahari": dec_s,
@@ -5034,25 +5176,52 @@ def hitung_tabel_efemeris_horizons(tanggal, lat_deg, lon_deg, zona_offset_jam,
             "jarak_bulan_km": jarak_m_km,
             "elongasi_deg": elong,
             "fraksi_iluminasi_persen": float(fraksi_iluminasi),
-        })
+        }
+
+        planet_tambahan = {}
+        for obj_id in (objek_tambahan or []):
+            if obj_id not in baris_per_objek:
+                continue
+            _ra_p, dec_p, az_p, alt_p, _ = _ambil_kolom_numerik(
+                baris_per_objek[obj_id][i], PLANET_TAMBAHAN_KATALOG[obj_id][0])
+            planet_tambahan[obj_id] = {"az": az_p, "alt": alt_p, "dec": dec_p}
+        if planet_tambahan:
+            baris_hasil["planet_tambahan"] = planet_tambahan
+
+        if "kustom" in baris_per_objek:
+            _ra_k, dec_k, az_k, alt_k, delta_au_k = _ambil_kolom_numerik(
+                baris_per_objek["kustom"][i], objek_kustom.get("label", "Kustom"))
+            baris_hasil["objek_kustom"] = {
+                "az": az_k, "alt": alt_k, "dec": dec_k, "jarak_km": delta_au_k * HORIZONS_AU_KE_KM,
+            }
+
+        hasil.append(baris_hasil)
     return hasil
 
 
 def hitung_tabel_efemeris(tanggal, lat_deg, lon_deg, zona_offset_jam, mode="ringan",
-                           ts=None, eph=None, interval_menit=60, elevasi_m=0.0):
+                           ts=None, eph=None, interval_menit=60, elevasi_m=0.0,
+                           objek_tambahan=None, objek_kustom=None):
     """Dispatcher tabel efemeris: pilih sumber data sesuai mode, pola sama
     seperti hitung_waktu_sholat_otomatis(). mode='jpl' tapi ts/eph belum
     siap otomatis jatuh balik ke mode Ringan. mode='horizons' memanggil
     JPL Horizons API online (lihat hitung_tabel_efemeris_horizons) -- kalau
     gagal (mis. tidak ada internet), exception-nya dibiarkan naik apa
     adanya ke pemanggil (bukan jatuh balik diam-diam ke mode offline),
-    supaya pengguna tahu datanya BUKAN dari JPL seperti yang diminta."""
+    supaya pengguna tahu datanya BUKAN dari JPL seperti yang diminta.
+
+    objek_tambahan/objek_kustom: lihat hitung_tabel_efemeris_jpl &
+    hitung_tabel_efemeris_horizons -- SENGAJA diabaikan (tidak diteruskan)
+    kalau mode='ringan', karena VSOP87/ELP2000 di mode itu memang cuma
+    diimplementasikan untuk Matahari & Bulan."""
     if mode == "horizons":
         return hitung_tabel_efemeris_horizons(tanggal, lat_deg, lon_deg, zona_offset_jam,
-                                               interval_menit=interval_menit, elevasi_m=elevasi_m)
+                                               interval_menit=interval_menit, elevasi_m=elevasi_m,
+                                               objek_tambahan=objek_tambahan, objek_kustom=objek_kustom)
     if mode == "jpl" and ts is not None and eph is not None:
         return hitung_tabel_efemeris_jpl(tanggal, lat_deg, lon_deg, zona_offset_jam, ts, eph,
-                                          interval_menit=interval_menit, elevasi_m=elevasi_m)
+                                          interval_menit=interval_menit, elevasi_m=elevasi_m,
+                                          objek_tambahan=objek_tambahan)
     return hitung_tabel_efemeris_ringan(tanggal, lat_deg, lon_deg, zona_offset_jam,
                                          interval_menit=interval_menit, elevasi_m=elevasi_m)
 
@@ -5638,6 +5807,136 @@ class DialogKernelJPL(tk.Toplevel):
             if self._event_batal is not None:
                 self._event_batal.set()
         self.destroy()
+
+
+# =========================================================
+#  DIALOG: Cari Objek di JPL Horizons (dinamis, query ke server asli)
+# =========================================================
+
+class DialogCariObjekHorizons(tk.Toplevel):
+    """Popup pencarian objek Horizons SUNGGUHAN -- ketik nama/sebagian
+    nama, dikirim ke server JPL (dengan wildcard '*' otomatis ditambahkan
+    di akhir kalau belum ada, mengikuti sintaks pencarian substring resmi
+    Horizons), hasilnya (tabel "Multiple major-bodies match string") di-
+    parse & ditampilkan sebagai daftar yang bisa dipilih. Ini genuinely
+    dinamis -- BUKAN daftar tetap yang ditulis di kode HisabWin -- karena
+    katalog Horizons (satelit, asteroid, komet, pesawat antariksa) terlalu
+    besar & sering berubah utk dihardcode.
+
+    on_pilih(id_str, nama): dipanggil sekali begitu user memilih satu
+    baris hasil & menekan "Pilih" (atau double-click)."""
+
+    def __init__(self, parent, on_pilih):
+        super().__init__(parent)
+        self.title("Cari Objek di JPL Horizons")
+        self.geometry("480x420")
+        self.minsize(380, 320)
+        self.transient(parent)
+        self.configure(bg=WARNA_BG)
+
+        self._on_pilih = on_pilih
+        self._antrian = queue.Queue()
+        self._hasil = []
+
+        ttk.Label(
+            self, text="Cari nama/sebagian nama objek (mis. \"Io\", \"Ceres\", \"ISS\")",
+            font=FONT_UTAMA_BOLD,
+        ).pack(anchor="w", padx=14, pady=(14, 4))
+
+        frame_cari = ttk.Frame(self)
+        frame_cari.pack(fill="x", padx=14)
+        self.entry_query = ttk.Entry(frame_cari)
+        self.entry_query.pack(side="left", fill="x", expand=True)
+        self.entry_query.bind("<Return>", lambda e: self._on_cari())
+        self.btn_cari = ttk.Button(frame_cari, text="Cari", command=self._on_cari)
+        self.btn_cari.pack(side="left", padx=(6, 0))
+
+        self.label_status = ttk.Label(self, text="", font=FONT_KECIL, foreground=WARNA_TEKS_MUTED)
+        self.label_status.pack(anchor="w", padx=14, pady=(4, 4))
+
+        frame_hasil = ttk.Frame(self)
+        frame_hasil.pack(fill="both", expand=True, padx=14)
+        scrollbar = ttk.Scrollbar(frame_hasil, orient="vertical")
+        self.listbox = tk.Listbox(frame_hasil, yscrollcommand=scrollbar.set, font=FONT_UTAMA)
+        scrollbar.config(command=self.listbox.yview)
+        self.listbox.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        self.listbox.bind("<Double-Button-1>", lambda e: self._on_pilih_baris())
+
+        frame_tombol = ttk.Frame(self)
+        frame_tombol.pack(fill="x", padx=14, pady=12)
+        ttk.Button(frame_tombol, text="Batal", command=self.destroy).pack(side="right")
+        ttk.Button(frame_tombol, text="Pilih", style="Aksen.TButton",
+                   command=self._on_pilih_baris).pack(side="right", padx=(0, 6))
+
+        self.entry_query.focus_set()
+        self._poll_antrian()
+
+    def _on_cari(self):
+        query = self.entry_query.get().strip()
+        if not query:
+            messagebox.showwarning("Input kosong", "Isi dulu nama/kata kunci yang mau dicari.", parent=self)
+            return
+        # '*' di akhir = pencarian substring resmi Horizons (lihat
+        # parse_daftar_objek_horizons) -- ditambahkan otomatis kalau user
+        # belum menulisnya sendiri, supaya hasil pencarian nama SEBAGIAN
+        # (mis. "Io" -> Io, Ionosphere-related bodies dst) tetap muncul
+        # sebagai daftar, bukan langsung "diselesaikan" ke 1 objek kalau
+        # kebetulan cocok persis.
+        command = query if query.endswith("*") else query + "*"
+        self.btn_cari.config(state="disabled")
+        self.listbox.delete(0, "end")
+        self.label_status.config(text=f"Mencari \"{query}\" di server JPL Horizons...")
+        threading.Thread(target=self._thread_cari, args=(command,), daemon=True).start()
+
+    def _thread_cari(self, command):
+        try:
+            # Parameter lokasi/waktu di sini TIDAK RELEVAN secara astronomis
+            # -- kita cuma mengandalkan tahap resolusi nama objek Horizons
+            # (yang terjadi SEBELUM ephemeris beneran dihitung) untuk
+            # memicu tabel "multiple match", jadi nilai observer/waktu
+            # sekadar placeholder yang valid secara format saja.
+            waktu_mulai = datetime.utcnow()
+            waktu_akhir = waktu_mulai + timedelta(hours=1)
+            teks = _minta_horizons(command, 0.0, 0.0, 0.0, waktu_mulai, waktu_akhir, 60, "2,4,20")
+            hasil = parse_daftar_objek_horizons(teks)
+            self._antrian.put(("hasil", hasil))
+        except Exception as e:
+            self._antrian.put(("error", str(e)))
+
+    def _on_pilih_baris(self):
+        sel = self.listbox.curselection()
+        if not sel:
+            messagebox.showinfo("Belum ada yang dipilih", "Pilih salah satu hasil dulu.", parent=self)
+            return
+        id_str, nama = self._hasil[sel[0]]
+        self._on_pilih(id_str, nama)
+        self.destroy()
+
+    def _poll_antrian(self):
+        try:
+            while True:
+                tipe, data = self._antrian.get_nowait()
+                self.btn_cari.config(state="normal")
+                if tipe == "hasil":
+                    self._hasil = data
+                    if not data:
+                        self.label_status.config(
+                            text="Tidak ada objek yang cocok. Coba kata kunci lain (mis. nama Inggris).")
+                    else:
+                        self.label_status.config(text=f"{len(data)} objek ditemukan -- pilih salah satu, atau cari lagi.")
+                        for id_str, nama in data:
+                            self.listbox.insert("end", f"{nama}  (ID: {id_str})")
+                elif tipe == "error":
+                    self.label_status.config(text="")
+                    messagebox.showerror(
+                        "Gagal mencari",
+                        f"Tidak bisa menghubungi JPL Horizons. Pastikan ada koneksi internet.\n\n"
+                        f"Detail teknis: {data}", parent=self)
+        except queue.Empty:
+            pass
+        if self.winfo_exists():
+            self.after(150, self._poll_antrian)
 
 
 class ClosableNotebook(ttk.Notebook):
@@ -6425,12 +6724,32 @@ class HisabWinApp(tk.Tk):
         #     ke bawah kalau salah satu akordeon dibuka.) ---
         frame_log = ttk.LabelFrame(tab_kontrol, text="Status")
         frame_log.pack(fill="x", **pad)
+        # Gaya "terminal": latar nyaris hitam + font monospace + teks hijau
+        # klasik -- SENGAJA beda total dari kartu-kartu lain (yang putih/
+        # Segoe UI) supaya area log ini kebaca sebagai "output mentah",
+        # bukan bagian formulir input seperti panel di sekitarnya.
         self.text_log = tk.Text(
             frame_log, height=8, wrap="word", state="disabled",
-            bg=WARNA_PANEL, fg=WARNA_TEKS, relief="flat", borderwidth=0,
+            bg=WARNA_TERMINAL_BG, fg=WARNA_TERMINAL_FG, insertbackground=WARNA_TERMINAL_FG,
+            relief="flat", borderwidth=0,
             highlightthickness=1, highlightbackground=WARNA_BORDER, highlightcolor=WARNA_AKSEN,
-            font=FONT_UTAMA, padx=2, pady=2)
+            font=FONT_MONO, padx=8, pady=6)
         self.text_log.pack(fill="both", expand=True, padx=6, pady=6)
+        self.text_log.tag_configure("prompt", foreground=WARNA_TERMINAL_FG_MUTED)
+
+        # --- Kelola Kernel JPL: SENGAJA di LUAR akordeon (dulu ada di
+        #     dalam akordeon "🌙 Visibilitas" > "0. Mode Perhitungan"),
+        #     supaya tetap selalu terlihat & bisa diklik kapan saja --
+        #     kernel JPL yang aktif dipakai bareng oleh banyak tab
+        #     (Visibilitas, Waktu Sholat, Gerhana, Tabel Efemeris, dst),
+        #     bukan cuma milik akordeon Visibilitas, jadi tombolnya tidak
+        #     seharusnya "tersembunyi" ikut terlipat kalau akordeon lain
+        #     yang sedang dibuka user. ---
+        frame_kernel_jpl = ttk.Frame(tab_kontrol)
+        frame_kernel_jpl.pack(fill="x", padx=pad.get("padx", 6), pady=(0, 6))
+        ttk.Button(
+            frame_kernel_jpl, text="⚙ Kelola Kernel JPL...", command=self._on_kelola_kernel_jpl,
+        ).pack(fill="x")
 
         # =====================================================
         # Bilah kiri (tab_kontrol) diringkas jadi 2 bagian akordeon yang
@@ -6472,9 +6791,6 @@ class HisabWinApp(tk.Tk):
                  "gunakan mode Presisi untuk kepastian ekstra.",
             font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left",
         ).grid(row=2, column=0, padx=10, pady=(0, 4), sticky="w")
-        ttk.Button(
-            frame0, text="⚙ Kelola Kernel JPL...", command=self._on_kelola_kernel_jpl,
-        ).grid(row=3, column=0, padx=10, pady=(0, 8), sticky="w")
 
         # --- Langkah 1: tahun ---
         frame1 = ttk.LabelFrame(body_hilal, text="1. Pilih Tahun")
@@ -6834,6 +7150,7 @@ class HisabWinApp(tk.Tk):
 
     def _log(self, pesan):
         self.text_log.configure(state="normal")
+        self.text_log.insert("end", "❯ ", "prompt")
         self.text_log.insert("end", pesan + "\n")
         self.text_log.see("end")
         self.text_log.configure(state="disabled")
@@ -7575,6 +7892,50 @@ class HisabWinApp(tk.Tk):
         self.label_peringatan_sumber_efemeris.pack(fill="x", padx=6, pady=(2, 6))
         self._on_ganti_sumber_efemeris()
 
+        # --- Objek tambahan (di luar Matahari & Bulan yang selalu tampil) ---
+        # Mode Ringan TIDAK didukung (formula VSOP87/ELP2000 cuma dibuat
+        # untuk Matahari & Bulan) -- checkbox2 di bawah otomatis nonaktif
+        # kalau mode itu yang dipilih, lihat _perbarui_state_objek_tambahan.
+        frame_objek = ttk.LabelFrame(body, text="6. Objek Tambahan (Presisi & Horizons)")
+        frame_objek.pack(fill="x", **pad)
+        self.var_planet_efemeris = {}
+        self.chk_planet_efemeris = {}
+        self._grid_planet_efemeris = ttk.Frame(frame_objek)
+        self._grid_planet_efemeris.pack(fill="x", padx=6, pady=(6, 2))
+        self.label_kosong_planet_efemeris = ttk.Label(
+            frame_objek, text="", font=FONT_KECIL, foreground=WARNA_TEKS_MUTED)
+        self.label_kosong_planet_efemeris.pack(fill="x", padx=6)
+        # Checkbox planet di atas SENGAJA belum diisi di sini -- diisi
+        # dinamis oleh _rebuild_checkbox_planet() lewat
+        # _perbarui_state_objek_tambahan() di bawah, supaya daftarnya bisa
+        # menyesuaikan mode aktif (lihat _katalog_planet_untuk_mode).
+
+        frame_kustom = ttk.Frame(frame_objek)
+        frame_kustom.pack(fill="x", padx=6, pady=(4, 6))
+        self.var_objek_kustom_aktif = tk.BooleanVar(value=False)
+        self.chk_objek_kustom = ttk.Checkbutton(
+            frame_kustom, text="Objek kustom (ID Horizons):", variable=self.var_objek_kustom_aktif)
+        self.chk_objek_kustom.grid(row=0, column=0, sticky="w")
+        self.entry_objek_kustom_id = ttk.Entry(frame_kustom, width=12)
+        self.entry_objek_kustom_id.grid(row=0, column=1, padx=(4, 0), sticky="w")
+        self.btn_cari_objek_horizons = ttk.Button(
+            frame_kustom, text="🔍 Cari...", command=self._on_cari_objek_horizons)
+        self.btn_cari_objek_horizons.grid(row=0, column=2, padx=(4, 0), sticky="w")
+        ttk.Label(
+            frame_objek,
+            text="Khusus mode JPL Horizons -- isi ID Horizons langsung kalau sudah "
+                 "tahu (ISS: -125544, Ceres: 2000001, New Horizons: -98, dsb), atau "
+                 "pakai \"Cari...\" untuk menelusuri katalog Horizons yang sebenarnya "
+                 "(satelit, asteroid, pesawat antariksa) lewat nama.",
+            font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left", wraplength=280,
+        ).pack(fill="x", padx=6, pady=(0, 6))
+        self.label_catatan_objek_efemeris = ttk.Label(
+            frame_objek, text="", font=FONT_KECIL, foreground=WARNA_TEKS_MUTED,
+            justify="left", wraplength=280,
+        )
+        self.label_catatan_objek_efemeris.pack(fill="x", padx=6, pady=(0, 6))
+        self._perbarui_state_objek_tambahan()
+
         self.btn_buat_efemeris = ttk.Button(
             body, text="Buat Tabel Efemeris", command=self._on_buat_efemeris,
             style="Aksen.TButton")
@@ -7607,6 +7968,104 @@ class HisabWinApp(tk.Tk):
             teks = ("Dihitung sendiri (VSOP87+ELP2000) tanpa file eksternal "
                     "maupun koneksi internet sama sekali.")
         self.label_peringatan_sumber_efemeris.config(text=teks)
+        if hasattr(self, "chk_planet_efemeris"):
+            self._perbarui_state_objek_tambahan()
+
+    def _katalog_planet_untuk_mode(self):
+        """Katalog planet yang SEHARUSNYA ditawarkan sebagai checkbox utk
+        mode Sumber Data yang sedang aktif -- dict {obj_id: (label,
+        kunci_skyfield, horizons_command)}:
+          - ringan   -> {} (VSOP87/ELP2000 cuma diimplementasikan utk
+                        Matahari & Bulan, tidak ada planet lain sama sekali)
+          - jpl      -> HANYA planet yang BENAR-BENAR ada di kernel JPL yang
+                        sedang dimuat (self.eph), dicek langsung lewat
+                        daftar_planet_tersedia_di_eph -- BUKAN diasumsikan
+                        selalu 8 planet lengkap. Kalau self.eph belum siap
+                        (masih dimuat / gagal), kembalikan {} dulu.
+          - horizons -> katalog tetap (semua planet SELALU ada di Horizons)
+        """
+        mode = self.var_mode_sumber_efemeris.get()
+        if mode == "jpl":
+            if self.eph is None:
+                return {}
+            return daftar_planet_tersedia_di_eph(self.eph)
+        if mode == "horizons":
+            return PLANET_TAMBAHAN_KATALOG
+        return {}
+
+    def _rebuild_checkbox_planet(self, katalog):
+        """Bongkar & bangun ulang checkbox planet persis sesuai isi
+        `katalog` (lihat _katalog_planet_untuk_mode) -- BUKAN cuma
+        enable/disable checkbox yang sudah ada, karena SET planet yang
+        relevan sendiri bisa berubah (mis. pindah dari mode Ringan/kosong
+        ke mode Presisi dengan kernel yang baru selesai dimuat).
+
+        Centang yang sudah dipilih user DIPERTAHANKAN kalau obj_id yang
+        sama masih ada di katalog baru (supaya user tidak kehilangan
+        pilihan cuma gara-gara ephemeris dimuat ulang di background)."""
+        centang_lama = {oid for oid, var in self.var_planet_efemeris.items() if var.get()}
+        for chk in self.chk_planet_efemeris.values():
+            chk.destroy()
+        self.var_planet_efemeris = {}
+        self.chk_planet_efemeris = {}
+
+        n_kolom = 3
+        for i, (obj_id, (label, _kunci, _cmd)) in enumerate(katalog.items()):
+            var = tk.BooleanVar(value=(obj_id in centang_lama))
+            self.var_planet_efemeris[obj_id] = var
+            chk = ttk.Checkbutton(self._grid_planet_efemeris, text=label, variable=var)
+            chk.grid(row=i // n_kolom, column=i % n_kolom, sticky="w", padx=4, pady=2)
+            self.chk_planet_efemeris[obj_id] = chk
+
+        if katalog:
+            self.label_kosong_planet_efemeris.config(text="")
+        else:
+            mode = self.var_mode_sumber_efemeris.get()
+            if mode == "jpl" and self.eph is None:
+                teks = "Menunggu ephemeris JPL selesai dimuat..."
+            else:
+                teks = "(Tidak ada planet tambahan di mode ini -- lihat catatan di bawah.)"
+            self.label_kosong_planet_efemeris.config(text=teks)
+
+    def _perbarui_state_objek_tambahan(self):
+        """Sinkronkan SET checkbox planet dengan mode Sumber Data yang
+        sedang aktif (lewat _rebuild_checkbox_planet), dan aktif/nonaktifkan
+        slot objek kustom:
+          - ringan  -> checkbox planet KOSONG (VSOP87/ELP2000 cuma
+                       Matahari & Bulan), objek kustom nonaktif
+          - jpl     -> checkbox planet SESUAI ISI KERNEL AKTIF (dinamis,
+                       lihat _katalog_planet_untuk_mode), objek kustom
+                       TETAP nonaktif (badan di luar tata surya baku tidak
+                       ada di kernel DE421/440/441)
+          - horizons -> checkbox planet lengkap (statis, selalu tersedia),
+                       objek kustom aktif (katalog Horizons jauh lebih luas)
+        """
+        mode = self.var_mode_sumber_efemeris.get()
+        self._rebuild_checkbox_planet(self._katalog_planet_untuk_mode())
+
+        state_kustom = "normal" if mode == "horizons" else "disabled"
+        self.chk_objek_kustom.config(state=state_kustom)
+        self.entry_objek_kustom_id.config(state=state_kustom)
+        self.btn_cari_objek_horizons.config(state=state_kustom)
+        if mode == "ringan":
+            teks = "Mode Ringan hanya mendukung Matahari & Bulan -- pilihan di atas diabaikan."
+        elif mode == "jpl":
+            teks = ("Daftar planet di atas mengikuti kernel JPL yang sedang aktif (lihat "
+                    "Kelola Kernel JPL di panel Mode Perhitungan). Objek kustom tidak "
+                    "didukung mode ini -- pindah ke JPL Horizons API kalau perlu.")
+        else:
+            teks = "Semua pilihan di atas didukung, masing-masing menambah 1 request HTTP ke server JPL."
+        self.label_catatan_objek_efemeris.config(text=teks)
+
+    def _on_cari_objek_horizons(self):
+        DialogCariObjekHorizons(self, on_pilih=self._on_objek_horizons_terpilih)
+
+    def _on_objek_horizons_terpilih(self, id_str, nama):
+        self.entry_objek_kustom_id.delete(0, "end")
+        self.entry_objek_kustom_id.insert(0, id_str)
+        self.var_objek_kustom_aktif.set(True)
+        self._log(f"Objek kustom Horizons dipilih: {nama} (ID {id_str}).")
+
 
     def _on_buat_efemeris(self):
         try:
@@ -7641,6 +8100,26 @@ class HisabWinApp(tk.Tk):
         interval_menit = int(self.var_interval_efemeris.get().split()[0])
         mode = self.var_mode_sumber_efemeris.get()
 
+        # Planet & objek kustom SENGAJA hanya dikumpulkan kalau mode-nya
+        # memang mendukung (lihat _perbarui_state_objek_tambahan) -- kalau
+        # user sempat centang lalu pindah ke mode Ringan, pilihannya
+        # diabaikan di sini (bukan cuma di-disable visual doang) supaya
+        # tidak ada jejak "planet terpilih tapi datanya kosong" di hasil.
+        objek_tambahan = []
+        if mode in ("jpl", "horizons"):
+            objek_tambahan = [oid for oid, var in self.var_planet_efemeris.items() if var.get()]
+
+        objek_kustom = None
+        if mode == "horizons" and self.var_objek_kustom_aktif.get():
+            command_kustom = self.entry_objek_kustom_id.get().strip()
+            if not command_kustom:
+                messagebox.showerror(
+                    "Input tidak valid",
+                    "Centang \"Objek kustom\" aktif tapi ID Horizons-nya kosong. "
+                    "Isi ID-nya (mis. -125544 untuk ISS), atau hilangkan centangnya.")
+                return
+            objek_kustom = {"label": f"Kustom ({command_kustom})", "command": command_kustom}
+
         if mode == "jpl" and self.eph is None:
             messagebox.showwarning(
                 "Ephemeris belum siap",
@@ -7655,18 +8134,22 @@ class HisabWinApp(tk.Tk):
 
         threading.Thread(
             target=self._buat_efemeris_thread,
-            args=(tanggal, lat, lon, zona_offset, elevasi, interval_menit, mode),
+            args=(tanggal, lat, lon, zona_offset, elevasi, interval_menit, mode,
+                  objek_tambahan, objek_kustom),
             daemon=True).start()
 
-    def _buat_efemeris_thread(self, tanggal, lat, lon, zona_offset, elevasi, interval_menit, mode):
+    def _buat_efemeris_thread(self, tanggal, lat, lon, zona_offset, elevasi, interval_menit, mode,
+                               objek_tambahan=None, objek_kustom=None):
         try:
             hasil = hitung_tabel_efemeris(
                 tanggal, lat, lon, zona_offset, mode=mode, ts=self.ts, eph=self.eph,
-                interval_menit=interval_menit, elevasi_m=elevasi)
+                interval_menit=interval_menit, elevasi_m=elevasi,
+                objek_tambahan=objek_tambahan, objek_kustom=objek_kustom)
             rts = hitung_rts(
                 tanggal, lat, lon, zona_offset, mode=mode, ts=self.ts, eph=self.eph,
                 elevasi_m=elevasi)
-            self.antrian.put(("efemeris_ok", (tanggal, lat, lon, zona_offset, mode, hasil, rts)))
+            self.antrian.put(("efemeris_ok", (tanggal, lat, lon, zona_offset, mode, hasil, rts,
+                                               objek_tambahan, objek_kustom)))
         except Exception as e:
             self.antrian.put(("efemeris_error", f"Gagal menghitung tabel efemeris: {e}"))
 
@@ -7696,6 +8179,13 @@ class HisabWinApp(tk.Tk):
             "dec_matahari": "Dek. Matahari", "az_bulan": "Az. Bulan", "alt_bulan": "Tinggi Bulan",
             "dec_bulan": "Dek. Bulan", "elongasi": "Elongasi", "fraksi_iluminasi": "Iluminasi Bulan",
         }
+        # Kolom dasar ini (Matahari/Bulan/elongasi/iluminasi) SELALU ada di
+        # tabel apapun mode & objek tambahan yang dipilih -- disimpan
+        # sebagai atribut supaya _tampilkan_efemeris bisa menambah kolom
+        # planet/objek kustom di belakangnya secara dinamis tiap kali
+        # tabel baru dibuat (lihat _rebuild_kolom_tree_efemeris).
+        self._kolom_dasar_efemeris = kolom
+        self._judul_kolom_dasar_efemeris = judul_kolom
         self.tree_efemeris = ttk.Treeview(
             panel_hasil, columns=kolom, show="headings", height=20)
         for kunci in kolom:
@@ -7730,8 +8220,46 @@ class HisabWinApp(tk.Tk):
             self._tab_efemeris_ditambahkan = True
         self.notebook.select(self._frame_efemeris)
 
-    def _tampilkan_efemeris(self, tanggal, lat, lon, zona_offset, mode, hasil, rts):
-        self._hasil_efemeris_terakhir = (tanggal, lat, lon, zona_offset, mode, hasil, rts)
+    def _daftar_kolom_objek_tambahan(self, objek_tambahan, objek_kustom):
+        """Bangun (id, judul_kolom_az, judul_kolom_alt, judul_kolom_dec)
+        untuk tiap objek tambahan yang benar-benar dipakai di satu hasil
+        perhitungan -- dipakai bareng oleh _tampilkan_efemeris (kolom
+        Treeview) & _on_simpan_csv_efemeris (kolom CSV), supaya urutan &
+        judulnya selalu konsisten di dua tempat itu."""
+        info = []
+        for obj_id in (objek_tambahan or []):
+            label = PLANET_TAMBAHAN_KATALOG.get(obj_id, (obj_id.title(),))[0]
+            info.append((obj_id, label))
+        if objek_kustom:
+            info.append(("kustom", objek_kustom.get("label", "Objek Kustom")))
+        return info
+
+    def _rebuild_kolom_tree_efemeris(self, objek_tambahan, objek_kustom):
+        """Reset kolom self.tree_efemeris: kolom dasar (jam, Matahari,
+        Bulan, elongasi, iluminasi) SELALU ada, lalu 3 kolom (az/alt/dec)
+        ditambahkan untuk tiap objek tambahan yang dipakai di hasil
+        TERBARU ini. Dipanggil ulang tiap kali tabel baru dibuat, karena
+        objek yang dipilih user bisa beda dari sebelumnya."""
+        info_tambahan = self._daftar_kolom_objek_tambahan(objek_tambahan, objek_kustom)
+        kolom_baru = list(self._kolom_dasar_efemeris)
+        judul_baru = dict(self._judul_kolom_dasar_efemeris)
+        for obj_id, label in info_tambahan:
+            for sufiks, ket in (("az", "Az."), ("alt", "Tinggi"), ("dec", "Dek.")):
+                kunci = f"{sufiks}_{obj_id}"
+                kolom_baru.append(kunci)
+                judul_baru[kunci] = f"{ket} {label}"
+
+        self.tree_efemeris.configure(columns=kolom_baru)
+        for kunci in kolom_baru:
+            self.tree_efemeris.heading(kunci, text=judul_baru[kunci])
+            lebar = 90 if kunci == "jam" else 120
+            self.tree_efemeris.column(kunci, width=lebar, anchor="center")
+        return info_tambahan
+
+    def _tampilkan_efemeris(self, tanggal, lat, lon, zona_offset, mode, hasil, rts,
+                             objek_tambahan=None, objek_kustom=None):
+        self._hasil_efemeris_terakhir = (tanggal, lat, lon, zona_offset, mode, hasil, rts,
+                                          objek_tambahan, objek_kustom)
 
         def _fmt(jam):
             return _label_jam_dari_desimal(jam) if jam is not None else "--:--"
@@ -7743,24 +8271,39 @@ class HisabWinApp(tk.Tk):
                  f"🌙 Bulan — Terbit {_fmt(b['terbit'])}  |  Transit {_fmt(b['transit'])}  |  "
                  f"Terbenam {_fmt(b['terbenam'])}")
 
+        info_tambahan = self._rebuild_kolom_tree_efemeris(objek_tambahan, objek_kustom)
         self.tree_efemeris.delete(*self.tree_efemeris.get_children())
         for b in hasil:
             tag = "siang" if b["alt_matahari"] > 0 else "malam"
-            self.tree_efemeris.insert("", "end", tags=(tag,), values=(
+            nilai = [
                 b["label_jam"],
                 f"{b['az_matahari']:.2f}°", f"{b['alt_matahari']:+.2f}°", f"{b['dec_matahari']:+.2f}°",
                 f"{b['az_bulan']:.2f}°", f"{b['alt_bulan']:+.2f}°", f"{b['dec_bulan']:+.2f}°",
                 f"{b['elongasi_deg']:.2f}°", f"{b['fraksi_iluminasi_persen']:.1f}%",
-            ))
+            ]
+            for obj_id, _label in info_tambahan:
+                if obj_id == "kustom":
+                    data_obj = b.get("objek_kustom")
+                else:
+                    data_obj = (b.get("planet_tambahan") or {}).get(obj_id)
+                if data_obj is None:
+                    nilai.extend(["--", "--", "--"])
+                else:
+                    nilai.extend([f"{data_obj['az']:.2f}°", f"{data_obj['alt']:+.2f}°",
+                                  f"{data_obj['dec']:+.2f}°"])
+            self.tree_efemeris.insert("", "end", tags=(tag,), values=tuple(nilai))
 
         metode_label = {
-            "jpl": "Presisi -- Skyfield + JPL DE421 (offline)",
+            "jpl": "Presisi -- Skyfield + JPL (offline)",
             "horizons": "Online -- JPL Horizons API (ssd.jpl.nasa.gov)",
         }.get(mode, "Ringan (VSOP87+ELP2000, offline)")
+        teks_objek_tambahan = (
+            f"  |  Objek tambahan: {', '.join(lbl for _oid, lbl in info_tambahan)}"
+            if info_tambahan else "")
         self.label_judul_efemeris.config(
             text=f"Tabel Efemeris — {tanggal.strftime('%d %B %Y')}  |  "
                  f"Lokasi: {lat:.4f}, {lon:.4f} (UTC{zona_offset:+g})  |  "
-                 f"Metode: {metode_label}  |  {len(hasil)} baris")
+                 f"Metode: {metode_label}  |  {len(hasil)} baris{teks_objek_tambahan}")
 
         self.btn_simpan_csv_efemeris.config(state="normal" if hasil else "disabled")
         self._pastikan_tab_efemeris_tampil()
@@ -7771,7 +8314,9 @@ class HisabWinApp(tk.Tk):
         if not self._hasil_efemeris_terakhir:
             messagebox.showwarning("Belum ada data", "Buat tabel efemeris terlebih dahulu.")
             return
-        tanggal, lat, lon, zona_offset, mode, hasil, rts = self._hasil_efemeris_terakhir
+        (tanggal, lat, lon, zona_offset, mode, hasil, rts,
+         objek_tambahan, objek_kustom) = self._hasil_efemeris_terakhir
+        info_tambahan = self._daftar_kolom_objek_tambahan(objek_tambahan, objek_kustom)
         nama_default = f"tabel_efemeris_{tanggal.strftime('%Y%m%d')}.csv"
         path = filedialog.asksaveasfilename(
             defaultextension=".csv",
@@ -7796,17 +8341,29 @@ class HisabWinApp(tk.Tk):
                                    "Transit", _fmt(rts["bulan"]["transit"]),
                                    "Terbenam", _fmt(rts["bulan"]["terbenam"])])
                 penulis.writerow([])
-                penulis.writerow(["Jam (Lokal)", "Azimuth Matahari", "Tinggi Matahari",
-                                   "Deklinasi Matahari", "Azimuth Bulan", "Tinggi Bulan",
-                                   "Deklinasi Bulan", "Jarak Bulan (km)", "Elongasi",
-                                   "Fraksi Iluminasi Bulan (%)"])
+                header = ["Jam (Lokal)", "Azimuth Matahari", "Tinggi Matahari",
+                          "Deklinasi Matahari", "Azimuth Bulan", "Tinggi Bulan",
+                          "Deklinasi Bulan", "Jarak Bulan (km)", "Elongasi",
+                          "Fraksi Iluminasi Bulan (%)"]
+                for _obj_id, label in info_tambahan:
+                    header += [f"Azimuth {label}", f"Tinggi {label}", f"Deklinasi {label}"]
+                penulis.writerow(header)
                 for b in hasil:
-                    penulis.writerow([
+                    baris = [
                         b["label_jam"], f"{b['az_matahari']:.3f}", f"{b['alt_matahari']:.3f}",
                         f"{b['dec_matahari']:.3f}", f"{b['az_bulan']:.3f}", f"{b['alt_bulan']:.3f}",
                         f"{b['dec_bulan']:.3f}", f"{b['jarak_bulan_km']:.0f}",
                         f"{b['elongasi_deg']:.3f}", f"{b['fraksi_iluminasi_persen']:.1f}",
-                    ])
+                    ]
+                    for obj_id, _label in info_tambahan:
+                        data_obj = (b.get("objek_kustom") if obj_id == "kustom"
+                                    else (b.get("planet_tambahan") or {}).get(obj_id))
+                        if data_obj is None:
+                            baris += ["", "", ""]
+                        else:
+                            baris += [f"{data_obj['az']:.3f}", f"{data_obj['alt']:.3f}",
+                                      f"{data_obj['dec']:.3f}"]
+                    penulis.writerow(baris)
             messagebox.showinfo("Tersimpan", f"Tabel efemeris disimpan ke:\n{path}")
         except OSError as e:
             messagebox.showerror("Gagal menyimpan", f"Tidak bisa menulis file CSV:\n{e}")
@@ -8698,8 +9255,14 @@ class HisabWinApp(tk.Tk):
                     self._ephemeris_loading = False
                     if self.mode_sholat.get() == "jpl":
                         self.label_status_metode_sholat.config(
-                            text="Mode Presisi aktif — ephemeris JPL DE421 sudah siap.")
+                            text="Mode Presisi aktif — ephemeris JPL sudah siap.")
                     self.btn_cari.config(state="normal")
+                    if hasattr(self, "chk_planet_efemeris"):
+                        # Set planet yang tersedia bisa berubah tiap kali
+                        # ephemeris (ulang) dimuat -- mis. user baru ganti
+                        # kernel JPL lewat Kelola Kernel JPL -- refresh
+                        # checkbox di tab Tabel Efemeris supaya sinkron.
+                        self._perbarui_state_objek_tambahan()
                     if self._auto_cari_pending:
                         self._auto_cari_pending = False
                         self._log("Ephemeris siap. Mencari ulang ijtimak otomatis untuk Mode Presisi...")
@@ -8839,8 +9402,9 @@ class HisabWinApp(tk.Tk):
                     self.btn_bandingkan_kalender.config(state="normal")
 
                 elif jenis == "efemeris_ok":
-                    tanggal, lat, lon, zona_offset, mode, hasil, rts = payload
-                    self._tampilkan_efemeris(tanggal, lat, lon, zona_offset, mode, hasil, rts)
+                    tanggal, lat, lon, zona_offset, mode, hasil, rts, objek_tambahan, objek_kustom = payload
+                    self._tampilkan_efemeris(tanggal, lat, lon, zona_offset, mode, hasil, rts,
+                                              objek_tambahan, objek_kustom)
 
                 elif jenis == "efemeris_error":
                     self._log(f"ERROR: {payload}")
