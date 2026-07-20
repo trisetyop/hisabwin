@@ -2,9 +2,9 @@ name: Build HisabWin Installer
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, nsis ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ main, master, nsis ]
   workflow_dispatch:
 
 jobs:
