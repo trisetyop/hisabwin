@@ -6212,6 +6212,20 @@ class ClosableNotebook(ttk.Notebook):
 class HisabWinApp(tk.Tk):
     def __init__(self):
         super().__init__()
+        # Paksa root ini jadi default root Tkinter yg "benar". Perlu, karena
+        # kalau splash custom (_tampilkan_splash_awal, dipakai saat dev-run
+        # tanpa pyi_splash) sempat membuat tk.Tk() sendiri lalu di-destroy(),
+        # tkinter._default_root TIDAK otomatis direset -- jadi tetap nunjuk
+        # ke interpreter splash yg sudah mati. Akibatnya semua tk.PhotoImage(
+        # ...) tanpa master= eksplisit (mis. di _buat_gambar_tab_bulat /
+        # _buat_icon_close) nempel ke interpreter basi itu, dan meledak saat
+        # dipakai lewat style.element_create() di interpreter utama:
+        # "TclError: image 'pyimageN' doesn't exist". Hanya muncul saat
+        # `python hisabwin.py` (splash custom dipakai); build exe --splash
+        # tidak kena karena splash custom itu dilewati (lihat pyi_splash).
+        import tkinter
+        tkinter._default_root = self
+
         self.title("HisabWin — Peta Visibilitas Hilal")
         self.geometry("1400x800")
         self.minsize(1000, 600)

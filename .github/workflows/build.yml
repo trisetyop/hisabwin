@@ -75,6 +75,8 @@ jobs:
           --add-data "bg.png;." `
           --add-data "mainland_amerika_mask.npz;." `
           --add-data "de421.bsp;." `
+          --add-data "bintang_terang.csv;." `
+          --add-data "rasi_garis.csv;." `
           --add-data "cartopy_data;cartopy_data" `
           hisabwin.py
 
@@ -188,6 +190,8 @@ jobs:
           --add-data "bg.png:." \
           --add-data "mainland_amerika_mask.npz:." \
           --add-data "de421.bsp:." \
+          --add-data "bintang_terang.csv:." \
+          --add-data "rasi_garis.csv:." \
           --add-data "cartopy_data:cartopy_data" \
           hisabwin.py
 
