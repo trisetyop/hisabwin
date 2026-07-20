@@ -99,7 +99,7 @@ jobs:
 
   build-linux:
     name: Build Linux Portable Tarball
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04  # <-- BAGIAN YANG DIPERBAIKI (sebelumnya ubuntu-latest)
 
     steps:
     - name: Checkout Repository
