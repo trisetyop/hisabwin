@@ -78,15 +78,12 @@ jobs:
           --add-data "cartopy_data;cartopy_data" `
           hisabwin.py
 
-    - name: Prepare HisabWin.7z Archive
+    - name: Install NSIS
       shell: powershell
       run: |
-        # Zip the PyInstaller output directory (dist/HisabWin)
-        Push-Location dist
-        & "C:\Program Files\7-Zip\7z.exe" a -t7z HisabWin.7z HisabWin
-        Pop-Location
+        choco install nsis -y --no-progress
 
-    - name: Build Installer and Uninstaller
+    - name: Build Installer (NSIS)
       shell: powershell
       run: |
         powershell -ExecutionPolicy Bypass -File build_installer.ps1
@@ -97,7 +94,6 @@ jobs:
         name: HisabWin-Installer
         path: |
           dist/HisabWin_Installer.exe
-          dist/HisabWin_Uninstaller.exe
 
   build-linux:
     name: Build Linux Portable Tarball
