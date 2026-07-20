@@ -327,6 +327,22 @@ WARNA_TERMINAL_FG_MUTED = "#3FB950"  # sedikit lebih redup, dipakai prompt/prefi
 
 
 # =========================================================
+#  FITUR "PETA LANGIT" (1.0.2) -- rasi bintang, planet, Matahari, Bulan.
+#  Modul terpisah (starmap.py), diinisialisasi di sini supaya tahu folder
+#  aset (sama seperti de421.bsp dkk, lihat _resource_base_dir) & ikut tema
+#  warna/font di atas. starmap.py SENGAJA tidak "import hisabwin" balik --
+#  lihat komentar di kepala starmap.py soal alasan circular-import.
+# =========================================================
+import starmap
+starmap.inisialisasi(
+    folder_aset=_resource_base_dir(),
+    WARNA_BG=WARNA_BG, WARNA_PANEL=WARNA_PANEL, WARNA_AKSEN=WARNA_AKSEN,
+    WARNA_TEKS=WARNA_TEKS, WARNA_TEKS_MUTED=WARNA_TEKS_MUTED, WARNA_BORDER=WARNA_BORDER,
+    FONT_UTAMA=FONT_UTAMA, FONT_UTAMA_BOLD=FONT_UTAMA_BOLD, FONT_JUDUL=FONT_JUDUL,
+    FONT_KECIL=FONT_KECIL,
+)
+
+# =========================================================
 #  UTILITAS
 # =========================================================
 
@@ -695,6 +711,20 @@ def gast_derajat(jd_ut, T, dpsi_deg, eps_deg):
             + 0.000387933 * T ** 2 - T ** 3 / 38710000.0) % 360
     eq_equinox = dpsi_deg * np.cos(np.radians(eps_deg))  # koreksi nutasi -> GAST
     return (gmst + eq_equinox) % 360
+
+
+# Fungsi murni astronomi di atas dipakai ULANG oleh starmap.py (fitur Peta
+# Langit, 1.0.2) lewat dependency injection -- BUKAN "import hisabwin"
+# (lihat komentar di kepala starmap.py). Dikumpulkan jadi satu dict supaya
+# tinggal dikirim apa adanya tiap kali starmap.hitung_langit() dipanggil.
+ASTRO_FUNCS = {
+    "julian_day": julian_day,
+    "delta_t_detik": delta_t_detik,
+    "gast_derajat": gast_derajat,
+    "nutasi_singkat": nutasi_singkat,
+    "posisi_matahari": posisi_matahari,
+    "posisi_bulan": posisi_bulan,
+}
 
 
 def altitude_geosentris(lat_deg, dec_deg, H_deg):
@@ -6769,7 +6799,7 @@ class HisabWinApp(tk.Tk):
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_sholat(), self._tutup_akordeon_gerhana(),
                                   self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter(),
-                                  self._tutup_akordeon_efemeris()))
+                                  self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit()))
 
         # --- Langkah 0: mode perhitungan ---
         frame0 = ttk.LabelFrame(body_hilal, text="0. Mode Perhitungan")
@@ -6873,7 +6903,7 @@ class HisabWinApp(tk.Tk):
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_gerhana(),
                                   self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter(),
-                                  self._tutup_akordeon_efemeris()))
+                                  self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit()))
 
         # --- Tab tambahan: Waktu Sholat & Arah Kiblat (permanen, selalu ada) ---
         self._bangun_tab_sholat()
@@ -6889,7 +6919,7 @@ class HisabWinApp(tk.Tk):
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter(),
-                                  self._tutup_akordeon_efemeris()))
+                                  self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit()))
         self._bangun_akordeon_gerhana(self._body_akordeon_gerhana, pad)
 
         # --- Bagian akordeon ke-4: Perbandingan Kalender MABIMS vs KHGT
@@ -6904,7 +6934,7 @@ class HisabWinApp(tk.Tk):
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_konverter(),
-                                  self._tutup_akordeon_efemeris()))
+                                  self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit()))
         self._bangun_akordeon_kalbanding(self._body_akordeon_kalbanding, pad)
 
         # --- Tab hasil perbandingan (permanen, sama seperti tab Waktu
@@ -6928,7 +6958,7 @@ class HisabWinApp(tk.Tk):
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
-                                  self._tutup_akordeon_efemeris()))
+                                  self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit()))
         self._bangun_akordeon_konverter(self._body_akordeon_konverter, pad)
 
         # --- Bagian akordeon ke-6: Tabel Efemeris (posisi Matahari & Bulan
@@ -6943,9 +6973,27 @@ class HisabWinApp(tk.Tk):
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
-                                  self._tutup_akordeon_konverter()))
+                                  self._tutup_akordeon_konverter(), self._tutup_akordeon_peta_langit()))
         self._bangun_akordeon_efemeris(self._body_akordeon_efemeris, pad)
         self._bangun_tab_efemeris()
+
+        # --- Bagian akordeon ke-7: Peta Langit (rasi bintang, planet,
+        #     Matahari, Bulan) untuk koordinat & waktu tertentu -- fitur
+        #     baru 1.0.2, TIDAK berkaitan dgn hisab hilal/kriteria MABIMS/
+        #     KHGT, cuma visualisasi langit malam biasa (starmap.py). Beda
+        #     dari akordeon lain: hasilnya jendela Toplevel BARU tiap kali
+        #     ditekan (bukan 1 tab permanen di notebook kanan), supaya bisa
+        #     dibuka berkali-kali (mis. bandingkan 2 waktu berbeda) tanpa
+        #     saling menimpa. ---
+        self._body_akordeon_peta_langit, self._buka_akordeon_peta_langit, \
+            self._tutup_akordeon_peta_langit = \
+            self._buat_bagian_akordeon(
+                tab_kontrol, "🌌 Peta Langit",
+                buka_awal=False,
+                on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
+                                  self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
+                                  self._tutup_akordeon_konverter(), self._tutup_akordeon_efemeris()))
+        self._bangun_akordeon_peta_langit(self._body_akordeon_peta_langit, pad)
 
     def _on_ganti_tab_notebook(self, event=None):
         """Dipanggil tiap kali tab notebook kanan (peta/Waktu Sholat)
@@ -8368,6 +8416,127 @@ class HisabWinApp(tk.Tk):
         except OSError as e:
             messagebox.showerror("Gagal menyimpan", f"Tidak bisa menulis file CSV:\n{e}")
 
+    # =====================================================
+    #  Akordeon ke-7: Peta Langit (starmap.py) -- fitur baru 1.0.2
+    # =====================================================
+    def _bangun_akordeon_peta_langit(self, body, pad):
+        """Isi badan akordeon "🌌 Peta Langit": koordinat, tanggal & jam
+        (UTC), lalu tombol untuk membuka jendela peta langit (rasi bintang,
+        planet, Matahari, Bulan) di titik & waktu tsb -- TIDAK terkait
+        hisab hilal/kriteria MABIMS/KHGT, murni visualisasi langit malam.
+        Memakai Mode Perhitungan yang sama dengan bagian 🌙 Visibilitas
+        (self.mode, Ringan/Presisi) -- mode Ringan cuma menampilkan
+        Matahari & Bulan (starmap.py belum punya model planet VSOP87)."""
+
+        ttk.Label(
+            body,
+            text="Peta langit (rasi bintang, planet, Matahari, Bulan) untuk "
+                 "koordinat, tanggal & jam (UTC) tertentu. Mode Ringan (lihat "
+                 "🌙 Visibilitas) tidak menampilkan planet.",
+            font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left",
+            wraplength=280,
+        ).pack(fill="x", padx=10, pady=(4, 6))
+
+        frame_koord = ttk.LabelFrame(body, text="1. Koordinat Lokasi")
+        frame_koord.pack(fill="x", **pad)
+        ttk.Label(frame_koord, text="Lintang:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        self.entry_lat_peta_langit = ttk.Entry(frame_koord, width=12)
+        self.entry_lat_peta_langit.insert(0, "-6.2")
+        self.entry_lat_peta_langit.grid(row=0, column=1, padx=4, pady=4)
+        ttk.Label(frame_koord, text="° (+LU / -LS)", font=FONT_KECIL,
+                  foreground=WARNA_TEKS_MUTED).grid(row=0, column=2, sticky="w")
+        ttk.Label(frame_koord, text="Bujur:").grid(row=1, column=0, sticky="w", padx=6, pady=4)
+        self.entry_lon_peta_langit = ttk.Entry(frame_koord, width=12)
+        self.entry_lon_peta_langit.insert(0, "106.8")
+        self.entry_lon_peta_langit.grid(row=1, column=1, padx=4, pady=4)
+        ttk.Label(frame_koord, text="° (+BT / -BB)", font=FONT_KECIL,
+                  foreground=WARNA_TEKS_MUTED).grid(row=1, column=2, sticky="w")
+
+        frame_tgl = ttk.LabelFrame(body, text="2. Tanggal & Jam (UTC)")
+        frame_tgl.pack(fill="x", **pad)
+        waktu_ini = datetime.utcnow()
+        ttk.Label(frame_tgl, text="Tanggal:").grid(row=0, column=0, padx=4, pady=6)
+        self.entry_tgl_hari_peta_langit = ttk.Entry(frame_tgl, width=4)
+        self.entry_tgl_hari_peta_langit.insert(0, str(waktu_ini.day))
+        self.entry_tgl_hari_peta_langit.grid(row=0, column=1, padx=2)
+        ttk.Label(frame_tgl, text="Bulan:").grid(row=0, column=2, padx=4)
+        self.entry_tgl_bulan_peta_langit = ttk.Entry(frame_tgl, width=4)
+        self.entry_tgl_bulan_peta_langit.insert(0, str(waktu_ini.month))
+        self.entry_tgl_bulan_peta_langit.grid(row=0, column=3, padx=2)
+        ttk.Label(frame_tgl, text="Tahun:").grid(row=0, column=4, padx=4)
+        self.entry_tgl_tahun_peta_langit = ttk.Entry(frame_tgl, width=6)
+        self.entry_tgl_tahun_peta_langit.insert(0, str(waktu_ini.year))
+        self.entry_tgl_tahun_peta_langit.grid(row=0, column=5, padx=2)
+        ttk.Label(frame_tgl, text="Jam UTC (desimal):").grid(
+            row=1, column=0, columnspan=2, sticky="w", padx=4, pady=(6, 2))
+        self.entry_jam_peta_langit = ttk.Entry(frame_tgl, width=6)
+        self.entry_jam_peta_langit.insert(0, f"{waktu_ini.hour + waktu_ini.minute / 60:.2f}")
+        self.entry_jam_peta_langit.grid(row=1, column=2, columnspan=2, padx=2, pady=(6, 2), sticky="w")
+        ttk.Label(
+            frame_tgl, text="Contoh: 13.5 = pukul 13:30 UTC.",
+            font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left", wraplength=280,
+        ).grid(row=2, column=0, columnspan=6, sticky="w", padx=4, pady=(0, 4))
+
+        self.btn_tampilkan_peta_langit = ttk.Button(
+            body, text="Tampilkan Peta Langit", command=self._on_tampilkan_peta_langit,
+            style="Aksen.TButton")
+        self.btn_tampilkan_peta_langit.pack(fill="x", padx=10, pady=(4, 10))
+
+    def _on_tampilkan_peta_langit(self):
+        try:
+            try:
+                lat = float(self.entry_lat_peta_langit.get().strip().replace(",", "."))
+                lon = float(self.entry_lon_peta_langit.get().strip().replace(",", "."))
+            except ValueError:
+                raise ValueError("Koordinat tidak valid. Contoh format: -6.200000")
+            if not (-90 <= lat <= 90):
+                raise ValueError("Lintang harus di antara -90 dan 90 derajat.")
+            if not (-180 <= lon <= 180):
+                raise ValueError("Bujur harus di antara -180 dan 180 derajat.")
+            try:
+                hari = int(self.entry_tgl_hari_peta_langit.get())
+                bulan = int(self.entry_tgl_bulan_peta_langit.get())
+                tahun = int(self.entry_tgl_tahun_peta_langit.get())
+                tanggal = datetime(tahun, bulan, hari)
+            except ValueError:
+                raise ValueError("Tanggal tidak valid. Pastikan hari/bulan/tahun berupa angka & tanggal ada.")
+            try:
+                jam_utc = float(self.entry_jam_peta_langit.get().strip().replace(",", "."))
+            except ValueError:
+                raise ValueError("Jam UTC tidak valid. Isi angka desimal 0-24, mis. 13.5 utk 13:30 UTC.")
+            if not (0 <= jam_utc < 24):
+                raise ValueError("Jam UTC harus di antara 0 dan 24.")
+        except ValueError as e:
+            messagebox.showerror("Input tidak valid", str(e))
+            return
+
+        mode = self.mode.get()
+        if mode == "jpl" and self.eph is None:
+            messagebox.showwarning(
+                "Ephemeris belum siap",
+                "Mode Presisi (JPL DE421) dipilih, tapi ephemeris lokalnya belum "
+                "selesai dimuat. Tunggu sebentar, atau pilih Mode Perhitungan "
+                "'Ringan' dulu (lihat bagian 🌙 Visibilitas).")
+            return
+
+        self.btn_tampilkan_peta_langit.config(state="disabled")
+        self._log(f"\nMenyiapkan peta langit untuk {tanggal.strftime('%d %B %Y')} "
+                   f"{jam_utc:05.2f} UTC ({lat:.4f}, {lon:.4f})...")
+
+        threading.Thread(
+            target=self._peta_langit_thread,
+            args=(tanggal, jam_utc, lat, lon, mode),
+            daemon=True).start()
+
+    def _peta_langit_thread(self, tanggal, jam_utc, lat, lon, mode):
+        try:
+            data = starmap.hitung_langit(
+                tanggal, jam_utc, lat, lon, ASTRO_FUNCS,
+                mode=mode, eph=self.eph, ts=self.ts)
+            self.antrian.put(("peta_langit_ok", (tanggal, jam_utc, lat, lon, mode, data)))
+        except Exception as e:
+            self.antrian.put(("peta_langit_error", f"Gagal menghitung peta langit: {e}"))
+
     # ---------------- Tab Waktu Sholat & Arah Kiblat ----------------
 
     def _path_file_lokasi(self):
@@ -9410,6 +9579,18 @@ class HisabWinApp(tk.Tk):
                     self._log(f"ERROR: {payload}")
                     messagebox.showerror("Terjadi kesalahan", payload)
                     self.btn_buat_efemeris.config(state="normal")
+
+                elif jenis == "peta_langit_ok":
+                    tanggal, jam_utc, lat, lon, mode, data = payload
+                    starmap.gambar_jendela_peta_langit(self, tanggal, jam_utc, lat, lon, data, mode=mode)
+                    self._log(f"Peta langit {tanggal.strftime('%d %B %Y')} {jam_utc:05.2f} UTC "
+                               "selesai ditampilkan.")
+                    self.btn_tampilkan_peta_langit.config(state="normal")
+
+                elif jenis == "peta_langit_error":
+                    self._log(f"ERROR: {payload}")
+                    messagebox.showerror("Terjadi kesalahan", payload)
+                    self.btn_tampilkan_peta_langit.config(state="normal")
 
                 elif jenis == "konv_kriteria_ok":
                     self.label_hasil_konverter.config(text=payload)
