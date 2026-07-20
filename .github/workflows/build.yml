@@ -151,10 +151,19 @@ jobs:
         # CATATAN perbedaan dari build Windows:
         # - --add-data pakai ':' (bukan ';') sbg pemisah src/dest di Linux/macOS
         # - --icon (logo.ico) DIHILANGKAN -- PyInstaller Linux tidak mendukung
-        #   format .ico utk embed icon ke ELF binary (beda dari .exe Windows)
-        # - --splash (splash.png) DIHILANGKAN -- fitur splash screen PyInstaller
-        #   TIDAK didukung di Linux sama sekali (keterbatasan bootloader),
-        #   build akan gagal kalau tetap dipaksa disertakan
+        #   format .ico utk embed icon ke ELF binary (beda dari .exe Windows).
+        #   Icon window/taskbar TETAP muncul saat app jalan krn di-set manual
+        #   lewat iconphoto() di kode (baca logo.png saat runtime, lihat
+        #   HisabWinApp._muat_logo) -- tidak bergantung sama sekali pada flag
+        #   --icon PyInstaller. Utk icon di file manager/launcher desktop,
+        #   lihat step "Package Portable Tarball" di bawah (file .desktop).
+        # - --splash (flag bawaan PyInstaller) DIHILANGKAN -- fitur splash
+        #   bootloader PyInstaller TIDAK didukung di Linux sama sekali, build
+        #   akan gagal kalau tetap dipaksa disertakan. Splash screen di Linux
+        #   sekarang ditangani MANUAL dari dalam kode Python sendiri (lihat
+        #   _tampilkan_splash_awal() di hisabwin.py, dipanggil sebelum import
+        #   cartopy/matplotlib.pyplot/skyfield yg berat) -- makanya splash.png
+        #   tetap perlu di-bundle via --add-data walau flag --splash gak dipakai.
         pyinstaller --noconfirm --windowed --onedir \
           --name HisabWin \
           --collect-data cartopy \
@@ -175,6 +184,7 @@ jobs:
           --exclude-module jupyter \
           --exclude-module notebook \
           --add-data "logo.png:." \
+          --add-data "splash.png:." \
           --add-data "bg.png:." \
           --add-data "mainland_amerika_mask.npz:." \
           --add-data "de421.bsp:." \
@@ -190,6 +200,23 @@ jobs:
         # tinggal extract & jalankan langsung dist/HisabWin/HisabWin, tanpa
         # proses instalasi/registry apapun (mirip semangat --onedir Windows,
         # cuma tanpa wrapper installer.exe).
+        #
+        # File .desktop ini OPSIONAL (tarball tetap jalan tanpanya, cukup
+        # double-click/exec dist/HisabWin/HisabWin), tapi disertakan supaya
+        # user yang mau icon proper di file manager/menu aplikasi (bukan
+        # cuma icon window saat app sudah jalan) tinggal copy HisabWin.
+        # desktop ke ~/.local/share/applications/ lalu sesuaikan path Exec/
+        # Icon di dalamnya ke lokasi hasil extract tarball-nya.
+        cat > dist/HisabWin/HisabWin.desktop << 'EOF'
+        [Desktop Entry]
+        Type=Application
+        Name=HisabWin
+        Comment=Peta Visibilitas Hilal (MABIMS & Muhammadiyah)
+        Exec=HisabWin
+        Icon=logo.png
+        Terminal=false
+        Categories=Science;Astronomy;
+        EOF
         cd dist
         tar -czf HisabWin-linux-x86_64.tar.gz HisabWin
 

@@ -54,6 +54,105 @@ def _resource_base_dir():
 
 
 # =========================================================
+#  SPLASH SCREEN CUSTOM (cross-platform: Windows/Linux/macOS,
+#  PyInstaller MAUPUN Nuitka MAUPUN 'python hisabwin.py' langsung)
+# =========================================================
+#
+# Fitur --splash bawaan PyInstaller (dipakai lewat modul pyi_splash, lihat
+# HisabWinApp.__init__) HANYA didukung di build Windows -- bootloader-nya
+# tidak ada versi Linux/macOS sama sekali, dan Nuitka juga tidak punya
+# ekuivalen utk mode --standalone di platform manapun. Tanpa splash,
+# selama proses import berat (cartopy/matplotlib.pyplot/skyfield -- bisa
+# beberapa detik) user cuma lihat window kosong/freeze, apalagi di Linux
+# yang tidak dapat splash PyInstaller sama sekali.
+#
+# Solusinya: splash window super sederhana pakai tk.Tk() + PIL polos, HANYA
+# bergantung pada modul yang SUDAH diimpor di atas titik ini (tkinter, os,
+# sys) -- sengaja dipanggil SEBELUM baris 'import cartopy'/'matplotlib.
+# pyplot'/'skyfield' di bawah, supaya splash-nya sudah tergambar di layar
+# duluan sebelum proses lambatnya mulai. Ditutup lagi di HisabWinApp.
+# __init__, di titik yang sama dengan pyi_splash.close() (setelah UI utama
+# selesai dibangun & siap ditampilkan).
+#
+# Splash ini TIDAK punya event loop sendiri selama import berat berlangsung
+# (import itu sendiri blocking) -- gambarnya statis di layar sampai heavy
+# import selesai, sama persis seperti perilaku --splash PyInstaller di
+# Windows. Window manager mungkin menandainya "Not Responding" sesaat
+# kalau importnya lama, tapi gambar tetap tampil.
+_splash_root = None
+
+
+def _tampilkan_splash_awal():
+    """Tampilkan splash.png di tengah layar. Aman gagal diam-diam (return
+    None) kalau splash.png tidak ada atau Pillow bermasalah -- app tetap
+    lanjut jalan normal tanpa splash, tidak pernah membuat app gagal start
+    gara-gara splash.
+    """
+    global _splash_root
+    try:
+        path_splash = os.path.join(_resource_base_dir(), "splash.png")
+        if not os.path.isfile(path_splash):
+            return None
+        root = tk.Tk()
+        root.overrideredirect(True)  # tanpa title bar/border, gaya splash
+        try:
+            root.attributes("-topmost", True)
+        except Exception:
+            pass  # sebagian window manager Linux tidak dukung -topmost, abaikan
+        try:
+            from PIL import Image, ImageTk
+            img = Image.open(path_splash)
+            foto = ImageTk.PhotoImage(img)
+        except Exception:
+            root.destroy()
+            return None
+        lebar, tinggi = foto.width(), foto.height()
+        lebar_layar = root.winfo_screenwidth()
+        tinggi_layar = root.winfo_screenheight()
+        x = (lebar_layar - lebar) // 2
+        y = (tinggi_layar - tinggi) // 2
+        root.geometry(f"{lebar}x{tinggi}+{x}+{y}")
+        label = tk.Label(root, image=foto, borderwidth=0)
+        label.image = foto  # cegah PhotoImage di-garbage-collect
+        label.pack()
+        root.update()
+        _splash_root = root
+        return root
+    except Exception:
+        return None
+
+
+def _tutup_splash_awal():
+    """Tutup & hancurkan splash custom (kalau ada). Dipanggil dari
+    HisabWinApp.__init__ setelah UI utama siap, bersamaan dgn pyi_splash.
+    close(). Aman dipanggil berkali-kali/walau splash tidak pernah dibuat.
+    """
+    global _splash_root
+    if _splash_root is not None:
+        try:
+            _splash_root.destroy()
+        except Exception:
+            pass
+        _splash_root = None
+
+
+try:
+    # Kalau ini build Windows PyInstaller dgn --splash aktif, bootloader-nya
+    # SUDAH menampilkan splash native duluan sebelum baris Python manapun
+    # jalan -- pyi_splash bisa diimpor di sini artinya splash native itu
+    # sedang tampil. Splash custom di bawah ini SENGAJA di-skip supaya
+    # tidak dobel (dua jendela splash bertumpuk). pyi_splash TETAP akan
+    # ditutup nanti lewat pyi_splash.close() di HisabWinApp.__init__.
+    import pyi_splash  # noqa: F401
+    _splash_native_aktif = True
+except ImportError:
+    _splash_native_aktif = False
+
+if not _splash_native_aktif:
+    _tampilkan_splash_awal()
+
+
+# =========================================================
 #  MANAJEMEN KERNEL JPL (de421 bawaan + de440/de441 opsional)
 # =========================================================
 #
@@ -6199,6 +6298,13 @@ class HisabWinApp(tk.Tk):
             pyi_splash.close()
         except ImportError:
             pass
+
+        # Tutup juga splash custom (_tampilkan_splash_awal() di dekat awal
+        # file) -- ini yang aktif dipakai di build Linux (dan Nuitka di
+        # platform manapun), karena pyi_splash di atas cuma ada di build
+        # Windows PyInstaller. Aman dipanggil walau splash custom tidak
+        # pernah dibuat (mis. splash.png tidak ditemukan).
+        _tutup_splash_awal()
 
         # Batalkan job after() yang masih terjadwal SEBELUM window dihancurkan.
         # Tanpa ini, saat user menutup window sementara _poll_antrian masih
