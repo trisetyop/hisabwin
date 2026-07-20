@@ -106,11 +106,11 @@ Section "HisabWin (wajib)" SEC_APP
 SectionEnd
 
 Section "Pintasan Desktop" SEC_DESKTOP
-  CreateShortCut "$DESKTOP\HisabWin.lnk" "$INSTDIR\${APP_EXE}" "" "$INSTDIR\logo.ico" 0 SW_SHOWNORMAL "" "Peta Visibilitas Hilal HisabWin"
+  CreateShortCut "$DESKTOP\HisabWin.lnk" "$INSTDIR\${APP_EXE}" "" "$INSTDIR\${APP_EXE}" 0 SW_SHOWNORMAL "" "Peta Visibilitas Hilal HisabWin"
 SectionEnd
 
 Section "Pintasan Start Menu" SEC_STARTMENU
-  CreateShortCut "$SMPROGRAMS\HisabWin.lnk" "$INSTDIR\${APP_EXE}" "" "$INSTDIR\logo.ico" 0 SW_SHOWNORMAL "" "Peta Visibilitas Hilal HisabWin"
+  CreateShortCut "$SMPROGRAMS\HisabWin.lnk" "$INSTDIR\${APP_EXE}" "" "$INSTDIR\${APP_EXE}" 0 SW_SHOWNORMAL "" "Peta Visibilitas Hilal HisabWin"
 SectionEnd
 
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
