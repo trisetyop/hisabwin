@@ -54,6 +54,105 @@ def _resource_base_dir():
 
 
 # =========================================================
+#  SPLASH SCREEN CUSTOM (cross-platform: Windows/Linux/macOS,
+#  PyInstaller MAUPUN Nuitka MAUPUN 'python hisabwin.py' langsung)
+# =========================================================
+#
+# Fitur --splash bawaan PyInstaller (dipakai lewat modul pyi_splash, lihat
+# HisabWinApp.__init__) HANYA didukung di build Windows -- bootloader-nya
+# tidak ada versi Linux/macOS sama sekali, dan Nuitka juga tidak punya
+# ekuivalen utk mode --standalone di platform manapun. Tanpa splash,
+# selama proses import berat (cartopy/matplotlib.pyplot/skyfield -- bisa
+# beberapa detik) user cuma lihat window kosong/freeze, apalagi di Linux
+# yang tidak dapat splash PyInstaller sama sekali.
+#
+# Solusinya: splash window super sederhana pakai tk.Tk() + PIL polos, HANYA
+# bergantung pada modul yang SUDAH diimpor di atas titik ini (tkinter, os,
+# sys) -- sengaja dipanggil SEBELUM baris 'import cartopy'/'matplotlib.
+# pyplot'/'skyfield' di bawah, supaya splash-nya sudah tergambar di layar
+# duluan sebelum proses lambatnya mulai. Ditutup lagi di HisabWinApp.
+# __init__, di titik yang sama dengan pyi_splash.close() (setelah UI utama
+# selesai dibangun & siap ditampilkan).
+#
+# Splash ini TIDAK punya event loop sendiri selama import berat berlangsung
+# (import itu sendiri blocking) -- gambarnya statis di layar sampai heavy
+# import selesai, sama persis seperti perilaku --splash PyInstaller di
+# Windows. Window manager mungkin menandainya "Not Responding" sesaat
+# kalau importnya lama, tapi gambar tetap tampil.
+_splash_root = None
+
+
+def _tampilkan_splash_awal():
+    """Tampilkan splash.png di tengah layar. Aman gagal diam-diam (return
+    None) kalau splash.png tidak ada atau Pillow bermasalah -- app tetap
+    lanjut jalan normal tanpa splash, tidak pernah membuat app gagal start
+    gara-gara splash.
+    """
+    global _splash_root
+    try:
+        path_splash = os.path.join(_resource_base_dir(), "splash.png")
+        if not os.path.isfile(path_splash):
+            return None
+        root = tk.Tk()
+        root.overrideredirect(True)  # tanpa title bar/border, gaya splash
+        try:
+            root.attributes("-topmost", True)
+        except Exception:
+            pass  # sebagian window manager Linux tidak dukung -topmost, abaikan
+        try:
+            from PIL import Image, ImageTk
+            img = Image.open(path_splash)
+            foto = ImageTk.PhotoImage(img)
+        except Exception:
+            root.destroy()
+            return None
+        lebar, tinggi = foto.width(), foto.height()
+        lebar_layar = root.winfo_screenwidth()
+        tinggi_layar = root.winfo_screenheight()
+        x = (lebar_layar - lebar) // 2
+        y = (tinggi_layar - tinggi) // 2
+        root.geometry(f"{lebar}x{tinggi}+{x}+{y}")
+        label = tk.Label(root, image=foto, borderwidth=0)
+        label.image = foto  # cegah PhotoImage di-garbage-collect
+        label.pack()
+        root.update()
+        _splash_root = root
+        return root
+    except Exception:
+        return None
+
+
+def _tutup_splash_awal():
+    """Tutup & hancurkan splash custom (kalau ada). Dipanggil dari
+    HisabWinApp.__init__ setelah UI utama siap, bersamaan dgn pyi_splash.
+    close(). Aman dipanggil berkali-kali/walau splash tidak pernah dibuat.
+    """
+    global _splash_root
+    if _splash_root is not None:
+        try:
+            _splash_root.destroy()
+        except Exception:
+            pass
+        _splash_root = None
+
+
+try:
+    # Kalau ini build Windows PyInstaller dgn --splash aktif, bootloader-nya
+    # SUDAH menampilkan splash native duluan sebelum baris Python manapun
+    # jalan -- pyi_splash bisa diimpor di sini artinya splash native itu
+    # sedang tampil. Splash custom di bawah ini SENGAJA di-skip supaya
+    # tidak dobel (dua jendela splash bertumpuk). pyi_splash TETAP akan
+    # ditutup nanti lewat pyi_splash.close() di HisabWinApp.__init__.
+    import pyi_splash  # noqa: F401
+    _splash_native_aktif = True
+except ImportError:
+    _splash_native_aktif = False
+
+if not _splash_native_aktif:
+    _tampilkan_splash_awal()
+
+
+# =========================================================
 #  MANAJEMEN KERNEL JPL (de421 bawaan + de440/de441 opsional)
 # =========================================================
 #
@@ -96,6 +195,18 @@ KERNEL_CATALOG = {
         "bundled": False,
     },
 }
+
+
+def label_kernel_jpl_aktif():
+    kid = muat_kernel_aktif()
+    return f"JPL {kid.upper()}"
+
+
+def bsp_kernel_jpl_aktif():
+    kid = muat_kernel_aktif()
+    info = KERNEL_CATALOG.get(kid, KERNEL_CATALOG.get("de421", {}))
+    files = info.get("files", [{}])
+    return files[0].get("nama", f"{kid}.bsp") if files else f"{kid}.bsp"
 
 KERNEL_DEFAULT_ID = "de421"
 
@@ -325,6 +436,22 @@ WARNA_TERMINAL_FG_MUTED = "#3FB950"  # sedikit lebih redup, dipakai prompt/prefi
                                             # bold-saja lewat style.map tidak kelihatan
                                             # bedanya di beberapa sistem/render font
 
+
+# =========================================================
+#  FITUR "PETA LANGIT" (1.0.2) -- rasi bintang, planet, Matahari, Bulan.
+#  Modul terpisah (starmap.py), diinisialisasi di sini supaya tahu folder
+#  aset (sama seperti de421.bsp dkk, lihat _resource_base_dir) & ikut tema
+#  warna/font di atas. starmap.py SENGAJA tidak "import hisabwin" balik --
+#  lihat komentar di kepala starmap.py soal alasan circular-import.
+# =========================================================
+import starmap
+starmap.inisialisasi(
+    folder_aset=_resource_base_dir(),
+    WARNA_BG=WARNA_BG, WARNA_PANEL=WARNA_PANEL, WARNA_AKSEN=WARNA_AKSEN,
+    WARNA_TEKS=WARNA_TEKS, WARNA_TEKS_MUTED=WARNA_TEKS_MUTED, WARNA_BORDER=WARNA_BORDER,
+    FONT_UTAMA=FONT_UTAMA, FONT_UTAMA_BOLD=FONT_UTAMA_BOLD, FONT_JUDUL=FONT_JUDUL,
+    FONT_KECIL=FONT_KECIL,
+)
 
 # =========================================================
 #  UTILITAS
@@ -695,6 +822,20 @@ def gast_derajat(jd_ut, T, dpsi_deg, eps_deg):
             + 0.000387933 * T ** 2 - T ** 3 / 38710000.0) % 360
     eq_equinox = dpsi_deg * np.cos(np.radians(eps_deg))  # koreksi nutasi -> GAST
     return (gmst + eq_equinox) % 360
+
+
+# Fungsi murni astronomi di atas dipakai ULANG oleh starmap.py (fitur Peta
+# Langit, 1.0.2) lewat dependency injection -- BUKAN "import hisabwin"
+# (lihat komentar di kepala starmap.py). Dikumpulkan jadi satu dict supaya
+# tinggal dikirim apa adanya tiap kali starmap.hitung_langit() dipanggil.
+ASTRO_FUNCS = {
+    "julian_day": julian_day,
+    "delta_t_detik": delta_t_detik,
+    "gast_derajat": gast_derajat,
+    "nutasi_singkat": nutasi_singkat,
+    "posisi_matahari": posisi_matahari,
+    "posisi_bulan": posisi_bulan,
+}
 
 
 def altitude_geosentris(lat_deg, dec_deg, H_deg):
@@ -3156,26 +3297,12 @@ def _tentukan_awal_bulan(tanggal_ijtimak, waktu_ijtimak, kriteria, ts, eph,
 
 
 def bandingkan_kalender_mabims_khgt(tahun_h, ts=None, eph=None, mode="ringan",
-                                     progress_cb=lambda msg: None):
+                                     bulan_pilihan=None, progress_cb=lambda msg: None):
     """Bangun tabel perbandingan AWAL BULAN Hijriyah versi MABIMS vs KHGT
     Muhammadiyah, utk SATU tahun Hijriyah (tahun_h), dari ijtimak ASLI
-    (astronomis) yg dilabeli otomatis lewat beri_label_hijriyah() (hisab
-    urfi cuma dipakai sbg penunjuk arah label bulan, BUKAN sbg sumber
-    tanggal -- tanggal MABIMS/KHGT selalu dari astronomi sungguhan).
-
-    mode='ringan' -> tidak butuh ts/eph (VSOP87+ELP2000, dipakai default).
-    mode='jpl' -> presisi tinggi, WAJIB isi ts & eph.
-
-    Return: list of dict (bulan 1..12), keys:
-      'bulan_h', 'nama_bulan_h', 'waktu_ijtimak',
-      'tanggal_mabims', 'tanggal_khgt' (datetime tengah malam, awal bulan
-      versi masing2 kriteria), 'beda' (bool, True kalau kedua tanggal
-      beda -- potensi beda hari raya/awal bulan antar kriteria).
+    (astronomis) yg dilabeli otomatis lewat beri_label_hijriyah().
+    Jika bulan_pilihan diberikan (list/set 1..12), HANYA bulan-bulan tsb yang dihitung.
     """
-    # Cari rentang tahun Masehi yg mencakup tahun_h penuh (1 Hijriyah tahun
-    # selalu overlap 1-2 tahun Masehi, kadang nyerempet perbatasan) --
-    # perkiraan kasar (622 + tahun_h*0.970229) lalu diperlebar +-1 tahun
-    # Masehi sbg margin aman.
     tahun_m_perkiraan = int(622 + tahun_h * 0.970229)
     ijtimak_semua = []
     for tahun_m in range(tahun_m_perkiraan - 1, tahun_m_perkiraan + 2):
@@ -3184,6 +3311,12 @@ def bandingkan_kalender_mabims_khgt(tahun_h, ts=None, eph=None, mode="ringan",
 
     label_semua = beri_label_hijriyah(ijtimak_semua)
     label_tahun_ini = [l for l in label_semua if l["tahun_h"] == tahun_h]
+
+    # OPTIMASI BESAR: saring bulan SEBELUM evaluasi kriteria hilal berat (_tentukan_awal_bulan)
+    if bulan_pilihan is not None:
+        set_b = set(bulan_pilihan)
+        label_tahun_ini = [l for l in label_tahun_ini if l["bulan_h"] in set_b]
+
     label_tahun_ini.sort(key=lambda l: l["bulan_h"])
 
     hasil = []
@@ -3207,6 +3340,24 @@ def bandingkan_kalender_mabims_khgt(tahun_h, ts=None, eph=None, mode="ringan",
         })
 
     return hasil
+
+
+def bandingkan_kalender_mabims_khgt_rentang(tahun_awal_h, tahun_akhir_h, bulan_pilihan=None,
+                                             ts=None, eph=None, mode="ringan",
+                                             progress_cb=lambda msg: None):
+    """Versi rentang tahun & pilihan daftar bulan untuk bandingkan_kalender_mabims_khgt."""
+    hasil_semua = []
+    total_tahun = tahun_akhir_h - tahun_awal_h + 1
+    for idx, th in enumerate(range(tahun_awal_h, tahun_akhir_h + 1), 1):
+        progress_cb(f"Memproses tahun {th} H ({idx}/{total_tahun})...")
+        h_tahun = bandingkan_kalender_mabims_khgt(th, ts=ts, eph=eph, mode=mode,
+                                                   bulan_pilihan=bulan_pilihan,
+                                                   progress_cb=progress_cb)
+        for item in h_tahun:
+            item_copy = dict(item)
+            item_copy["tahun_h"] = th
+            hasil_semua.append(item_copy)
+    return hasil_semua
 
 
 def _cari_ijtimak_sekitar_tanggal(tanggal_masehi):
@@ -4127,6 +4278,61 @@ ZONA_WAKTU_PILIHAN = [
     ("WIT (UTC+9)", 9.0),
     ("UTC+0", 0.0),
     ("Custom...", None),
+]
+
+# Daftar zona waktu lebih lengkap untuk Peta Langit (pilih jam lokal)
+ZONA_WAKTU_PETA_LANGIT = [
+    # Indonesia
+    ("WIB — Jakarta, Surabaya (UTC+7)", 7.0),
+    ("WITA — Bali, Makassar (UTC+8)", 8.0),
+    ("WIT — Jayapura, Ambon (UTC+9)", 9.0),
+    # Asia
+    ("WIB — Bangkok, Hanoi (UTC+7)", 7.0),
+    ("SGT — Singapore, KL (UTC+8)", 8.0),
+    ("JST — Tokyo, Seoul (UTC+9)", 9.0),
+    ("CST — Beijing, Shanghai (UTC+8)", 8.0),
+    ("IST — India, Sri Lanka (UTC+5:30)", 5.5),
+    ("PKT — Pakistan (UTC+5)", 5.0),
+    ("BST — Dhaka (UTC+6)", 6.0),
+    ("MMT — Myanmar (UTC+6:30)", 6.5),
+    ("ICT — Indochina (UTC+7)", 7.0),
+    ("PHT — Philippines (UTC+8)", 8.0),
+    ("AEST — Sydney, Melbourne (UTC+10)", 10.0),
+    ("NZST — Auckland (UTC+12)", 12.0),
+    # Timur Tengah & Asia Tengah
+    ("GST — Dubai, Abu Dhabi (UTC+4)", 4.0),
+    ("AST — Riyadh, Baghdad (UTC+3)", 3.0),
+    ("EET — Kairo, Istanbul (UTC+2)", 2.0),
+    ("TRT — Ankara (UTC+3)", 3.0),
+    ("IRST — Iran (UTC+3:30)", 3.5),
+    ("AFT — Afghanistan (UTC+4:30)", 4.5),
+    ("UZT — Tashkent (UTC+5)", 5.0),
+    ("KRAT — Krasnoyarsk (UTC+7)", 7.0),
+    ("IRKT — Irkutsk (UTC+8)", 8.0),
+    # Eropa & Afrika
+    ("UTC — London, Reykjavik (UTC+0)", 0.0),
+    ("CET — Paris, Berlin, Rome (UTC+1)", 1.0),
+    ("EET — Helsinki, Athens (UTC+2)", 2.0),
+    ("MSK — Moscow (UTC+3)", 3.0),
+    ("WAT — Lagos, Kinshasa (UTC+1)", 1.0),
+    ("EAT — Nairobi, Addis Ababa (UTC+3)", 3.0),
+    ("SAST — Johannesburg (UTC+2)", 2.0),
+    # Amerika
+    ("AST — Halifax (UTC-4)", -4.0),
+    ("EST — New York, Miami (UTC-5)", -5.0),
+    ("CST — Chicago, Dallas (UTC-6)", -6.0),
+    ("MST — Denver, Phoenix (UTC-7)", -7.0),
+    ("PST — Los Angeles, Seattle (UTC-8)", -8.0),
+    ("AKST — Anchorage (UTC-9)", -9.0),
+    ("HST — Honolulu (UTC-10)", -10.0),
+    ("BRT — Sao Paulo, Rio (UTC-3)", -3.0),
+    ("ART — Buenos Aires (UTC-3)", -3.0),
+    ("PET — Lima (UTC-5)", -5.0),
+    ("COT — Bogota (UTC-5)", -5.0),
+    ("VET — Caracas (UTC-4)", -4.0),
+    ("CLT — Santiago (UTC-4)", -4.0),
+    # Lainnya
+    ("UTC — Koordinat Universal (UTC+0)", 0.0),
 ]
 
 PRESET_SUDUT = {
@@ -6083,6 +6289,20 @@ class ClosableNotebook(ttk.Notebook):
 class HisabWinApp(tk.Tk):
     def __init__(self):
         super().__init__()
+        # Paksa root ini jadi default root Tkinter yg "benar". Perlu, karena
+        # kalau splash custom (_tampilkan_splash_awal, dipakai saat dev-run
+        # tanpa pyi_splash) sempat membuat tk.Tk() sendiri lalu di-destroy(),
+        # tkinter._default_root TIDAK otomatis direset -- jadi tetap nunjuk
+        # ke interpreter splash yg sudah mati. Akibatnya semua tk.PhotoImage(
+        # ...) tanpa master= eksplisit (mis. di _buat_gambar_tab_bulat /
+        # _buat_icon_close) nempel ke interpreter basi itu, dan meledak saat
+        # dipakai lewat style.element_create() di interpreter utama:
+        # "TclError: image 'pyimageN' doesn't exist". Hanya muncul saat
+        # `python hisabwin.py` (splash custom dipakai); build exe --splash
+        # tidak kena karena splash custom itu dilewati (lihat pyi_splash).
+        import tkinter
+        tkinter._default_root = self
+
         self.title("HisabWin — Peta Visibilitas Hilal")
         self.geometry("1400x800")
         self.minsize(1000, 600)
@@ -6169,6 +6389,13 @@ class HisabWinApp(tk.Tk):
             pyi_splash.close()
         except ImportError:
             pass
+
+        # Tutup juga splash custom (_tampilkan_splash_awal() di dekat awal
+        # file) -- ini yang aktif dipakai di build Linux (dan Nuitka di
+        # platform manapun), karena pyi_splash di atas cuma ada di build
+        # Windows PyInstaller. Aman dipanggil walau splash custom tidak
+        # pernah dibuat (mis. splash.png tidak ditemukan).
+        _tutup_splash_awal()
 
         # Batalkan job after() yang masih terjadwal SEBELUM window dihancurkan.
         # Tanpa ini, saat user menutup window sementara _poll_antrian masih
@@ -6566,7 +6793,7 @@ class HisabWinApp(tk.Tk):
             self._log("Mode Ringan (VSOP87+ELP2000) aktif — tidak perlu unduh apa pun. Siap dipakai.")
             self.btn_cari.config(state="normal")
         else:
-            self._log("Mode Presisi (JPL DE421) aktif — memuat ephemeris de421.bsp, mohon tunggu...")
+            self._log(f"Mode Presisi ({label_kernel_jpl_aktif()}) aktif — memuat ephemeris {bsp_kernel_jpl_aktif()}, mohon tunggu...")
             threading.Thread(target=self._muat_ephemeris, daemon=True).start()
 
     def _on_ganti_mode(self):
@@ -6615,19 +6842,26 @@ class HisabWinApp(tk.Tk):
     def _on_kelola_kernel_jpl(self):
         DialogKernelJPL(self, on_kernel_diganti=self._on_kernel_jpl_diganti)
 
-    def _on_kernel_jpl_diganti(self):
-        """Dipanggil dari DialogKernelJPL setelah user menekan "Pakai
-        kernel ini" pada kernel yang berbeda dari yang sedang aktif.
+    def _teks_radio_jpl(self):
+        kid = muat_kernel_aktif()
+        info = KERNEL_CATALOG.get(kid, KERNEL_CATALOG.get("de421", {}))
+        files = info.get("files", [{}])
+        size = files[0].get("size_mb", 17) if files else 17
+        return f"Presisi ({info.get('label', 'JPL ' + kid.upper())} — {bsp_kernel_jpl_aktif()})"
 
-        Kernel .bsp yang dipakai skyfield.load() hanya diambil SEKALI saat
-        _muat_ephemeris dipanggil dan disimpan di self.eph -- jadi ganti
-        preferensi saja TIDAK otomatis membuat perhitungan berikutnya
-        memakai kernel baru. self.eph/self.ts di-reset di sini supaya
-        _muat_ephemeris() dipanggil ulang (baik sekarang kalau sedang mode
-        Presisi, atau nanti begitu user pindah ke mode Presisi)."""
+    def _perbarui_label_radio_jpl(self):
+        if hasattr(self, "radio_jpl"):
+            self.radio_jpl.config(text=self._teks_radio_jpl())
+        if hasattr(self, "radio_sumber_efemeris_jpl"):
+            self.radio_sumber_efemeris_jpl.config(text=f"Presisi -- Skyfield + {label_kernel_jpl_aktif()} (offline, file lokal)")
+        if hasattr(self, "radio_metode_sholat_jpl"):
+            self.radio_metode_sholat_jpl.config(text=f"Presisi (Skyfield + ephemeris {label_kernel_jpl_aktif()})")
+
+    def _on_kernel_jpl_diganti(self):
         self.eph = None
         self.ts = None
-        self._log("Kernel JPL aktif diganti. Ephemeris akan dimuat ulang.")
+        self._perbarui_label_radio_jpl()
+        self._log(f"Kernel JPL aktif diganti ke {label_kernel_jpl_aktif()} ({bsp_kernel_jpl_aktif()}). Ephemeris akan dimuat ulang.")
         if self.mode.get() == "jpl":
             pernah_mencari = self.ijtimak_times is not None
             teks_tahun = self.entry_tahun.get().strip()
@@ -6769,14 +7003,14 @@ class HisabWinApp(tk.Tk):
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_sholat(), self._tutup_akordeon_gerhana(),
                                   self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter(),
-                                  self._tutup_akordeon_efemeris()))
+                                  self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit()))
 
         # --- Langkah 0: mode perhitungan ---
         frame0 = ttk.LabelFrame(body_hilal, text="0. Mode Perhitungan")
         frame0.pack(fill="x", **pad)
 
         self.radio_jpl = ttk.Radiobutton(
-            frame0, text="Presisi (JPL DE421 — perlu unduh ±17 MB sekali)",
+            frame0, text=self._teks_radio_jpl(),
             value="jpl", variable=self.mode, command=self._on_ganti_mode)
         self.radio_ringan = ttk.Radiobutton(
             frame0, text="Ringan (VSOP87 + ELP2000-82B — tanpa unduh apa pun)",
@@ -6873,7 +7107,7 @@ class HisabWinApp(tk.Tk):
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_gerhana(),
                                   self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter(),
-                                  self._tutup_akordeon_efemeris()))
+                                  self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit()))
 
         # --- Tab tambahan: Waktu Sholat & Arah Kiblat (permanen, selalu ada) ---
         self._bangun_tab_sholat()
@@ -6889,7 +7123,7 @@ class HisabWinApp(tk.Tk):
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter(),
-                                  self._tutup_akordeon_efemeris()))
+                                  self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit()))
         self._bangun_akordeon_gerhana(self._body_akordeon_gerhana, pad)
 
         # --- Bagian akordeon ke-4: Perbandingan Kalender MABIMS vs KHGT
@@ -6904,7 +7138,7 @@ class HisabWinApp(tk.Tk):
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_konverter(),
-                                  self._tutup_akordeon_efemeris()))
+                                  self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit()))
         self._bangun_akordeon_kalbanding(self._body_akordeon_kalbanding, pad)
 
         # --- Tab hasil perbandingan (permanen, sama seperti tab Waktu
@@ -6928,7 +7162,7 @@ class HisabWinApp(tk.Tk):
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
-                                  self._tutup_akordeon_efemeris()))
+                                  self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit()))
         self._bangun_akordeon_konverter(self._body_akordeon_konverter, pad)
 
         # --- Bagian akordeon ke-6: Tabel Efemeris (posisi Matahari & Bulan
@@ -6943,9 +7177,27 @@ class HisabWinApp(tk.Tk):
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
-                                  self._tutup_akordeon_konverter()))
+                                  self._tutup_akordeon_konverter(), self._tutup_akordeon_peta_langit()))
         self._bangun_akordeon_efemeris(self._body_akordeon_efemeris, pad)
         self._bangun_tab_efemeris()
+
+        # --- Bagian akordeon ke-7: Peta Langit (rasi bintang, planet,
+        #     Matahari, Bulan) untuk koordinat & waktu tertentu -- fitur
+        #     baru 1.0.2, TIDAK berkaitan dgn hisab hilal/kriteria MABIMS/
+        #     KHGT, cuma visualisasi langit malam biasa (starmap.py). Beda
+        #     dari akordeon lain: hasilnya jendela Toplevel BARU tiap kali
+        #     ditekan (bukan 1 tab permanen di notebook kanan), supaya bisa
+        #     dibuka berkali-kali (mis. bandingkan 2 waktu berbeda) tanpa
+        #     saling menimpa. ---
+        self._body_akordeon_peta_langit, self._buka_akordeon_peta_langit, \
+            self._tutup_akordeon_peta_langit = \
+            self._buat_bagian_akordeon(
+                tab_kontrol, "🌌 Peta Langit",
+                buka_awal=False,
+                on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
+                                  self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
+                                  self._tutup_akordeon_konverter(), self._tutup_akordeon_efemeris()))
+        self._bangun_akordeon_peta_langit(self._body_akordeon_peta_langit, pad)
 
     def _on_ganti_tab_notebook(self, event=None):
         """Dipanggil tiap kali tab notebook kanan (peta/Waktu Sholat)
@@ -7271,7 +7523,7 @@ class HisabWinApp(tk.Tk):
         if mode == "jpl" and self.eph is None:
             messagebox.showwarning(
                 "Ephemeris belum siap",
-                "Mode Presisi (JPL DE421) dipilih di bagian Visibilitas, tapi "
+                f"Mode Presisi ({label_kernel_jpl_aktif()}) dipilih di bagian Visibilitas, tapi "
                 "ephemeris-nya belum selesai dimuat. Tunggu sebentar, atau "
                 "beralih ke Mode Ringan dulu di bagian 🌙 Visibilitas.")
             return
@@ -7376,60 +7628,110 @@ class HisabWinApp(tk.Tk):
             wraplength=280,
         ).pack(fill="x", padx=10, pady=(4, 6))
 
-        frame1 = ttk.LabelFrame(body, text="1. Pilih Tahun Hijriyah")
+        tahun_h_perkiraan = math.floor((datetime.now().year - 622) / 0.970229)
+
+        # Frame 1: Rentang Tahun
+        frame1 = ttk.LabelFrame(body, text="1. Rentang Tahun Hijriyah")
         frame1.pack(fill="x", **pad)
 
-        ttk.Label(frame1, text="Tahun Hijriyah:").grid(row=0, column=0, padx=6, pady=6)
-        self.entry_tahun_kalbanding = ttk.Entry(frame1, width=10)
-        # Perkiraan awal tahun H saat ini (rumus urfi yg sama dipakai di
-        # beri_label_hijriyah -- cukup sbg NILAI AWAL isian, bukan sumber
-        # tanggal, jadi tidak masalah kalau meleset 1 tahun).
-        tahun_h_perkiraan = math.floor((datetime.now().year - 622) / 0.970229)
-        self.entry_tahun_kalbanding.insert(0, str(tahun_h_perkiraan))
-        self.entry_tahun_kalbanding.grid(row=0, column=1, padx=6, pady=6)
+        ttk.Label(frame1, text="Dari Tahun:").grid(row=0, column=0, padx=4, pady=4, sticky="w")
+        self.entry_tahun_awal_kalbanding = ttk.Entry(frame1, width=6)
+        self.entry_tahun_awal_kalbanding.insert(0, str(tahun_h_perkiraan))
+        self.entry_tahun_awal_kalbanding.grid(row=0, column=1, padx=2, pady=4)
+
+        ttk.Label(frame1, text="s/d:").grid(row=0, column=2, padx=4, pady=4)
+        self.entry_tahun_akhir_kalbanding = ttk.Entry(frame1, width=6)
+        self.entry_tahun_akhir_kalbanding.insert(0, str(tahun_h_perkiraan))
+        self.entry_tahun_akhir_kalbanding.grid(row=0, column=3, padx=2, pady=4)
+
+        # Frame 2: Pilihan Bulan (Checkbox 12 Bulan)
+        frame2 = ttk.LabelFrame(body, text="2. Pilihan Bulan Hijriyah")
+        frame2.pack(fill="x", **pad)
+
+        frame_btn_pilihan = ttk.Frame(frame2)
+        frame_btn_pilihan.pack(fill="x", padx=4, pady=(4, 2))
+        ttk.Button(frame_btn_pilihan, text="Pilih Semua", command=self._pilih_semua_bulan_kalbanding).pack(side="left", padx=(0, 4))
+        ttk.Button(frame_btn_pilihan, text="Batal Semua", command=self._batal_semua_bulan_kalbanding).pack(side="left")
+
+        grid_bulan = ttk.Frame(frame2)
+        grid_bulan.pack(fill="x", padx=4, pady=(2, 6))
+
+        self.vars_bulan_kalbanding = {}
+        for idx_b, nama_b in enumerate(_NAMA_BULAN_HIJRIYAH, 1):
+            var = tk.BooleanVar(value=True)
+            self.vars_bulan_kalbanding[idx_b] = var
+            row = (idx_b - 1) % 6
+            col = (idx_b - 1) // 6
+            chk = ttk.Checkbutton(grid_bulan, text=f"{idx_b}. {nama_b}", variable=var)
+            chk.grid(row=row, column=col, sticky="w", padx=4, pady=1)
 
         self.btn_bandingkan_kalender = ttk.Button(
-            frame1, text="Bandingkan", command=self._on_bandingkan_kalender,
+            body, text="Bandingkan Kalender", command=self._on_bandingkan_kalender,
             style="Aksen.TButton")
-        self.btn_bandingkan_kalender.grid(row=0, column=2, padx=6, pady=6)
+        self.btn_bandingkan_kalender.pack(fill="x", padx=10, pady=(6, 4))
 
         ttk.Label(
-            frame1,
+            body,
             text="Memakai Mode Perhitungan yang sama seperti bagian "
                  "🌙 Visibilitas di atas (Ringan/Presisi).",
             font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left",
             wraplength=280,
-        ).grid(row=1, column=0, columnspan=3, padx=6, pady=(0, 6), sticky="w")
+        ).pack(fill="x", padx=10, pady=(0, 6))
+
+    def _pilih_semua_bulan_kalbanding(self):
+        for var in getattr(self, "vars_bulan_kalbanding", {}).values():
+            var.set(True)
+
+    def _batal_semua_bulan_kalbanding(self):
+        for var in getattr(self, "vars_bulan_kalbanding", {}).values():
+            var.set(False)
 
     def _on_bandingkan_kalender(self):
-        teks_tahun = self.entry_tahun_kalbanding.get().strip()
-        if not (teks_tahun.isdigit() and 1 <= len(teks_tahun) <= 4):
-            messagebox.showerror("Input tidak valid", "Masukkan angka tahun Hijriyah, mis. 1447.")
+        t_awal_txt = self.entry_tahun_awal_kalbanding.get().strip()
+        t_akhir_txt = self.entry_tahun_akhir_kalbanding.get().strip()
+        if not (t_awal_txt.isdigit() and 1 <= len(t_awal_txt) <= 4 and
+                t_akhir_txt.isdigit() and 1 <= len(t_akhir_txt) <= 4):
+            messagebox.showerror("Input tidak valid", "Masukkan rentang tahun Hijriyah berupa angka, mis. 1447 s/d 1448.")
             return
 
-        tahun_h = int(teks_tahun)
-        mode = self.mode.get()
+        tahun_awal = int(t_awal_txt)
+        tahun_akhir = int(t_akhir_txt)
+        if tahun_awal > tahun_akhir:
+            messagebox.showerror("Input tidak valid", "Tahun awal harus lebih kecil atau sama dengan tahun akhir.")
+            return
+        if tahun_akhir - tahun_awal > 30:
+            messagebox.showerror("Rentang terlalu panjang", "Rentang perbandingan maksimal 30 tahun sekaligus.")
+            return
 
+        bulan_terpilih = [b_id for b_id, var in self.vars_bulan_kalbanding.items() if var.get()]
+        if not bulan_terpilih:
+            messagebox.showwarning("Pilihan Kosong", "Pilih minimal satu bulan Hijriyah yang ingin dibandingkan.")
+            return
+
+        mode = self.mode.get()
         if mode == "jpl" and self.eph is None:
             messagebox.showwarning(
                 "Ephemeris belum siap",
-                "Mode Presisi (JPL DE421) dipilih di bagian Visibilitas, tapi "
+                f"Mode Presisi ({label_kernel_jpl_aktif()}) dipilih di bagian Visibilitas, tapi "
                 "ephemeris-nya belum selesai dimuat. Tunggu sebentar, atau "
                 "beralih ke Mode Ringan dulu di bagian 🌙 Visibilitas.")
             return
 
         self.btn_bandingkan_kalender.config(state="disabled")
-        self._log(f"\nMembandingkan kalender MABIMS vs KHGT Muhammadiyah untuk tahun {tahun_h} H...")
+        msg_t = f"{tahun_awal} H" if tahun_awal == tahun_akhir else f"{tahun_awal} H s/d {tahun_akhir} H"
+        msg_b = f"{len(bulan_terpilih)} bulan terpilih"
+        self._log(f"\nMembandingkan kalender MABIMS vs KHGT Muhammadiyah ({msg_t}, {msg_b})...")
 
         threading.Thread(target=self._bandingkan_kalender_thread,
-                          args=(tahun_h, mode), daemon=True).start()
+                          args=(tahun_awal, tahun_akhir, bulan_terpilih, mode), daemon=True).start()
 
-    def _bandingkan_kalender_thread(self, tahun_h, mode):
+    def _bandingkan_kalender_thread(self, tahun_awal, tahun_akhir, bulan_terpilih, mode):
         try:
             progress_cb = lambda msg: self.antrian.put(("progress", msg))
-            hasil = bandingkan_kalender_mabims_khgt(
-                tahun_h, ts=self.ts, eph=self.eph, mode=mode, progress_cb=progress_cb)
-            self.antrian.put(("kalbanding_ok", (tahun_h, mode, hasil)))
+            hasil = bandingkan_kalender_mabims_khgt_rentang(
+                tahun_awal, tahun_akhir, bulan_pilihan=bulan_terpilih,
+                ts=self.ts, eph=self.eph, mode=mode, progress_cb=progress_cb)
+            self.antrian.put(("kalbanding_ok", ((tahun_awal, tahun_akhir, len(bulan_terpilih)), mode, hasil)))
         except Exception as e:
             self.antrian.put(("kalbanding_error", f"Gagal membandingkan kalender: {e}"))
 
@@ -7452,24 +7754,53 @@ class HisabWinApp(tk.Tk):
             panel_hasil, text="", foreground=WARNA_TEKS_MUTED)
         self.label_ringkasan_kalbanding.pack(anchor="w", pady=(0, 8))
 
-        kolom = ("bulan_h", "waktu_ijtimak", "tanggal_mabims", "tanggal_khgt", "status")
-        judul_kolom = {"bulan_h": "Bulan Hijriyah", "waktu_ijtimak": "Waktu Ijtimak (UTC)",
+        # Notebook internal: Tab Tabel & Tab Chart Statistik
+        self.notebook_kalbanding = ttk.Notebook(panel_hasil)
+        self.notebook_kalbanding.pack(fill="both", expand=True)
+
+        # --- Tab 1: Tabel ---
+        tab_tabel = ttk.Frame(self.notebook_kalbanding)
+        self.notebook_kalbanding.add(tab_tabel, text="📋 Tabel Perbandingan")
+
+        kolom = ("tahun_h", "bulan_h", "waktu_ijtimak", "tanggal_mabims", "tanggal_khgt", "status")
+        judul_kolom = {"tahun_h": "Tahun H", "bulan_h": "Bulan Hijriyah", "waktu_ijtimak": "Waktu Ijtimak (UTC)",
                         "tanggal_mabims": "Awal Bulan — MABIMS", "tanggal_khgt": "Awal Bulan — KHGT",
                         "status": "Status"}
+        frame_tree_kalbanding = ttk.Frame(tab_tabel)
+        frame_tree_kalbanding.pack(fill="both", expand=True, padx=4, pady=4)
+
         self.tree_kalbanding = ttk.Treeview(
-            panel_hasil, columns=kolom, show="headings", height=14)
+            frame_tree_kalbanding, columns=kolom, show="headings", height=14)
         for kunci in kolom:
             self.tree_kalbanding.heading(kunci, text=judul_kolom[kunci])
-            lebar = 170 if kunci == "waktu_ijtimak" else (150 if "tanggal" in kunci else 130)
+            lebar = 90 if kunci == "tahun_h" else (170 if kunci == "waktu_ijtimak" else (150 if "tanggal" in kunci else 130))
             self.tree_kalbanding.column(kunci, width=lebar, anchor="center")
         self.tree_kalbanding.tag_configure("beda", background="#FDECEA")
         self.tree_kalbanding.tag_configure("sama", background=WARNA_PANEL)
 
-        scroll_tree_y = ttk.Scrollbar(panel_hasil, orient="vertical",
+        scroll_tree_y = ttk.Scrollbar(frame_tree_kalbanding, orient="vertical",
                                        command=self.tree_kalbanding.yview)
-        self.tree_kalbanding.configure(yscrollcommand=scroll_tree_y.set)
-        self.tree_kalbanding.pack(side="left", fill="both", expand=True)
-        scroll_tree_y.pack(side="left", fill="y")
+        scroll_tree_x = ttk.Scrollbar(frame_tree_kalbanding, orient="horizontal",
+                                       command=self.tree_kalbanding.xview)
+        self.tree_kalbanding.configure(yscrollcommand=scroll_tree_y.set, xscrollcommand=scroll_tree_x.set)
+
+        self.tree_kalbanding.grid(row=0, column=0, sticky="nsew")
+        scroll_tree_y.grid(row=0, column=1, sticky="ns")
+        scroll_tree_x.grid(row=1, column=0, sticky="ew")
+
+        frame_tree_kalbanding.grid_rowconfigure(0, weight=1)
+        frame_tree_kalbanding.grid_columnconfigure(0, weight=1)
+
+        # --- Tab 2: Chart Statistik ---
+        tab_chart = ttk.Frame(self.notebook_kalbanding)
+        self.notebook_kalbanding.add(tab_chart, text="📊 Chart Statistik")
+
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+        self.fig_chart_kalbanding = Figure(figsize=(8, 4), dpi=100, facecolor=WARNA_PANEL)
+        self.canvas_chart_kalbanding = FigureCanvasTkAgg(self.fig_chart_kalbanding, master=tab_chart)
+        self.canvas_chart_kalbanding.get_tk_widget().pack(fill="both", expand=True, padx=4, pady=4)
 
         panel_bawah = ttk.Frame(frame)
         panel_bawah.pack(fill="x", padx=8, pady=(0, 8))
@@ -7484,6 +7815,89 @@ class HisabWinApp(tk.Tk):
             command=self._on_simpan_csv_kalbanding, state="disabled")
         self.btn_simpan_csv_kalbanding.pack(anchor="e", pady=(6, 0))
 
+    
+    def _render_chart_kalbanding(self, hasil, jumlah_beda, lbl_th):
+        fig = getattr(self, "fig_chart_kalbanding", None)
+        if fig is None:
+            return
+
+        fig.clear()
+        if not hasil:
+            fig.text(0.5, 0.5, "Belum ada data perbandingan.", ha="center", va="center", fontsize=11, color=WARNA_TEKS_MUTED)
+            self.canvas_chart_kalbanding.draw_idle()
+            return
+
+        jumlah_total = len(hasil)
+        jumlah_sama = jumlah_total - jumlah_beda
+
+        # Subplot 1: Donut Chart Persentase Kesamaan vs Perbedaan
+        ax1 = fig.add_subplot(121)
+        ax1.set_facecolor(WARNA_PANEL)
+        label_pie = ['Sama (Awal Bulan)', 'Beda Kriteria']
+        nilai_pie = [jumlah_sama, jumlah_beda]
+        warna_pie = ['#0F6E5B', '#E63946']
+
+        # Hindari pie 0
+        if jumlah_beda == 0:
+            label_pie = ['100% Sama']
+            nilai_pie = [jumlah_sama]
+            warna_pie = ['#0F6E5B']
+        elif jumlah_sama == 0:
+            label_pie = ['100% Beda']
+            nilai_pie = [jumlah_beda]
+            warna_pie = ['#E63946']
+
+        wedges, texts, autotexts = ax1.pie(
+            nilai_pie, labels=label_pie, autopct='%1.1f%%',
+            colors=warna_pie, startangle=90, pctdistance=0.72,
+            wedgeprops=dict(width=0.55, edgecolor='white', linewidth=2),
+            textprops=dict(fontsize=9, fontweight='bold')
+        )
+        for at in autotexts:
+            at.set_fontsize(10)
+            at.set_fontweight('bold')
+            at.set_color('white')
+
+        ax1.set_title(f"Persentase Kesamaan ({lbl_th})", fontsize=10, fontweight="bold", pad=12)
+
+        # Subplot 2: Bar Chart Frekuensi Perbedaan per Bulan Hijriyah
+        ax2 = fig.add_subplot(122)
+        ax2.set_facecolor(WARNA_PANEL)
+
+        frekuensi_bulan = {i: 0 for i in range(1, 13)}
+        for b in hasil:
+            if b["beda"]:
+                frekuensi_bulan[b["bulan_h"]] += 1
+
+        x_indices = list(range(1, 13))
+        y_counts = [frekuensi_bulan[i] for i in x_indices]
+        nama_singkat = ["1.Muh", "2.Saf", "3.RabI", "4.RabII", "5.JumI", "6.JumII",
+                        "7.Raj", "8.Sya", "9.Ram", "10.Syaw", "11.ZulQ", "12.ZulH"]
+
+        bars = ax2.bar(x_indices, y_counts, color='#E63946', alpha=0.88, width=0.55)
+
+        # Tambahkan label nilai di atas tiap bar
+        for bar, val in zip(bars, y_counts):
+            if val > 0:
+                ax2.annotate(f"{val}", (bar.get_x() + bar.get_width() / 2, bar.get_height()),
+                             xytext=(0, 3), textcoords="offset points",
+                             ha='center', va='bottom', fontsize=9, fontweight='bold', color='#900C3F')
+
+        ax2.set_xticks(x_indices)
+        ax2.set_xticklabels(nama_singkat, fontsize=8, rotation=35, ha='right')
+        ax2.set_ylabel("Jumlah Bulan Beda", fontsize=8, fontweight="bold")
+        ax2.set_title("Frekuensi Perbedaan per Bulan Hijriyah", fontsize=10, fontweight="bold", pad=12)
+        ax2.spines['top'].set_visible(False)
+        ax2.spines['right'].set_visible(False)
+        ax2.grid(axis='y', linestyle=':', alpha=0.6)
+
+        max_y = max(y_counts) if y_counts else 1
+        ax2.set_ylim(0, max(max_y + 1, 3))
+
+        fig.subplots_adjust(bottom=0.22, top=0.88, left=0.08, right=0.96, wspace=0.35)
+        self.canvas_chart_kalbanding.draw_idle()
+
+
     def _pastikan_tab_kalbanding_tampil(self):
         if not self._tab_kalbanding_ditambahkan:
             self._hapus_tab_awal()
@@ -7491,8 +7905,16 @@ class HisabWinApp(tk.Tk):
             self._tab_kalbanding_ditambahkan = True
         self.notebook.select(self._frame_kalbanding)
 
-    def _tampilkan_kalbanding(self, tahun_h, mode, hasil):
-        self._hasil_kalbanding_terakhir = (tahun_h, mode, hasil)
+    def _tampilkan_kalbanding(self, info_rentang, mode, hasil):
+        self._hasil_kalbanding_terakhir = (info_rentang, mode, hasil)
+
+        if isinstance(info_rentang, tuple):
+            if len(info_rentang) == 3:
+                (t_awal, t_akhir, jml_b) = info_rentang
+            else:
+                (t_awal, t_akhir, b_awal, b_akhir) = info_rentang
+        else:
+            t_awal = t_akhir = info_rentang
 
         self.tree_kalbanding.delete(*self.tree_kalbanding.get_children())
         jumlah_beda = 0
@@ -7504,27 +7926,33 @@ class HisabWinApp(tk.Tk):
                 status, tag = "⚠️ Beda", "beda"
             else:
                 status, tag = "✅ Sama", "sama"
+            th_str = f"{b.get('tahun_h', t_awal)} H"
             self.tree_kalbanding.insert("", "end", tags=(tag,), values=(
+                th_str,
                 f"{b['bulan_h']}. {b['nama_bulan_h']}",
                 format_waktu_ijtimak(b["waktu_ijtimak"]),
                 teks_mabims, teks_khgt, status,
             ))
 
-        metode_label = "Presisi (Skyfield + JPL DE421)" if mode == "jpl" else "Ringan (VSOP87+ELP2000)"
+        metode_label = f"Presisi (Skyfield + {label_kernel_jpl_aktif()})" if mode == "jpl" else "Ringan (VSOP87+ELP2000)"
+        lbl_th = f"{t_awal} H" if t_awal == t_akhir else f"{t_awal} H – {t_akhir} H"
         self.label_judul_kalbanding.config(
-            text=f"Perbandingan Kalender {tahun_h} H — MABIMS vs KHGT Muhammadiyah "
+            text=f"Perbandingan Kalender {lbl_th} — MABIMS vs KHGT Muhammadiyah "
                  f"({len(hasil)} bulan, metode: {metode_label})")
         if len(hasil) == 0:
             self.label_ringkasan_kalbanding.config(
-                text="Tidak ditemukan bulan Hijriyah pada tahun tersebut.")
+                text="Tidak ditemukan bulan Hijriyah pada rentang tersebut.")
         else:
             self.label_ringkasan_kalbanding.config(
                 text=f"{jumlah_beda} dari {len(hasil)} bulan berbeda tanggal awal bulan "
                      f"antara MABIMS dan KHGT Muhammadiyah.")
 
+        # Render Chart Statistik
+        self._render_chart_kalbanding(hasil, jumlah_beda, lbl_th)
+
         self.btn_simpan_csv_kalbanding.config(state="normal" if hasil else "disabled")
         self._pastikan_tab_kalbanding_tampil()
-        self._log(f"Perbandingan kalender {tahun_h} H selesai "
+        self._log(f"Perbandingan kalender {lbl_th} selesai "
                    f"({jumlah_beda} dari {len(hasil)} bulan berbeda).")
         self.btn_bandingkan_kalender.config(state="normal")
 
@@ -7710,7 +8138,7 @@ class HisabWinApp(tk.Tk):
         if mode == "jpl" and self.eph is None:
             messagebox.showwarning(
                 "Ephemeris belum siap",
-                "Mode Presisi (JPL DE421) dipilih di bagian Visibilitas, tapi "
+                f"Mode Presisi ({label_kernel_jpl_aktif()}) dipilih di bagian Visibilitas, tapi "
                 "ephemeris-nya belum selesai dimuat. Tunggu sebentar, atau "
                 "beralih ke Mode Ringan dulu di bagian 🌙 Visibilitas.")
             return
@@ -7919,8 +8347,8 @@ class HisabWinApp(tk.Tk):
         self.entry_objek_kustom_id = ttk.Entry(frame_kustom, width=12)
         self.entry_objek_kustom_id.grid(row=0, column=1, padx=(4, 0), sticky="w")
         self.btn_cari_objek_horizons = ttk.Button(
-            frame_kustom, text="🔍 Cari...", command=self._on_cari_objek_horizons)
-        self.btn_cari_objek_horizons.grid(row=0, column=2, padx=(4, 0), sticky="w")
+            frame_kustom, text="🔍 Cari di JPL Horizons...", command=self._on_cari_objek_horizons)
+        self.btn_cari_objek_horizons.grid(row=1, column=0, columnspan=2, padx=(0, 0), pady=(4, 0), sticky="w")
         ttk.Label(
             frame_objek,
             text="Khusus mode JPL Horizons -- isi ID Horizons langsung kalau sudah "
@@ -8186,8 +8614,11 @@ class HisabWinApp(tk.Tk):
         # tabel baru dibuat (lihat _rebuild_kolom_tree_efemeris).
         self._kolom_dasar_efemeris = kolom
         self._judul_kolom_dasar_efemeris = judul_kolom
+        frame_tree_efemeris = ttk.Frame(panel_hasil)
+        frame_tree_efemeris.pack(fill="both", expand=True)
+
         self.tree_efemeris = ttk.Treeview(
-            panel_hasil, columns=kolom, show="headings", height=20)
+            frame_tree_efemeris, columns=kolom, show="headings", height=20)
         for kunci in kolom:
             self.tree_efemeris.heading(kunci, text=judul_kolom[kunci])
             lebar = 90 if kunci == "jam" else 120
@@ -8195,11 +8626,18 @@ class HisabWinApp(tk.Tk):
         self.tree_efemeris.tag_configure("siang", background="#FFF9E6")
         self.tree_efemeris.tag_configure("malam", background=WARNA_PANEL)
 
-        scroll_tree_y = ttk.Scrollbar(panel_hasil, orient="vertical",
+        scroll_tree_y = ttk.Scrollbar(frame_tree_efemeris, orient="vertical",
                                        command=self.tree_efemeris.yview)
-        self.tree_efemeris.configure(yscrollcommand=scroll_tree_y.set)
-        self.tree_efemeris.pack(side="left", fill="both", expand=True)
-        scroll_tree_y.pack(side="left", fill="y")
+        scroll_tree_x = ttk.Scrollbar(frame_tree_efemeris, orient="horizontal",
+                                       command=self.tree_efemeris.xview)
+        self.tree_efemeris.configure(yscrollcommand=scroll_tree_y.set, xscrollcommand=scroll_tree_x.set)
+
+        self.tree_efemeris.grid(row=0, column=0, sticky="nsew")
+        scroll_tree_y.grid(row=0, column=1, sticky="ns")
+        scroll_tree_x.grid(row=1, column=0, sticky="ew")
+
+        frame_tree_efemeris.grid_rowconfigure(0, weight=1)
+        frame_tree_efemeris.grid_columnconfigure(0, weight=1)
 
         panel_bawah = ttk.Frame(frame)
         panel_bawah.pack(fill="x", padx=8, pady=(0, 8))
@@ -8367,6 +8805,287 @@ class HisabWinApp(tk.Tk):
             messagebox.showinfo("Tersimpan", f"Tabel efemeris disimpan ke:\n{path}")
         except OSError as e:
             messagebox.showerror("Gagal menyimpan", f"Tidak bisa menulis file CSV:\n{e}")
+
+    # =====================================================
+    #  Akordeon ke-7: Peta Langit (starmap.py) -- fitur baru 1.0.2
+    # =====================================================
+    def _bangun_akordeon_peta_langit(self, body, pad):
+        """Isi badan akordeon "🌌 Peta Langit": koordinat, tanggal & jam
+        (UTC), lalu tombol untuk membuka jendela peta langit (rasi bintang,
+        planet, Matahari, Bulan) di titik & waktu tsb -- TIDAK terkait
+        hisab hilal/kriteria MABIMS/KHGT, murni visualisasi langit malam.
+        Memakai Mode Perhitungan yang sama dengan bagian 🌙 Visibilitas
+        (self.mode, Ringan/Presisi) -- mode Ringan cuma menampilkan
+        Matahari & Bulan (starmap.py belum punya model planet VSOP87)."""
+
+        ttk.Label(
+            body,
+            text="Peta langit (rasi bintang, planet, Matahari, Bulan) untuk "
+                 "koordinat, tanggal & jam (UTC) tertentu. Mode Ringan (lihat "
+                 "🌙 Visibilitas) tidak menampilkan planet.",
+            font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left",
+            wraplength=280,
+        ).pack(fill="x", padx=10, pady=(4, 6))
+
+        frame_koord = ttk.LabelFrame(body, text="1. Koordinat Lokasi")
+        frame_koord.pack(fill="x", **pad)
+        ttk.Label(frame_koord, text="Lintang:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        self.entry_lat_peta_langit = ttk.Entry(frame_koord, width=12)
+        self.entry_lat_peta_langit.insert(0, "-6.2")
+        self.entry_lat_peta_langit.grid(row=0, column=1, padx=4, pady=4)
+        ttk.Label(frame_koord, text="° (+LU / -LS)", font=FONT_KECIL,
+                  foreground=WARNA_TEKS_MUTED).grid(row=0, column=2, sticky="w")
+        ttk.Label(frame_koord, text="Bujur:").grid(row=1, column=0, sticky="w", padx=6, pady=4)
+        self.entry_lon_peta_langit = ttk.Entry(frame_koord, width=12)
+        self.entry_lon_peta_langit.insert(0, "106.8")
+        self.entry_lon_peta_langit.grid(row=1, column=1, padx=4, pady=4)
+        ttk.Label(frame_koord, text="° (+BT / -BB)", font=FONT_KECIL,
+                  foreground=WARNA_TEKS_MUTED).grid(row=1, column=2, sticky="w")
+
+        frame_tgl = ttk.LabelFrame(body, text="2. Tanggal & Jam")
+        frame_tgl.pack(fill="x", **pad)
+        waktu_ini = datetime.utcnow()
+        # Default tampilkan waktu lokal zona pertama (WIB UTC+7)
+        _offset_default = ZONA_WAKTU_PETA_LANGIT[0][1]
+        from datetime import timezone, timedelta as _td
+        _waktu_lokal = waktu_ini + _td(hours=_offset_default)
+        ttk.Label(frame_tgl, text="Tanggal:").grid(row=0, column=0, padx=4, pady=6)
+        self.entry_tgl_hari_peta_langit = ttk.Entry(frame_tgl, width=4)
+        self.entry_tgl_hari_peta_langit.grid(row=0, column=1, padx=2)
+        ttk.Label(frame_tgl, text="Bulan:").grid(row=0, column=2, padx=4)
+        self.entry_tgl_bulan_peta_langit = ttk.Entry(frame_tgl, width=4)
+        self.entry_tgl_bulan_peta_langit.grid(row=0, column=3, padx=2)
+        ttk.Label(frame_tgl, text="Tahun:").grid(row=0, column=4, padx=4)
+        self.entry_tgl_tahun_peta_langit = ttk.Entry(frame_tgl, width=6)
+        self.entry_tgl_tahun_peta_langit.grid(row=0, column=5, padx=2)
+
+        # Row 1: Zona waktu
+        ttk.Label(frame_tgl, text="Zona:").grid(
+            row=1, column=0, sticky="w", padx=4, pady=(4, 2))
+        self.var_zona_peta_langit = tk.StringVar(value=ZONA_WAKTU_PETA_LANGIT[0][0])
+        self.combo_zona_peta_langit = ttk.Combobox(
+            frame_tgl, textvariable=self.var_zona_peta_langit, state="readonly",
+            values=[z[0] for z in ZONA_WAKTU_PETA_LANGIT], width=28)
+        self.combo_zona_peta_langit.grid(
+            row=1, column=1, columnspan=5, padx=2, pady=(4, 2), sticky="w")
+
+        # Row 2: Jam + Menit + Detik (jam lokal zona terpilih)
+        ttk.Label(frame_tgl, text="Jam:").grid(
+            row=2, column=0, sticky="w", padx=4, pady=(2, 2))
+        self.entry_jam_peta_langit = ttk.Entry(frame_tgl, width=3)
+        self.entry_jam_peta_langit.grid(row=2, column=1, padx=1, pady=(2, 2), sticky="w")
+        ttk.Label(frame_tgl, text=":", font=FONT_UTAMA_BOLD).grid(row=2, column=2, padx=0, pady=(2, 2))
+        self.entry_menit_peta_langit = ttk.Entry(frame_tgl, width=3)
+        self.entry_menit_peta_langit.grid(row=2, column=3, padx=1, pady=(2, 2), sticky="w")
+        ttk.Label(frame_tgl, text=":", font=FONT_UTAMA_BOLD).grid(row=2, column=4, padx=0, pady=(2, 2))
+        self.entry_detik_peta_langit = ttk.Entry(frame_tgl, width=3)
+        self.entry_detik_peta_langit.grid(row=2, column=5, padx=1, pady=(2, 2), sticky="w")
+
+        # Row 3: Checkbox Waktu Live (Realtime per detik)
+        self.var_live_peta_langit = tk.BooleanVar(value=True)
+        self.chk_live_peta_langit = ttk.Checkbutton(
+            frame_tgl, text="⏱ Ikuti Waktu Sekarang (Live)",
+            variable=self.var_live_peta_langit,
+            command=self._update_waktu_peta_langit)
+        self.chk_live_peta_langit.grid(
+            row=3, column=0, columnspan=6, sticky="w", padx=4, pady=(2, 6))
+
+        # Event bindings
+        self.combo_zona_peta_langit.bind("<<ComboboxSelected>>", lambda e: self._update_waktu_peta_langit())
+        for _entry in [self.entry_tgl_hari_peta_langit, self.entry_tgl_bulan_peta_langit,
+                       self.entry_tgl_tahun_peta_langit, self.entry_jam_peta_langit,
+                       self.entry_menit_peta_langit, self.entry_detik_peta_langit]:
+            _entry.bind("<Key>", lambda e: self.var_live_peta_langit.set(False))
+
+        # Inisialisasi awal nilai & jalankan loop live clock per detik
+        self._update_waktu_peta_langit()
+        self._loop_live_clock_peta_langit()
+
+        self.btn_tampilkan_peta_langit = ttk.Button(
+            body, text="Tampilkan Peta Langit", command=self._on_tampilkan_peta_langit,
+            style="Aksen.TButton")
+        self.btn_tampilkan_peta_langit.pack(fill="x", padx=10, pady=(4, 4))
+
+        self.btn_buka_planetarium = ttk.Button(
+            body, text="🔭 Buka Mode Planetarium", command=self._on_buka_planetarium)
+        self.btn_buka_planetarium.pack(fill="x", padx=10, pady=(0, 10))
+        ttk.Label(
+            body, text="Mode Planetarium: jendela interaktif -- bisa di-pan/zoom, "
+                       "waktu bisa dijalankan (play), cari objek, & klik bintang/planet "
+                       "buat lihat info. Dipakai buat eksplorasi bebas, beda dari peta "
+                       "langit statis di atas.",
+            font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left", wraplength=280,
+        ).pack(fill="x", padx=10, pady=(0, 8))
+
+    
+    def _update_waktu_peta_langit(self):
+        waktu_ini = datetime.utcnow()
+        zona_label = getattr(self, "var_zona_peta_langit", None)
+        if zona_label is None:
+            return
+        zona_offset = dict(ZONA_WAKTU_PETA_LANGIT).get(zona_label.get(), 7.0)
+        from datetime import timedelta as _td
+        waktu_lokal = waktu_ini + _td(hours=zona_offset)
+
+        for entry, val in [
+            (self.entry_tgl_hari_peta_langit, str(waktu_lokal.day)),
+            (self.entry_tgl_bulan_peta_langit, str(waktu_lokal.month)),
+            (self.entry_tgl_tahun_peta_langit, str(waktu_lokal.year)),
+            (self.entry_jam_peta_langit, f"{waktu_lokal.hour:02d}"),
+            (self.entry_menit_peta_langit, f"{waktu_lokal.minute:02d}"),
+            (self.entry_detik_peta_langit, f"{waktu_lokal.second:02d}"),
+        ]:
+            entry.delete(0, "end")
+            entry.insert(0, val)
+
+    def _loop_live_clock_peta_langit(self):
+        if hasattr(self, "var_live_peta_langit") and self.var_live_peta_langit.get():
+            try:
+                self._update_waktu_peta_langit()
+            except Exception:
+                pass
+        self.after(1000, self._loop_live_clock_peta_langit)
+
+    def _on_tampilkan_peta_langit(self):
+        try:
+            try:
+                lat = float(self.entry_lat_peta_langit.get().strip().replace(",", "."))
+                lon = float(self.entry_lon_peta_langit.get().strip().replace(",", "."))
+            except ValueError:
+                raise ValueError("Koordinat tidak valid. Contoh format: -6.200000")
+            if not (-90 <= lat <= 90):
+                raise ValueError("Lintang harus di antara -90 dan 90 derajat.")
+            if not (-180 <= lon <= 180):
+                raise ValueError("Bujur harus di antara -180 dan 180 derajat.")
+            try:
+                hari = int(self.entry_tgl_hari_peta_langit.get())
+                bulan = int(self.entry_tgl_bulan_peta_langit.get())
+                tahun = int(self.entry_tgl_tahun_peta_langit.get())
+                tanggal = datetime(tahun, bulan, hari)
+            except ValueError:
+                raise ValueError("Tanggal tidak valid. Pastikan hari/bulan/tahun berupa angka & tanggal ada.")
+            try:
+                jam_h = int(self.entry_jam_peta_langit.get().strip())
+                jam_m = int(self.entry_menit_peta_langit.get().strip())
+                try:
+                    jam_s = int(self.entry_detik_peta_langit.get().strip())
+                except Exception:
+                    jam_s = 0
+            except ValueError:
+                raise ValueError("Jam/Menit/Detik tidak valid. Isi angka bulat.")
+            if not (0 <= jam_h <= 23):
+                raise ValueError("Jam harus di antara 0 dan 23.")
+            if not (0 <= jam_m <= 59):
+                raise ValueError("Menit harus di antara 0 dan 59.")
+            if not (0 <= jam_s <= 59):
+                raise ValueError("Detik harus di antara 0 dan 59.")
+            zona_label = self.var_zona_peta_langit.get()
+            zona_offset = dict(ZONA_WAKTU_PETA_LANGIT).get(zona_label, 0.0)
+            jam_lokal = jam_h + jam_m / 60.0 + jam_s / 3600.0
+            jam_utc = (jam_lokal - zona_offset) % 24.0
+        except ValueError as e:
+            messagebox.showerror("Input tidak valid", str(e))
+            return
+
+        mode = self.mode.get()
+        if mode == "jpl" and self.eph is None:
+            messagebox.showwarning(
+                "Ephemeris belum siap",
+                f"Mode Presisi ({label_kernel_jpl_aktif()}) dipilih, tapi ephemeris lokalnya belum "
+                "selesai dimuat. Tunggu sebentar, atau pilih Mode Perhitungan "
+                "'Ringan' dulu (lihat bagian 🌙 Visibilitas).")
+            return
+
+        self.btn_tampilkan_peta_langit.config(state="disabled")
+        self._log(f"\nMenyiapkan peta langit untuk {tanggal.strftime('%d %B %Y')} "
+                   f"{jam_utc:05.2f} UTC ({lat:.4f}, {lon:.4f})...")
+
+        threading.Thread(
+            target=self._peta_langit_thread,
+            args=(tanggal, jam_utc, lat, lon, mode),
+            daemon=True).start()
+
+    def _peta_langit_thread(self, tanggal, jam_utc, lat, lon, mode):
+        try:
+            data = starmap.hitung_langit(
+                tanggal, jam_utc, lat, lon, ASTRO_FUNCS,
+                mode=mode, eph=self.eph, ts=self.ts)
+            self.antrian.put(("peta_langit_ok", (tanggal, jam_utc, lat, lon, mode, data)))
+        except Exception as e:
+            self.antrian.put(("peta_langit_error", f"Gagal menghitung peta langit: {e}"))
+
+    def _on_buka_planetarium(self):
+        # Validasi input sama persis dengan _on_tampilkan_peta_langit --
+        # dua tombol ini berbagi field koordinat/tanggal/jam yang sama.
+        try:
+            try:
+                lat = float(self.entry_lat_peta_langit.get().strip().replace(",", "."))
+                lon = float(self.entry_lon_peta_langit.get().strip().replace(",", "."))
+            except ValueError:
+                raise ValueError("Koordinat tidak valid. Contoh format: -6.200000")
+            if not (-90 <= lat <= 90):
+                raise ValueError("Lintang harus di antara -90 dan 90 derajat.")
+            if not (-180 <= lon <= 180):
+                raise ValueError("Bujur harus di antara -180 dan 180 derajat.")
+            try:
+                hari = int(self.entry_tgl_hari_peta_langit.get())
+                bulan = int(self.entry_tgl_bulan_peta_langit.get())
+                tahun = int(self.entry_tgl_tahun_peta_langit.get())
+                tanggal = datetime(tahun, bulan, hari)
+            except ValueError:
+                raise ValueError("Tanggal tidak valid. Pastikan hari/bulan/tahun berupa angka & tanggal ada.")
+            try:
+                jam_h = int(self.entry_jam_peta_langit.get().strip())
+                jam_m = int(self.entry_menit_peta_langit.get().strip())
+                try:
+                    jam_s = int(self.entry_detik_peta_langit.get().strip())
+                except Exception:
+                    jam_s = 0
+            except ValueError:
+                raise ValueError("Jam/Menit/Detik tidak valid. Isi angka bulat.")
+            if not (0 <= jam_h <= 23):
+                raise ValueError("Jam harus di antara 0 dan 23.")
+            if not (0 <= jam_m <= 59):
+                raise ValueError("Menit harus di antara 0 dan 59.")
+            if not (0 <= jam_s <= 59):
+                raise ValueError("Detik harus di antara 0 dan 59.")
+            zona_label = self.var_zona_peta_langit.get()
+            zona_offset = dict(ZONA_WAKTU_PETA_LANGIT).get(zona_label, 0.0)
+            jam_lokal = jam_h + jam_m / 60.0 + jam_s / 3600.0
+            jam_utc = (jam_lokal - zona_offset) % 24.0
+        except ValueError as e:
+            messagebox.showerror("Input tidak valid", str(e))
+            return
+
+        mode = self.mode.get()
+        if mode == "jpl" and self.eph is None:
+            messagebox.showwarning(
+                "Ephemeris belum siap",
+                f"Mode Presisi ({label_kernel_jpl_aktif()}) dipilih, tapi ephemeris lokalnya belum "
+                "selesai dimuat. Tunggu sebentar, atau pilih Mode Perhitungan "
+                "'Ringan' dulu (lihat bagian 🌙 Visibilitas).")
+            return
+
+        self.btn_buka_planetarium.config(state="disabled")
+        self._log(f"\nMenyiapkan Mode Planetarium untuk {tanggal.strftime('%d %B %Y')} "
+                   f"{jam_utc:05.2f} UTC ({lat:.4f}, {lon:.4f})...")
+
+        threading.Thread(
+            target=self._planetarium_thread,
+            args=(tanggal, jam_utc, lat, lon, mode),
+            daemon=True).start()
+
+    def _planetarium_thread(self, tanggal, jam_utc, lat, lon, mode):
+        try:
+            # magnitudo digenapkan ke batas katalog (5.0) supaya slider magnitudo
+            # di jendela planetarium bisa naik/turun tanpa perlu hitung ulang alt-az.
+            data = starmap.hitung_langit(
+                tanggal, jam_utc, lat, lon, ASTRO_FUNCS,
+                mode=mode, eph=self.eph, ts=self.ts, mag_limit=5.0)
+            starmap.lengkapi_garis_rasi_altaz(data, tanggal, jam_utc, lat, lon, ASTRO_FUNCS)
+            self.antrian.put(("planetarium_ok", (tanggal, jam_utc, lat, lon, mode, data)))
+        except Exception as e:
+            self.antrian.put(("planetarium_error", f"Gagal membuka Mode Planetarium: {e}"))
 
     # ---------------- Tab Waktu Sholat & Arah Kiblat ----------------
 
@@ -8681,10 +9400,10 @@ class HisabWinApp(tk.Tk):
                 text="Mode Presisi aktif — ephemeris JPL DE421 sudah siap.")
         elif self._ephemeris_loading:
             self.label_status_metode_sholat.config(
-                text="Mode Presisi aktif — masih memuat ephemeris de421.bsp, mohon tunggu...")
+                text="Mode Presisi aktif — masih memuat ephemeris {bsp_kernel_jpl_aktif()}, mohon tunggu...")
         else:
             self.label_status_metode_sholat.config(
-                text="Mode Presisi aktif — memuat ephemeris de421.bsp, mohon tunggu...")
+                text="Mode Presisi aktif — memuat ephemeris {bsp_kernel_jpl_aktif()}, mohon tunggu...")
             self._ephemeris_loading = True
             self._log("Memuat ephemeris de421.bsp untuk hisab Waktu Sholat mode Presisi...")
             threading.Thread(target=self._muat_ephemeris, daemon=True).start()
@@ -9411,6 +10130,31 @@ class HisabWinApp(tk.Tk):
                     messagebox.showerror("Terjadi kesalahan", payload)
                     self.btn_buat_efemeris.config(state="normal")
 
+                elif jenis == "peta_langit_ok":
+                    tanggal, jam_utc, lat, lon, mode, data = payload
+                    starmap.gambar_jendela_peta_langit(self, tanggal, jam_utc, lat, lon, data, mode=mode)
+                    self._log(f"Peta langit {tanggal.strftime('%d %B %Y')} {jam_utc:05.2f} UTC "
+                               "selesai ditampilkan.")
+                    self.btn_tampilkan_peta_langit.config(state="normal")
+
+                elif jenis == "peta_langit_error":
+                    self._log(f"ERROR: {payload}")
+                    messagebox.showerror("Terjadi kesalahan", payload)
+                    self.btn_tampilkan_peta_langit.config(state="normal")
+
+                elif jenis == "planetarium_ok":
+                    tanggal, jam_utc, lat, lon, mode, data = payload
+                    starmap.buka_planetarium(self, tanggal, jam_utc, lat, lon, ASTRO_FUNCS,
+                                              mode=mode, eph=self.eph, ts=self.ts,
+                                              data_awal=data)
+                    self._log("Mode Planetarium siap.")
+                    self.btn_buka_planetarium.config(state="normal")
+
+                elif jenis == "planetarium_error":
+                    self._log(f"ERROR: {payload}")
+                    messagebox.showerror("Terjadi kesalahan", payload)
+                    self.btn_buka_planetarium.config(state="normal")
+
                 elif jenis == "konv_kriteria_ok":
                     self.label_hasil_konverter.config(text=payload)
                     self._log(f"Konverter Kalender: {payload.replace(chr(10), '  ')}")
@@ -9458,4 +10202,4 @@ class HisabWinApp(tk.Tk):
 if __name__ == "__main__":
     app = HisabWinApp()
     app.mainloop()
-
+
