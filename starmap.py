@@ -304,6 +304,29 @@ def _waktu_ke_jd_T(tanggal, jam_utc, astro):
     return jd_ut, T
 
 
+def lengkapi_garis_rasi_altaz(data, tanggal, jam_utc, lat, lon, astro):
+    """Hitung alt-az segmen garis rasi bintang & simpan ke data["garis_rasi_altaz"].
+
+    Garis rasi disimpan di katalog sebagai RA/Dec, jadi HARUS dikonversi ke
+    Alt/Az yang sama seperti bintang sebelum diproyeksikan -- kalau tidak
+    garis-garisnya tidak akan menyatu dengan posisi bintang yang sebenarnya.
+
+    Dipanggil baik oleh JendelaPlanetarium sendiri (_hitung_posisi_mag_penuh)
+    maupun oleh pemanggil dari luar (mis. thread background di hisabwin.py
+    yang menyiapkan `data_awal` SEBELUM jendela dibuka) -- supaya kunci
+    "garis_rasi_altaz" selalu terisi dan garis rasi selalu tampil, tidak
+    peduli dari jalur mana `data` itu berasal."""
+    garis = _muat_garis_rasi()
+    if garis is not None:
+        jd_ut, T = _waktu_ke_jd_T(tanggal, jam_utc, astro)
+        az1, alt1 = _radec_ke_altaz(garis[:, 0], garis[:, 1], jd_ut, T, lat, lon, astro)
+        az2, alt2 = _radec_ke_altaz(garis[:, 2], garis[:, 3], jd_ut, T, lat, lon, astro)
+        data["garis_rasi_altaz"] = np.column_stack([az1, alt1, az2, alt2])
+    else:
+        data["garis_rasi_altaz"] = None
+    return data
+
+
 # =========================================================
 # PERHITUNGAN ISI PETA LANGIT
 # =========================================================
@@ -614,6 +637,8 @@ class JendelaPlanetarium(tk.Toplevel):
         self.geometry("1150x800")
 
         self._data = data_awal if data_awal is not None else self._hitung_posisi_mag_penuh()
+        if "garis_rasi_altaz" not in self._data:
+            lengkapi_garis_rasi_altaz(self._data, self.tanggal, self.jam_utc, self.lat, self.lon, self.astro)
         self._objek_terpilih = None  # (nama, az, alt, mag_atau_None)
 
         self._bangun_ui()
@@ -633,14 +658,7 @@ class JendelaPlanetarium(tk.Toplevel):
         posisi bintang yang sebenarnya (bug versi sebelumnya)."""
         data = hitung_langit(self.tanggal, self.jam_utc, self.lat, self.lon, self.astro,
                               mode=self.mode, eph=self.eph, ts=self.ts, mag_limit=5.0)
-        garis = _muat_garis_rasi()
-        if garis is not None:
-            jd_ut, T = _waktu_ke_jd_T(self.tanggal, self.jam_utc, self.astro)
-            az1, alt1 = _radec_ke_altaz(garis[:, 0], garis[:, 1], jd_ut, T, self.lat, self.lon, self.astro)
-            az2, alt2 = _radec_ke_altaz(garis[:, 2], garis[:, 3], jd_ut, T, self.lat, self.lon, self.astro)
-            data["garis_rasi_altaz"] = np.column_stack([az1, alt1, az2, alt2])
-        else:
-            data["garis_rasi_altaz"] = None
+        lengkapi_garis_rasi_altaz(data, self.tanggal, self.jam_utc, self.lat, self.lon, self.astro)
         return data
 
     def _waktu_berubah(self):
@@ -994,6 +1012,24 @@ class JendelaPlanetarium(tk.Toplevel):
         batas = 2.0 * np.tan(np.radians(self.fov) / 2.0)
         ax.set_xlim(-batas, batas)
         ax.set_ylim(-batas, batas)
+
+        # --- tanah (bawah horizon) diwarnai, biar bisa dibedakan dari langit ---
+        # Sampling raster (bukan cuma polyline horizon) supaya tetap benar di
+        # segala arah pandang -- termasuk saat menghadap dekat zenith/nadir,
+        # di mana bentuk area "tanah" pada kanvas bukan lagi kurva sederhana.
+        n_raster = 140
+        xs = np.linspace(-batas, batas, n_raster)
+        ys = np.linspace(-batas, batas, n_raster)
+        Xg, Yg = np.meshgrid(xs, ys)
+        _, alt_g = _proyeksi_stereografik_balik(Xg, Yg, self.az_center, self.alt_center)
+        WARNA_TANAH_RGB = (0x35 / 255.0, 0x2A / 255.0, 0x18 / 255.0)  # cokelat tanah gelap
+        tanah_rgba = np.zeros((n_raster, n_raster, 4))
+        tanah_rgba[..., 0] = WARNA_TANAH_RGB[0]
+        tanah_rgba[..., 1] = WARNA_TANAH_RGB[1]
+        tanah_rgba[..., 2] = WARNA_TANAH_RGB[2]
+        tanah_rgba[..., 3] = np.where(alt_g < 0, 0.9, 0.0)
+        ax.imshow(tanah_rgba, extent=(-batas, batas, -batas, batas), origin="lower",
+                  interpolation="bilinear", zorder=0.5)
 
         # --- grid horizon (lingkaran alt=0, 30, 60) + label mata angin ---
         if self.tampil_grid.get():

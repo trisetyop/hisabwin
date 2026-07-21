@@ -8723,6 +8723,7 @@ class HisabWinApp(tk.Tk):
             data = starmap.hitung_langit(
                 tanggal, jam_utc, lat, lon, ASTRO_FUNCS,
                 mode=mode, eph=self.eph, ts=self.ts, mag_limit=5.0)
+            starmap.lengkapi_garis_rasi_altaz(data, tanggal, jam_utc, lat, lon, ASTRO_FUNCS)
             self.antrian.put(("planetarium_ok", (tanggal, jam_utc, lat, lon, mode, data)))
         except Exception as e:
             self.antrian.put(("planetarium_error", f"Gagal membuka Mode Planetarium: {e}"))
