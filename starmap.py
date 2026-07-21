@@ -634,7 +634,8 @@ class JendelaPlanetarium(tk.Toplevel):
 
         self.title("Mode Planetarium — HisabWin")
         self.configure(bg=WARNA_BG)
-        self.geometry("1150x800")
+        self.geometry("1300x860")
+        self.minsize(900, 620)
 
         self._data = data_awal if data_awal is not None else self._hitung_posisi_mag_penuh()
         if "garis_rasi_altaz" not in self._data:
@@ -705,7 +706,7 @@ class JendelaPlanetarium(tk.Toplevel):
         badan = tk.Frame(self, bg=WARNA_BG)
         badan.pack(fill="both", expand=True, padx=8, pady=4)
 
-        panel_kanan = tk.Frame(badan, bg=WARNA_PANEL, width=260,
+        panel_kanan = tk.Frame(badan, bg=WARNA_PANEL, width=240,
                                 highlightbackground=WARNA_BORDER, highlightthickness=1)
         panel_kanan.pack(side="right", fill="y", padx=(6, 0))
         panel_kanan.pack_propagate(False)
@@ -714,8 +715,9 @@ class JendelaPlanetarium(tk.Toplevel):
         frame_kanvas = tk.Frame(badan, bg=WARNA_BG)
         frame_kanvas.pack(side="left", fill="both", expand=True)
 
-        self.fig = plt.Figure(figsize=(7, 7), dpi=100, facecolor=WARNA_BG)
-        self.ax = self.fig.add_subplot(111, facecolor="#0B1220")
+        # Set warna latar figure sama dengan langit gelap (#0B1220)
+        self.fig = plt.Figure(figsize=(8, 7), dpi=100, facecolor="#0B1220")
+        self.ax = self.fig.add_axes([0, 0, 1, 1], facecolor="#0B1220")
         self.ax.set_aspect("equal")
         self.ax.set_xticks([]); self.ax.set_yticks([])
         for spine in self.ax.spines.values():
@@ -729,6 +731,10 @@ class JendelaPlanetarium(tk.Toplevel):
         self.canvas.mpl_connect("button_release_event", self._on_lepas_kanvas)
         self.canvas.mpl_connect("scroll_event", self._on_scroll_kanvas)
 
+        # Resize figure dinamis mengikuti ukuran frame_kanvas
+        self._resize_after = None
+        frame_kanvas.bind("<Configure>", self._on_kanvas_resize)
+
         bar_bawah = tk.Frame(self, bg=WARNA_BG)
         bar_bawah.pack(fill="x", padx=8, pady=(0, 8))
         tk.Label(bar_bawah,
@@ -738,6 +744,23 @@ class JendelaPlanetarium(tk.Toplevel):
         self.label_status = tk.Label(bar_bawah, text="", font=FONT_KECIL,
                                       bg=WARNA_BG, fg=WARNA_TEKS_MUTED)
         self.label_status.pack(side="right")
+
+    def _on_kanvas_resize(self, event):
+        """Resize figure matplotlib mengikuti lebar/tinggi frame_kanvas.
+        Debounce 150ms supaya tidak terlalu sering redraw saat user
+        menyeret tepi window."""
+        if self._resize_after is not None:
+            self.after_cancel(self._resize_after)
+        self._resize_after = self.after(150, lambda w=event.width, h=event.height:
+                                        self._terapkan_resize(w, h))
+
+    def _terapkan_resize(self, w, h):
+        self._resize_after = None
+        if w < 100 or h < 100:
+            return
+        dpi = self.fig.get_dpi()
+        self.fig.set_size_inches(w / dpi, h / dpi)
+        self._gambar()
 
     def _bangun_panel_kanan(self, panel):
         pad = {"padx": 10, "pady": 6}
@@ -1004,22 +1027,36 @@ class JendelaPlanetarium(tk.Toplevel):
         ax = self.ax
         ax.clear()
         ax.set_facecolor("#0B1220")
+        ax.set_position([0, 0, 1, 1])
+        ax.set_facecolor("#0B1220")
+        self.fig.set_facecolor("#0B1220")
         ax.set_aspect("equal")
         ax.set_xticks([]); ax.set_yticks([])
         for spine in ax.spines.values():
             spine.set_visible(False)
 
-        batas = 2.0 * np.tan(np.radians(self.fov) / 2.0)
-        ax.set_xlim(-batas, batas)
-        ax.set_ylim(-batas, batas)
+        # Dapatkan aspect ratio aktual dari kanvas
+        bbox = ax.get_window_extent()
+        w_px, h_px = bbox.width, bbox.height
+        aspect_ratio = (w_px / h_px) if (h_px > 0 and w_px > 0) else 1.2
+
+        batas_y = 2.0 * np.tan(np.radians(self.fov) / 2.0)
+        batas_x = batas_y * aspect_ratio
+
+        ax.set_xlim(-batas_x, batas_x)
+        ax.set_ylim(-batas_y, batas_y)
+
+        # Sudut angular maksimum dari pusat ke pojok kanvas
+        r_max = np.hypot(batas_x, batas_y)
+        c_max_deg = np.degrees(2.0 * np.arctan(r_max / 2.0)) * 1.05
 
         # --- tanah (bawah horizon) diwarnai, biar bisa dibedakan dari langit ---
         # Sampling raster (bukan cuma polyline horizon) supaya tetap benar di
         # segala arah pandang -- termasuk saat menghadap dekat zenith/nadir,
         # di mana bentuk area "tanah" pada kanvas bukan lagi kurva sederhana.
         n_raster = 140
-        xs = np.linspace(-batas, batas, n_raster)
-        ys = np.linspace(-batas, batas, n_raster)
+        xs = np.linspace(-batas_x, batas_x, n_raster)
+        ys = np.linspace(-batas_y, batas_y, n_raster)
         Xg, Yg = np.meshgrid(xs, ys)
         _, alt_g = _proyeksi_stereografik_balik(Xg, Yg, self.az_center, self.alt_center)
         WARNA_TANAH_RGB = (0x35 / 255.0, 0x2A / 255.0, 0x18 / 255.0)  # cokelat tanah gelap
@@ -1028,7 +1065,7 @@ class JendelaPlanetarium(tk.Toplevel):
         tanah_rgba[..., 1] = WARNA_TANAH_RGB[1]
         tanah_rgba[..., 2] = WARNA_TANAH_RGB[2]
         tanah_rgba[..., 3] = np.where(alt_g < 0, 0.9, 0.0)
-        ax.imshow(tanah_rgba, extent=(-batas, batas, -batas, batas), origin="lower",
+        ax.imshow(tanah_rgba, extent=(-batas_x, batas_x, -batas_y, batas_y), origin="lower",
                   interpolation="bilinear", zorder=0.5)
 
         # --- grid horizon (lingkaran alt=0, 30, 60) + label mata angin ---
@@ -1045,7 +1082,7 @@ class JendelaPlanetarium(tk.Toplevel):
                                     (180, "S"), (225, "BD"), (270, "B"), (315, "BL")]:
                 x, y, c = _proyeksi_stereografik(np.array([az_label]), np.array([0.0]),
                                                   self.az_center, self.alt_center)
-                if c[0] < 179 and abs(x[0]) < batas and abs(y[0]) < batas:
+                if c[0] < 179 and abs(x[0]) < batas_x and abs(y[0]) < batas_y:
                     ax.annotate(teks, (x[0], y[0]), color=WARNA_TEKS_MUTED, fontsize=9,
                                 fontweight="bold", ha="center", va="center", zorder=2)
 
@@ -1056,7 +1093,7 @@ class JendelaPlanetarium(tk.Toplevel):
                                                  self.az_center, self.alt_center)
             x2, y2, c2 = _proyeksi_stereografik(garis_altaz[:, 2], garis_altaz[:, 3],
                                                  self.az_center, self.alt_center)
-            terlihat = (c1 < self.fov * 0.9) & (c2 < self.fov * 0.9)
+            terlihat = (c1 < c_max_deg) & (c2 < c_max_deg)
             for i in np.where(terlihat)[0]:
                 ax.plot([x1[i], x2[i]], [y1[i], y2[i]], color="#3D4A63", linewidth=0.8, zorder=1)
 
@@ -1065,7 +1102,7 @@ class JendelaPlanetarium(tk.Toplevel):
             b = self._data["bintang"]
             m = b["mag"] <= self.mag_limit
             x, y, c = _proyeksi_stereografik(b["az"][m], b["alt"][m], self.az_center, self.alt_center)
-            terlihat = c < self.fov * 0.9
+            terlihat = c < c_max_deg
             if terlihat.any():
                 mag_t = b["mag"][m][terlihat]
                 ukuran = np.clip((self.mag_limit - mag_t + 1.0), 0.5, None) ** 2 * 3.0
@@ -1084,7 +1121,7 @@ class JendelaPlanetarium(tk.Toplevel):
         for nama, az, alt, warna, _jenis, _ra, _dec in self._data["objek"]:
             x, y, c = _proyeksi_stereografik(np.array([az]), np.array([alt]),
                                               self.az_center, self.alt_center)
-            if c[0] < self.fov * 0.9:
+            if c[0] < c_max_deg:
                 ax.scatter(x, y, s=170, c=warna, edgecolors="#1F2937", linewidths=0.9, zorder=5)
                 ax.annotate(nama, (x[0], y[0]), color=warna, fontsize=9, fontweight="bold",
                             xytext=(6, 6), textcoords="offset points", zorder=6)
