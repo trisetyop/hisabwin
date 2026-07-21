@@ -8600,7 +8600,18 @@ class HisabWinApp(tk.Tk):
         self.btn_tampilkan_peta_langit = ttk.Button(
             body, text="Tampilkan Peta Langit", command=self._on_tampilkan_peta_langit,
             style="Aksen.TButton")
-        self.btn_tampilkan_peta_langit.pack(fill="x", padx=10, pady=(4, 10))
+        self.btn_tampilkan_peta_langit.pack(fill="x", padx=10, pady=(4, 4))
+
+        self.btn_buka_planetarium = ttk.Button(
+            body, text="🔭 Buka Mode Planetarium", command=self._on_buka_planetarium)
+        self.btn_buka_planetarium.pack(fill="x", padx=10, pady=(0, 10))
+        ttk.Label(
+            body, text="Mode Planetarium: jendela interaktif -- bisa di-pan/zoom, "
+                       "waktu bisa dijalankan (play), cari objek, & klik bintang/planet "
+                       "buat lihat info. Dipakai buat eksplorasi bebas, beda dari peta "
+                       "langit statis di atas.",
+            font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left", wraplength=280,
+        ).pack(fill="x", padx=10, pady=(0, 8))
 
     def _on_tampilkan_peta_langit(self):
         try:
@@ -8656,6 +8667,65 @@ class HisabWinApp(tk.Tk):
             self.antrian.put(("peta_langit_ok", (tanggal, jam_utc, lat, lon, mode, data)))
         except Exception as e:
             self.antrian.put(("peta_langit_error", f"Gagal menghitung peta langit: {e}"))
+
+    def _on_buka_planetarium(self):
+        # Validasi input sama persis dengan _on_tampilkan_peta_langit --
+        # dua tombol ini berbagi field koordinat/tanggal/jam yang sama.
+        try:
+            try:
+                lat = float(self.entry_lat_peta_langit.get().strip().replace(",", "."))
+                lon = float(self.entry_lon_peta_langit.get().strip().replace(",", "."))
+            except ValueError:
+                raise ValueError("Koordinat tidak valid. Contoh format: -6.200000")
+            if not (-90 <= lat <= 90):
+                raise ValueError("Lintang harus di antara -90 dan 90 derajat.")
+            if not (-180 <= lon <= 180):
+                raise ValueError("Bujur harus di antara -180 dan 180 derajat.")
+            try:
+                hari = int(self.entry_tgl_hari_peta_langit.get())
+                bulan = int(self.entry_tgl_bulan_peta_langit.get())
+                tahun = int(self.entry_tgl_tahun_peta_langit.get())
+                tanggal = datetime(tahun, bulan, hari)
+            except ValueError:
+                raise ValueError("Tanggal tidak valid. Pastikan hari/bulan/tahun berupa angka & tanggal ada.")
+            try:
+                jam_utc = float(self.entry_jam_peta_langit.get().strip().replace(",", "."))
+            except ValueError:
+                raise ValueError("Jam UTC tidak valid. Isi angka desimal 0-24, mis. 13.5 utk 13:30 UTC.")
+            if not (0 <= jam_utc < 24):
+                raise ValueError("Jam UTC harus di antara 0 dan 24.")
+        except ValueError as e:
+            messagebox.showerror("Input tidak valid", str(e))
+            return
+
+        mode = self.mode.get()
+        if mode == "jpl" and self.eph is None:
+            messagebox.showwarning(
+                "Ephemeris belum siap",
+                "Mode Presisi (JPL DE421) dipilih, tapi ephemeris lokalnya belum "
+                "selesai dimuat. Tunggu sebentar, atau pilih Mode Perhitungan "
+                "'Ringan' dulu (lihat bagian 🌙 Visibilitas).")
+            return
+
+        self.btn_buka_planetarium.config(state="disabled")
+        self._log(f"\nMenyiapkan Mode Planetarium untuk {tanggal.strftime('%d %B %Y')} "
+                   f"{jam_utc:05.2f} UTC ({lat:.4f}, {lon:.4f})...")
+
+        threading.Thread(
+            target=self._planetarium_thread,
+            args=(tanggal, jam_utc, lat, lon, mode),
+            daemon=True).start()
+
+    def _planetarium_thread(self, tanggal, jam_utc, lat, lon, mode):
+        try:
+            # magnitudo digenapkan ke batas katalog (5.0) supaya slider magnitudo
+            # di jendela planetarium bisa naik/turun tanpa perlu hitung ulang alt-az.
+            data = starmap.hitung_langit(
+                tanggal, jam_utc, lat, lon, ASTRO_FUNCS,
+                mode=mode, eph=self.eph, ts=self.ts, mag_limit=5.0)
+            self.antrian.put(("planetarium_ok", (tanggal, jam_utc, lat, lon, mode, data)))
+        except Exception as e:
+            self.antrian.put(("planetarium_error", f"Gagal membuka Mode Planetarium: {e}"))
 
     # ---------------- Tab Waktu Sholat & Arah Kiblat ----------------
 
@@ -9711,6 +9781,19 @@ class HisabWinApp(tk.Tk):
                     self._log(f"ERROR: {payload}")
                     messagebox.showerror("Terjadi kesalahan", payload)
                     self.btn_tampilkan_peta_langit.config(state="normal")
+
+                elif jenis == "planetarium_ok":
+                    tanggal, jam_utc, lat, lon, mode, data = payload
+                    starmap.buka_planetarium(self, tanggal, jam_utc, lat, lon, ASTRO_FUNCS,
+                                              mode=mode, eph=self.eph, ts=self.ts,
+                                              data_awal=data)
+                    self._log("Mode Planetarium siap.")
+                    self.btn_buka_planetarium.config(state="normal")
+
+                elif jenis == "planetarium_error":
+                    self._log(f"ERROR: {payload}")
+                    messagebox.showerror("Terjadi kesalahan", payload)
+                    self.btn_buka_planetarium.config(state="normal")
 
                 elif jenis == "konv_kriteria_ok":
                     self.label_hasil_konverter.config(text=payload)
