@@ -1,9 +1,7 @@
-skyfield
-cartopy
-numpy
-matplotlib
-shapely
-ttkbootstrap
-pillow
-pyinstaller
-requests
+Flask>=3.0.0
+numpy>=1.22.0
+skyfield>=1.46
+scipy>=1.9.0
+matplotlib>=3.7.0
+shapely>=2.0.0
+pytz>=2022.1

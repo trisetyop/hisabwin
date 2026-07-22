@@ -43,7 +43,16 @@ from datetime import datetime, timedelta
 
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+# FigureCanvasTkAgg/NavigationToolbar2Tk hanya dipakai di gambar_jendela_peta_
+# langit() & buka_planetarium() (jendela GUI Tkinter), tidak pernah dipanggil
+# dari hitung_langit()/lengkapi_garis_rasi_altaz() (fungsi kalkulasi murni
+# yang dipakai server.py). Dibungkus try/except supaya starmap.py tetap bisa
+# di-import di server tanpa Tcl/Tk sama sekali (mis. lingkungan serverless).
+try:
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+except ImportError:
+    FigureCanvasTkAgg = None
+    NavigationToolbar2Tk = None
 
 # =========================================================
 # GAYA TAMPILAN (default mandiri -- dioverride oleh inisialisasi() supaya
