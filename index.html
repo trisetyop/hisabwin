@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HisabWin — Peta Visibilitas Hilal</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  :root{
+    --langit-1:#070c17;
+    --langit-2:#131f36;
+    --langit-3:#1c2c4a;
+    --cakrawala:#3a2a3f;
+    --emas:#e8b565;
+    --emas-redup:#8a6a3a;
+    --teks:#eef1f6;
+    --teks-redup:#93a0ba;
+    --garis:#28324a;
+    --hijau:#5fae7a;
+    --merah:#c96a5a;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    min-height:100vh;
+    background:
+      radial-gradient(ellipse 900px 500px at 15% 0%, var(--langit-3), transparent),
+      linear-gradient(180deg, var(--langit-1) 0%, var(--langit-2) 55%, var(--cakrawala) 100%);
+    color:var(--teks);
+    font-family:'Iowan Old Style','Georgia',ui-serif,serif;
+    padding:0 0 60px 0;
+  }
+  .bintang{
+    position:fixed; inset:0; pointer-events:none; z-index:0;
+    background-image:
+      radial-gradient(1px 1px at 20% 20%, #ffffffaa, transparent),
+      radial-gradient(1px 1px at 60% 10%, #ffffff88, transparent),
+      radial-gradient(1px 1px at 80% 30%, #ffffff99, transparent),
+      radial-gradient(1.5px 1.5px at 40% 15%, #ffffffcc, transparent),
+      radial-gradient(1px 1px at 90% 8%, #ffffff77, transparent),
+      radial-gradient(1px 1px at 30% 35%, #ffffff66, transparent);
+    background-repeat:no-repeat;
+    opacity:.8;
+  }
+  header{
+    position:relative; z-index:1;
+    max-width:1100px; margin:0 auto; padding:52px 24px 18px;
+    text-align:center;
+  }
+  .bulan-sabit{
+    width:46px; height:46px; margin:0 auto 18px;
+    border-radius:50%;
+    background:var(--emas);
+    box-shadow: -14px 0 0 -6px var(--langit-1), inset 10px 0 0 0 var(--langit-2);
+    position:relative;
+  }
+  h1{ font-size:2.2rem; font-weight:600; letter-spacing:.02em; margin:0 0 6px; }
+  .sub{
+    font-family:ui-monospace,'SF Mono',Menlo,monospace;
+    font-size:.78rem; letter-spacing:.14em; text-transform:uppercase;
+    color:var(--emas-redup);
+  }
+  main{
+    position:relative; z-index:1;
+    max-width:1100px; margin:0 auto; padding:0 24px;
+  }
+  .kartu{
+    background:linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.01));
+    border:1px solid var(--garis);
+    border-radius:14px;
+    padding:26px 26px 28px;
+    margin-top:26px;
+    backdrop-filter: blur(6px);
+  }
+  .langkah{ display:flex; align-items:center; gap:10px; margin-bottom:18px; }
+  .langkah .no{
+    font-family:ui-monospace,monospace; font-size:.75rem;
+    color:var(--langit-1); background:var(--emas);
+    width:22px; height:22px; border-radius:50%;
+    display:flex; align-items:center; justify-content:center; flex:none;
+  }
+  .langkah h2{ font-size:1.05rem; font-weight:600; margin:0; letter-spacing:.01em; }
+  label{
+    display:block; font-family:ui-monospace,monospace; font-size:.72rem;
+    letter-spacing:.08em; text-transform:uppercase; color:var(--teks-redup);
+    margin-bottom:7px;
+  }
+  input[type=text], select{
+    font-family:'Iowan Old Style','Georgia',serif;
+    background:var(--langit-1); border:1px solid var(--garis); color:var(--teks);
+    border-radius:8px; padding:10px 12px; font-size:1rem; width:100%;
+  }
+  input[type=text]:focus{ outline:1px solid var(--emas); }
+  .baris{ display:flex; gap:14px; flex-wrap:wrap; align-items:flex-end; }
+  .baris > div{ flex:1; min-width:160px; }
+  button{
+    font-family:'Iowan Old Style','Georgia',serif;
+    background:var(--emas); color:#211405; border:none;
+    border-radius:8px; padding:11px 20px; font-size:.95rem; font-weight:600;
+    cursor:pointer; letter-spacing:.01em;
+    transition:transform .12s ease, filter .12s ease;
+  }
+  button:hover{ filter:brightness(1.08); }
+  button:active{ transform:translateY(1px); }
+  button:disabled{ opacity:.45; cursor:not-allowed; filter:none; }
+  .radio-grup{ display:flex; gap:18px; margin-top:4px; }
+  .radio-grup label{
+    display:flex; align-items:center; gap:6px; text-transform:none;
+    letter-spacing:0; font-size:.92rem; color:var(--teks); cursor:pointer;
+  }
+  .daftar-ijtimak{
+    margin-top:16px; max-height:230px; overflow-y:auto;
+    border:1px solid var(--garis); border-radius:8px;
+  }
+  .item-ijtimak{
+    padding:10px 14px; font-family:ui-monospace,monospace; font-size:.85rem;
+    border-bottom:1px solid var(--garis); cursor:pointer;
+  }
+  .item-ijtimak:last-child{ border-bottom:none; }
+  .item-ijtimak:hover{ background:rgba(232,181,101,.08); }
+  .item-ijtimak.aktif{ background:rgba(232,181,101,.16); color:var(--emas); }
+  .catatan{ font-size:.85rem; color:var(--teks-redup); margin-top:10px; line-height:1.5; white-space:pre-line; }
+  .status{
+    margin-top:14px; font-family:ui-monospace,monospace; font-size:.82rem;
+    color:var(--teks-redup); min-height:1.2em; white-space:pre-line;
+  }
+  .status.error{ color:var(--merah); }
+  .hasil{ display:none; margin-top:8px; }
+  .hasil.tampil{ display:block; }
+  .ringkas{ display:flex; gap:10px; flex-wrap:wrap; margin:6px 0 18px; }
+  .pil{
+    font-family:ui-monospace,monospace; font-size:.75rem; padding:5px 11px;
+    border-radius:999px; border:1px solid var(--garis);
+  }
+  .pil.ya{ color:var(--hijau); border-color:var(--hijau); }
+  .pil.tidak{ color:var(--merah); border-color:var(--merah); }
+  .tab-tombol{ display:flex; gap:8px; margin-bottom:14px; }
+  .tab-tombol button{
+    background:transparent; color:var(--teks-redup); border:1px solid var(--garis);
+    font-weight:500; font-size:.88rem;
+  }
+  .tab-tombol button.aktif{ background:var(--emas); color:#211405; border-color:var(--emas); }
+  .peta-bungkus{
+    border:1px solid var(--garis); border-radius:10px; overflow:hidden;
+    background:#0a1120; position:relative;
+  }
+  #peta{ width:100%; height:560px; }
+  .legenda{
+    background:rgba(7,12,23,.88); border:1px solid var(--garis); border-radius:8px;
+    padding:10px 12px; font-family:ui-monospace,monospace; font-size:.72rem;
+    color:var(--teks); line-height:1.9; backdrop-filter: blur(4px);
+  }
+  .legenda .baris-l{ display:flex; align-items:center; gap:8px; white-space:nowrap; }
+  .legenda .swatch{ width:14px; height:14px; border-radius:3px; flex:none; }
+  .legenda .garis{ width:16px; height:0; border-top-width:2px; border-top-style:solid; flex:none; }
+  .legenda .garis.putus{ border-top-style:dashed; }
+  .spinner{
+    display:inline-block; width:13px; height:13px; border-radius:50%;
+    border:2px solid var(--emas-redup); border-top-color:var(--emas);
+    animation:putar .8s linear infinite; margin-right:8px; vertical-align:-2px;
+  }
+  @keyframes putar{ to{ transform:rotate(360deg); } }
+  footer{
+    position:relative; z-index:1; text-align:center; margin-top:34px;
+    font-family:ui-monospace,monospace; font-size:.72rem; color:var(--emas-redup);
+    letter-spacing:.06em;
+  }
+  .leaflet-popup-content-wrapper, .leaflet-popup-tip{ background:#131f36; color:var(--teks); }
+</style>
+</head>
+<body>
+<div class="bintang"></div>
+
+<header>
+  <div class="bulan-sabit"></div>
+  <h1>HisabWin</h1>
+  <div class="sub">Peta Visibilitas Hilal · MABIMS &amp; Muhammadiyah</div>
+</header>
+
+<main>
+  <!-- LANGKAH 1: cari ijtimak -->
+  <section class="kartu">
+    <div class="langkah"><span class="no">1</span><h2>Cari Ijtimak</h2></div>
+    <div class="baris">
+      <div>
+        <label for="input-tahun">Tahun Masehi</label>
+        <input type="text" id="input-tahun" placeholder="mis. 2026" maxlength="4" inputmode="numeric">
+      </div>
+      <div style="flex:none;"><button id="btn-cari">Cari Ijtimak</button></div>
+    </div>
+    <div id="status-cari" class="status"></div>
+    <div id="daftar-ijtimak" class="daftar-ijtimak" style="display:none;"></div>
+  </section>
+
+  <!-- LANGKAH 2: pilih hari & tampilkan peta -->
+  <section class="kartu" id="kartu-proses" style="opacity:.45; pointer-events:none;">
+    <div class="langkah"><span class="no">2</span><h2>Tampilkan Peta</h2></div>
+    <label>Tanggal yang dihitung</label>
+    <div class="radio-grup">
+      <label><input type="radio" name="hari" value="ijtimak" checked> Hari Ijtimak</label>
+      <label><input type="radio" name="hari" value="setelah"> Sehari Setelah Ijtimak</label>
+    </div>
+    <div style="margin-top:18px;"><button id="btn-proses">Hitung &amp; Tampilkan Peta</button></div>
+    <div id="status-proses" class="status"></div>
+  </section>
+
+  <!-- HASIL -->
+  <section class="kartu hasil" id="kartu-hasil">
+    <div class="langkah"><span class="no">✓</span><h2>Hasil</h2></div>
+    <div class="catatan" id="ringkasan-teks"></div>
+    <div class="ringkas" id="ringkas-pkg"></div>
+
+    <div class="tab-tombol">
+      <button id="tab-mabims" class="aktif">Kriteria MABIMS</button>
+      <button id="tab-muhammadiyah">Kriteria Muhammadiyah</button>
+    </div>
+    <div class="peta-bungkus"><div id="peta"></div></div>
+    <div class="catatan" id="catatan-pkg2"></div>
+  </section>
+</main>
+
+<footer>tribute to WinHisab — peta interaktif Leaflet, tanpa render gambar</footer>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const $ = (sel) => document.querySelector(sel);
+
+const btnCari = $('#btn-cari');
+const inputTahun = $('#input-tahun');
+const statusCari = $('#status-cari');
+const daftarIjtimak = $('#daftar-ijtimak');
+const kartuProses = $('#kartu-proses');
+const btnProses = $('#btn-proses');
+const statusProses = $('#status-proses');
+const kartuHasil = $('#kartu-hasil');
+const ringkasanTeks = $('#ringkasan-teks');
+const ringkasPkg = $('#ringkas-pkg');
+const catatanPkg2 = $('#catatan-pkg2');
+const tabMabims = $('#tab-mabims');
+const tabMuhammadiyah = $('#tab-muhammadiyah');
+
+let tahunAktif = null;
+let indexTerpilih = null;
+let hasilTerakhir = null;
+
+function setStatus(el, teks, error=false, loading=false){
+  el.classList.toggle('error', !!error);
+  el.innerHTML = (loading ? '<span class="spinner"></span>' : '') + teks;
+}
+
+// ---------------------------------------------------------------------
+// Peta Leaflet: basemap gelap (CartoDB dark_matter) + layer group
+// terpisah untuk MABIMS & Muhammadiyah, diisi dari GeoJSON backend.
+// ---------------------------------------------------------------------
+const peta = L.map('peta', { worldCopyJump: true }).setView([10, 20], 2);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+  attribution: '&copy; OpenStreetMap &copy; CARTO',
+  subdomains: 'abcd', maxZoom: 8, minZoom: 1
+}).addTo(peta);
+
+const layerMabims = L.layerGroup().addTo(peta);
+const layerMuhammadiyah = L.layerGroup();
+
+let legendaCtrl = null;
+function pasangLegenda(baris){
+  if(legendaCtrl) peta.removeControl(legendaCtrl);
+  legendaCtrl = L.control({position:'topright'});
+  legendaCtrl.onAdd = () => {
+    const div = L.DomUtil.create('div', 'legenda');
+    div.innerHTML = baris.map(b => {
+      if(b.tipe === 'area'){
+        return `<div class="baris-l"><span class="swatch" style="background:${b.warna};opacity:${b.opasitas||1}"></span>${b.label}</div>`;
+      }
+      const putus = b.putus ? ' putus' : '';
+      return `<div class="baris-l"><span class="garis${putus}" style="border-top-color:${b.warna}"></span>${b.label}</div>`;
+    }).join('');
+    return div;
+  };
+  legendaCtrl.addTo(peta);
+}
+
+function gambarZona(layerGroup, geojson, warna, opasitas){
+  if(!geojson) return;
+  L.geoJSON(geojson, {
+    style: { color: warna, weight: 0, fillColor: warna, fillOpacity: opasitas, fillRule: 'evenodd' }
+  }).addTo(layerGroup);
+}
+function gambarGaris(layerGroup, geojson, warna, putus){
+  if(!geojson) return;
+  L.geoJSON(geojson, {
+    style: { color: warna, weight: 2, dashArray: putus ? '6 5' : null }
+  }).addTo(layerGroup);
+}
+
+function bangunLayerMabims(mabims){
+  layerMabims.clearLayers();
+  gambarZona(layerMabims, mabims.zona_no_sunset, '#6b7280', 0.35);
+  gambarZona(layerMabims, mabims.zona_memenuhi, '#4caf6d', 0.45);
+  gambarGaris(layerMabims, mabims.kontur_alt3, '#4d8fe0', false);
+  gambarGaris(layerMabims, mabims.kontur_elong64, '#e05a4d', false);
+}
+
+function bangunLayerMuhammadiyah(mu){
+  layerMuhammadiyah.clearLayers();
+  gambarZona(layerMuhammadiyah, mu.zona_no_sunset, '#6b7280', 0.3);
+  if(mu.zona_kriteria){
+    gambarZona(layerMuhammadiyah, mu.zona_kriteria, mu.warna_zona, 0.5);
+  }
+  gambarGaris(layerMuhammadiyah, mu.kontur_alt5, '#4d8fe0', false);
+  gambarGaris(layerMuhammadiyah, mu.kontur_elong8, '#e05a4d', false);
+  gambarGaris(layerMuhammadiyah, mu.kontur_cutoff, '#eef1f6', true);
+  if(mu.titik_pkg2){
+    L.marker([mu.titik_pkg2.lat, mu.titik_pkg2.lon], {
+      icon: L.divIcon({ className: '', html: '<div style="color:#e8c04a;font-size:22px;text-shadow:0 0 4px #000;">★</div>',
+                         iconSize:[22,22], iconAnchor:[11,11] })
+    }).bindPopup('Zona PKG 2 (fallback)').addTo(layerMuhammadiyah);
+  }
+}
+
+function tampilkanTab(nama){
+  if(!hasilTerakhir) return;
+  tabMabims.classList.toggle('aktif', nama === 'mabims');
+  tabMuhammadiyah.classList.toggle('aktif', nama === 'muhammadiyah');
+  if(nama === 'mabims'){
+    peta.removeLayer(layerMuhammadiyah);
+    layerMabims.addTo(peta);
+    pasangLegenda([
+      {tipe:'garis', warna:'#4d8fe0', label:'Tinggi hilal = 3°'},
+      {tipe:'garis', warna:'#e05a4d', label:'Elongasi = 6.4°'},
+      {tipe:'area', warna:'#4caf6d', opasitas:.45, label:'Zona memenuhi kriteria MABIMS'},
+      {tipe:'area', warna:'#6b7280', opasitas:.35, label:'Tidak ada sunset'},
+    ]);
+    catatanPkg2.textContent = '';
+  } else {
+    peta.removeLayer(layerMabims);
+    layerMuhammadiyah.addTo(peta);
+    const mu = hasilTerakhir.muhammadiyah;
+    pasangLegenda([
+      {tipe:'garis', warna:'#4d8fe0', label:'Tinggi hilal geosentris = 5°'},
+      {tipe:'garis', warna:'#e05a4d', label:'Elongasi geosentris = 8°'},
+      {tipe:'garis', warna:'#eef1f6', putus:true, label:'Batas cutoff sunset (PKG 1)'},
+      {tipe:'area', warna: mu.warna_zona, opasitas:.5, label: mu.label_zona},
+      {tipe:'area', warna:'#6b7280', opasitas:.3, label:'Tidak ada sunset'},
+    ]);
+    catatanPkg2.textContent = mu.catatan_pkg2 || '';
+  }
+}
+tabMabims.addEventListener('click', () => tampilkanTab('mabims'));
+tabMuhammadiyah.addEventListener('click', () => tampilkanTab('muhammadiyah'));
+
+// ---------------------------------------------------------------------
+// Langkah 1: cari ijtimak
+// ---------------------------------------------------------------------
+btnCari.addEventListener('click', async () => {
+  const tahun = inputTahun.value.trim();
+  if(!/^\d{4}$/.test(tahun)){
+    setStatus(statusCari, 'Masukkan tahun 4 digit, misalnya 2026.', true);
+    return;
+  }
+  btnCari.disabled = true;
+  daftarIjtimak.style.display = 'none';
+  kartuProses.style.opacity = .45;
+  kartuProses.style.pointerEvents = 'none';
+  kartuHasil.classList.remove('tampil');
+  setStatus(statusCari, 'Mencari waktu ijtimak sepanjang tahun ' + tahun + '…', false, true);
+
+  try{
+    const res = await fetch('/api/ijtimak?tahun=' + encodeURIComponent(tahun));
+    const data = await res.json();
+    if(!data.ok){ throw new Error(data.error || 'Gagal mencari ijtimak.'); }
+
+    tahunAktif = data.tahun;
+    indexTerpilih = null;
+    daftarIjtimak.innerHTML = '';
+    data.ijtimak.forEach(item => {
+      const div = document.createElement('div');
+      div.className = 'item-ijtimak';
+      div.textContent = item.label;
+      div.addEventListener('click', () => {
+        [...daftarIjtimak.children].forEach(c => c.classList.remove('aktif'));
+        div.classList.add('aktif');
+        indexTerpilih = item.index;
+        kartuProses.style.opacity = 1;
+        kartuProses.style.pointerEvents = 'auto';
+        setStatus(statusProses, '');
+      });
+      daftarIjtimak.appendChild(div);
+    });
+    daftarIjtimak.style.display = 'block';
+    setStatus(statusCari, `Ditemukan ${data.ijtimak.length} waktu ijtimak. Pilih salah satu di bawah.`);
+  }catch(err){
+    setStatus(statusCari, err.message, true);
+  }finally{
+    btnCari.disabled = false;
+  }
+});
+
+// ---------------------------------------------------------------------
+// Langkah 2: hitung grid & gambar peta interaktif
+// ---------------------------------------------------------------------
+btnProses.addEventListener('click', async () => {
+  if(tahunAktif === null || indexTerpilih === null){
+    setStatus(statusProses, 'Pilih salah satu ijtimak dari daftar di atas dahulu.', true);
+    return;
+  }
+  const hari = document.querySelector('input[name=hari]:checked').value;
+  btnProses.disabled = true;
+  kartuHasil.classList.remove('tampil');
+  setStatus(statusProses, 'Menghitung grid & kontur peta…', false, true);
+
+  try{
+    const res = await fetch('/api/peta', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ tahun: tahunAktif, index: indexTerpilih, hari })
+    });
+    const data = await res.json();
+    if(!data.ok){ throw new Error(data.error || 'Gagal menghitung peta.'); }
+
+    hasilTerakhir = data;
+    ringkasanTeks.textContent = `Ijtimak: ${data.waktu_ijtimak}  ·  Tanggal dihitung: ${data.tanggal}`;
+
+    const pkg1 = data.evaluasi.pkg1_terpenuhi;
+    const pkg2 = data.evaluasi.pkg2_terpenuhi;
+    ringkasPkg.innerHTML =
+      `<span class="pil ${pkg1 ? 'ya' : 'tidak'}">PKG 1 Muhammadiyah: ${pkg1 ? 'terpenuhi' : 'tidak terpenuhi'}</span>` +
+      `<span class="pil ${pkg2 ? 'ya' : 'tidak'}">PKG 2 Muhammadiyah: ${pkg2 ? 'terpenuhi' : 'tidak terpenuhi'}</span>`;
+
+    bangunLayerMabims(data.mabims);
+    bangunLayerMuhammadiyah(data.muhammadiyah);
+    tampilkanTab('mabims');
+
+    kartuHasil.classList.add('tampil');
+    setTimeout(() => peta.invalidateSize(), 60);
+    setStatus(statusProses, 'Selesai.');
+    kartuHasil.scrollIntoView({behavior:'smooth', block:'start'});
+  }catch(err){
+    setStatus(statusProses, err.message, true);
+  }finally{
+    btnProses.disabled = false;
+  }
+});
+
+inputTahun.addEventListener('keydown', (e) => { if(e.key === 'Enter') btnCari.click(); });
+</script>
+</body>
+</html>
