@@ -353,10 +353,30 @@ def unduh_kernel(kernel_id, progress_cb=lambda persen, teks: None, event_batal=N
 
 matplotlib.use("TkAgg")
 
-import cartopy
-import cartopy.crs as ccrs
-import cartopy.feature as cfeature
-import cartopy.io.shapereader as shpreader
+# cartopy HANYA dipakai di fungsi-fungsi buat_figure_*()/_gambar_peta_dasar_
+# indonesia() (menggambar PETA STATIS untuk GUI Tkinter desktop dengan
+# LAND/OCEAN/BORDERS). Fungsi-fungsi kalkulasi murni yang dipakai server.py
+# (cari_ijtimak_tahun, hitung_grid/hitung_grid_jpl, evaluasi_pkg, dkk) SUDAH
+# DIVERIFIKASI (grep menyeluruh) TIDAK menyentuh cartopy/ccrs/cfeature/
+# shpreader sama sekali -- server.py membangun GeoJSON-nya sendiri lewat
+# matplotlib polos (marching-squares) tanpa proyeksi cartopy apa pun.
+#
+# cartopy (+ dependensi native-nya: GEOS, PROJ) berat & besar -- di
+# lingkungan serverless (mis. Vercel) ini mubazir dipasang kalau cuma
+# dipakai fitur GUI desktop yang tidak pernah jalan di jalur web. Makanya
+# import-nya dibuat OPSIONAL: kalau cartopy tidak terpasang, empat nama ini
+# jadi None, dan GUI desktop asli (yang memang butuh cartopy) tetap
+# berfungsi normal di komputer yang sudah pip install cartopy.
+try:
+    import cartopy
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+    import cartopy.io.shapereader as shpreader
+except ImportError:
+    cartopy = None
+    ccrs = None
+    cfeature = None
+    shpreader = None
 import matplotlib.pyplot as plt
 import numpy as np
 import shapely  # dipakai untuk shapely.contains_xy (vectorized, no Python loop)
@@ -384,9 +404,20 @@ import shapely  # dipakai untuk shapely.contains_xy (vectorized, no Python loop)
 # sekali, lalu di-bundle lewat --add-data) ditambahkan, baris ini otomatis
 # memakainya duluan.
 _folder_data_cartopy = os.path.join(_resource_base_dir(), "cartopy_data")
-if os.path.isdir(_folder_data_cartopy):
+if cartopy is not None and os.path.isdir(_folder_data_cartopy):
     cartopy.config["pre_existing_data_dir"] = _folder_data_cartopy
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+# FigureCanvasTkAgg/NavigationToolbar2Tk HANYA dipakai di dalam method GUI
+# HisabWinApp (canvas chart di tab-tab GUI Tkinter), tidak pernah dipanggil
+# dari luar GUI (mis. server.py mode webapp). Dibungkus try/except supaya
+# hisabwin.py tetap bisa di-import di server TANPA Tcl/Tk sama sekali
+# (mis. lingkungan serverless) - kalau gagal, dua nama ini jadi None, dan
+# GUI Tkinter aslinya (yang memang butuh tkinter utuh) tetap berfungsi
+# normal di komputer yang punya Tcl/Tk.
+try:
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+except ImportError:
+    FigureCanvasTkAgg = None
+    NavigationToolbar2Tk = None
 from skyfield import almanac
 from skyfield.api import load, wgs84
 import skyfield.timelib
@@ -2962,16 +2993,24 @@ def cari_zona_pkg2_amerika(tanggal, ts, eph, progress_cb=lambda msg: None, mode=
             "zona": zona2, "ditemukan": bool(np.any(zona2)), "tahap": 2}
 
 
-def _cek_pkg1_terpenuhi(grids):
+def _cek_pkg1_terpenuhi(grids, waktu_ijtimak=None, tanggal=None):
     """Cek cepat (murni baca array, tanpa Skyfield) apakah kriteria PKG 1
-    Muhammadiyah (elongasi>=8 & tinggi hilal geosentris>=5, sebelum pukul
+    Muhammadiyah (elongasi>=8 & tinggi hilal geosentris>=5, SETELAH IJTIMAK dan sebelum pukul
     24.00 UTC) terpenuhi di manapun pada grid global. Dipisah dari
     evaluasi_pkg supaya bisa dipanggil duluan di _hitung_grid_thread untuk
     memutuskan apakah hasil spekulatif PKG 2 Amerika perlu ditunggu."""
     elong_grid, geo_alt_grid, hours_utc_grid = (
         grids["elong_grid"], grids["geo_alt_grid"], grids["hours_utc_grid"]
     )
-    cutoff_mask = (hours_utc_grid >= 0) & (hours_utc_grid <= 24)
+    if waktu_ijtimak is not None and tanggal is not None:
+        dt_naif = _ke_naif(waktu_ijtimak)
+        t_naif = _ke_naif(tanggal)
+        offset_hours = (dt_naif - t_naif).total_seconds() / 3600.0
+        min_utc_hour = max(0.0, offset_hours)
+    else:
+        min_utc_hour = 0.0
+
+    cutoff_mask = (hours_utc_grid >= min_utc_hour) & (hours_utc_grid <= 24.0)
     muhammadiyah_zone = (elong_grid >= 8) & (geo_alt_grid >= 5)
     return bool(np.any(np.where(cutoff_mask, muhammadiyah_zone, False)))
 
@@ -3000,8 +3039,16 @@ def evaluasi_pkg(grids, tanggal, waktu_ijtimak=None, ts=None, eph=None,
 
     muhammadiyah_zone = (elong_grid >= 8) & (geo_alt_grid >= 5)
 
-    # ---- PKG 1: kriteria terpenuhi di manapun sebelum pukul 24.00 UTC ----
-    cutoff_mask = (hours_utc_grid >= 0) & (hours_utc_grid <= 24)
+    # ---- PKG 1: kriteria terpenuhi di manapun SETELAH IJTIMAK & sebelum pukul 24.00 UTC ----
+    if waktu_ijtimak is not None:
+        dt_naif = _ke_naif(waktu_ijtimak)
+        t_naif = _ke_naif(tanggal)
+        offset_hours = (dt_naif - t_naif).total_seconds() / 3600.0
+        min_utc_hour = max(0.0, offset_hours)
+    else:
+        min_utc_hour = 0.0
+
+    cutoff_mask = (hours_utc_grid >= min_utc_hour) & (hours_utc_grid <= 24.0)
     zona_pkg1 = np.where(cutoff_mask, muhammadiyah_zone, False)
     no_sunset_masked = np.where(cutoff_mask, np.isnan(geo_alt_grid), False)
     pkg1_terpenuhi = bool(np.any(zona_pkg1))
@@ -9945,7 +9992,7 @@ class HisabWinApp(tk.Tk):
                 grids = hitung_grid(tanggal, self.ts, self.eph, progress_cb=progress_cb, mode=mode)
 
                 pkg2_precomputed = None
-                if not _cek_pkg1_terpenuhi(grids):
+                if not _cek_pkg1_terpenuhi(grids, waktu_ijtimak=waktu_ijtimak, tanggal=tanggal):
                     progress_cb("PKG 1 tidak terpenuhi -- menunggu hasil PKG 2 Amerika "
                                 "(sudah dihitung paralel sejak awal, tinggal menunggu selesai)...")
                     thread_pkg2.join()

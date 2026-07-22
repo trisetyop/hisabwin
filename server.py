@@ -48,10 +48,98 @@ import matplotlib
 matplotlib.use("Agg")
 _matplotlib_use_asli = matplotlib.use
 matplotlib.use = lambda *a, **k: None
+
+# ---------------------------------------------------------------------------
+# hisabwin.py melakukan "import tkinter as tk" & "from tkinter import
+# filedialog, messagebox, ttk" di baris paling atas, lalu mewarisi tk.Tk /
+# tk.Toplevel / ttk.Notebook di 4 class GUI-nya (DialogKernelJPL,
+# DialogCariObjekHorizons, ClosableNotebook, HisabWinApp). Di komputer
+# desktop tkinter selalu tersedia, tapi lingkungan serverless (mis. Vercel)
+# biasanya TIDAK punya library sistem Tcl/Tk terpasang -> "import tkinter"
+# bisa gagal total dan bikin seluruh server.py ikut gagal, walau kita tidak
+# pernah memakai GUI-nya sama sekali di jalur web ini.
+#
+# Sudah diverifikasi dengan AST parser: keempat class tk.* itu TIDAK punya
+# satu pun statement yang benar-benar jalan saat class-nya didefinisikan
+# (cuma docstring & satu atribut bool biasa) - semua kode tkinter asli ada
+# di DALAM method, yang tidak pernah dipanggil oleh server.py. Jadi kalau
+# tkinter asli tidak ada, aman untuk mengganti "tk.Tk"/"tk.Toplevel"/
+# "ttk.Notebook" dengan class kosong biasa sekadar supaya "class Foo(tk.Tk):"
+# tidak error saat import - tanpa mengubah satu baris pun logika astronomi.
+try:
+    import tkinter as _tk_asli_cek  # noqa: F401
+except ImportError:
+    import types
+
+    class _DummyTkWidget:
+        """Class dasar kosong, dipakai sebagai pengganti tk.Tk/tk.Toplevel
+        HANYA kalau tkinter asli tidak ada di server. Method apa pun yang
+        dipanggil di atasnya (tidak pernah terjadi di jalur web) akan
+        diam-diam tidak melakukan apa-apa, bukan error, biar aman."""
+
+        def __init__(self, *a, **k):
+            pass
+
+        def __getattr__(self, nama):
+            return lambda *a, **k: None
+
+    tk_dummy = types.ModuleType("tkinter")
+    tk_dummy.Tk = _DummyTkWidget
+    tk_dummy.Toplevel = _DummyTkWidget
+
+    ttk_dummy = types.ModuleType("tkinter.ttk")
+    ttk_dummy.Notebook = _DummyTkWidget
+    ttk_dummy.Style = _DummyTkWidget
+    tk_dummy.ttk = ttk_dummy
+
+    filedialog_dummy = types.ModuleType("tkinter.filedialog")
+    messagebox_dummy = types.ModuleType("tkinter.messagebox")
+    tk_dummy.filedialog = filedialog_dummy
+    tk_dummy.messagebox = messagebox_dummy
+
+    sys.modules["tkinter"] = tk_dummy
+    sys.modules["tkinter.ttk"] = ttk_dummy
+    sys.modules["tkinter.filedialog"] = filedialog_dummy
+    sys.modules["tkinter.messagebox"] = messagebox_dummy
+
+# hisabwin.py otomatis memanggil _tampilkan_splash_awal() di level modul
+# (baris 151-152 di hisabwin.py) - ini untuk GUI Tkinter aslinya, supaya
+# splash muncul selagi import berat (cartopy/matplotlib/skyfield) jalan.
+# Splash itu HANYA ditutup lagi oleh _tutup_splash_awal() di dalam
+# HisabWinApp.__init__ - yang tidak pernah dipanggil di server.py ini
+# (server.py cuma memakai fungsi kalkulasinya, bukan GUI-nya sama sekali).
+# Akibatnya jendela splash muncul lalu nyangkut selamanya tiap kali
+# server.py dijalankan.
+#
+# CATATAN: jangan coba mem-patch tkinter.Tk itu sendiri - hisabwin.py juga
+# punya "class HisabWinApp(tk.Tk):" di level modul, yang butuh tk.Tk tetap
+# berupa class Tkinter asli (bukan fungsi/lambda) supaya class statement-nya
+# tidak error saat import.
+#
+# Solusi yang aman: _tampilkan_splash_awal() mengecek dulu apakah file
+# "splash.png" ada (os.path.isfile) SEBELUM membuat window tk.Tk() apapun,
+# dan langsung return None kalau filenya tidak ditemukan - tanpa membuat
+# window sama sekali. Jadi kita cukup membuat os.path.isfile() sementara
+# menganggap "splash.png" tidak ada, khusus selama proses import hisabwin
+# di bawah ini, supaya splash gagal dibuat dengan aman (fungsi itu memang
+# didesain "aman gagal diam-diam") dan tidak pernah tampil di layar sama
+# sekali pada mode webapp - tanpa mengubah perilaku os.path.isfile untuk
+# file lain.
+_isfile_asli = os.path.isfile
+
+
+def _isfile_tanpa_splash(path):
+    if os.path.basename(path) == "splash.png":
+        return False
+    return _isfile_asli(path)
+
+
+os.path.isfile = _isfile_tanpa_splash
 try:
     import hisabwin as hw
 finally:
     matplotlib.use = _matplotlib_use_asli
+    os.path.isfile = _isfile_asli
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -61,12 +149,17 @@ from flask import Flask, jsonify, request, send_from_directory
 
 app = Flask(__name__)
 
+# _state_lock & _ts/_eph SENGAJA tetap disimpan di memori proses (bukan di
+# database eksternal): kalau proses/instance-nya masih "hangat" (warm),
+# ephemeris tidak perlu dimuat ulang tiap request -> lebih cepat. Tapi
+# TIDAK ADA logika yang WAJIB mengandalkan ini tetap ada antar-request -
+# kalau instance-nya baru/dingin (umum terjadi di lingkungan serverless
+# seperti Vercel, tiap request bisa kena instance berbeda), _pastikan_
+# ephemeris() otomatis memuat ulang dari awal - jadi tetap benar, cuma
+# sedikit lebih lambat di request pertama tiap instance baru.
 _state_lock = threading.Lock()
 _ts = None
 _eph = None
-
-# Cache sederhana di memori: {tahun: [datetime UTC, ...]}
-_cache_ijtimak = {}
 
 
 def _pastikan_ephemeris():
@@ -97,6 +190,22 @@ def _dummy_axes():
     return fig, ax
 
 
+def _split_antimeridian_seg(seg):
+    """Membagi segmen garis [[lon, lat], ...] jika ada loncat garis di antimeridian (|lon2 - lon1| > 180)."""
+    subsegs = []
+    curr = [seg[0]]
+    for i in range(1, len(seg)):
+        if abs(seg[i][0] - seg[i-1][0]) > 180:
+            if len(curr) >= 2:
+                subsegs.append(curr)
+            curr = [seg[i]]
+        else:
+            curr.append(seg[i])
+    if len(curr) >= 2:
+        subsegs.append(curr)
+    return subsegs
+
+
 def _garis_geojson(ax, lon_mesh, lat_mesh, grid, levels):
     """Kontur garis (mis. batas tinggi hilal = 3 derajat) -> MultiLineString."""
     if np.isscalar(levels):
@@ -109,8 +218,47 @@ def _garis_geojson(ax, lon_mesh, lat_mesh, grid, levels):
     for seg_list in cs.allsegs:
         for seg in seg_list:
             if len(seg) >= 2:
-                coords.append(np.round(seg, 3).tolist())
+                rounded = np.round(seg, 3).tolist()
+                for sub in _split_antimeridian_seg(rounded):
+                    coords.append(sub)
     return {"type": "MultiLineString", "coordinates": coords} if coords else None
+
+
+def _kontur_berlabel_geojson(ax, lon_mesh, lat_mesh, grid, levels):
+    """Sama seperti _garis_geojson, tapi utk BANYAK level kontur sekaligus
+    (mis. tiap 0.2 derajat, gaya peta BMKG) - satu Feature LineString per
+    segmen garis, dengan properti 'level' supaya nilainya bisa dilabeli di
+    peta Leaflet sisi client (mirip ax.clabel di gambar matplotlib asli)."""
+    grid = np.asarray(grid, dtype=float)
+    if not np.any(~np.isnan(grid)):
+        return None
+    cs = ax.contour(lon_mesh, lat_mesh, grid, levels=levels)
+    features = []
+    for lvl, seg_list in zip(cs.levels, cs.allsegs):
+        for seg in seg_list:
+            if len(seg) >= 2:
+                rounded = np.round(seg, 3).tolist()
+                for sub in _split_antimeridian_seg(rounded):
+                    features.append({
+                        "type": "Feature",
+                        "properties": {"level": round(float(lvl), 2)},
+                        "geometry": {"type": "LineString", "coordinates": sub},
+                    })
+    return {"type": "FeatureCollection", "features": features} if features else None
+
+
+def _levels_02(grid, lo_default, hi_default):
+    """Level kontur tiap 0.2 derajat, dibulatkan ke rentang data (persis
+    logika yang sama seperti buat_figure_indonesia_tinggi_hilal/elongasi
+    di hisabwin.py) - dipakai berdua supaya garisnya identik dgn versi GUI."""
+    grid = np.asarray(grid, dtype=float)
+    valid = ~np.isnan(grid)
+    if np.any(valid):
+        lo = np.floor(np.nanmin(grid) / 0.2) * 0.2
+        hi = np.ceil(np.nanmax(grid) / 0.2) * 0.2
+    else:
+        lo, hi = lo_default, hi_default
+    return np.arange(lo, hi + 0.001, 0.2)
 
 
 def _zona_geojson(ax, lon_mesh, lat_mesh, mask_bool):
@@ -154,30 +302,84 @@ def _zona_geojson(ax, lon_mesh, lat_mesh, mask_bool):
 
 
 # ---------------------------------------------------------------------------
+# In-Memory Python Cache & Vercel Edge CDN Cache-Control Manager
+# ---------------------------------------------------------------------------
+import hashlib
+import json
+
+_API_RESPONSE_CACHE = {}
+_MAX_CACHE_ENTRIES = 500
+
+
+def _make_cached_response(endpoint, payload, compute_fn, s_maxage=31536000, immutable=False):
+    """
+    Eksekusi compute_fn dengan caching 2 tingkat:
+    1. In-Memory Cache (sub-milidetik untuk request berulang di instance serverless yang sama)
+    2. Vercel Edge CDN Cache-Control Header (s-maxage & immutable), hemat komputasi Vercel 100%!
+    """
+    key_raw = endpoint + ":" + json.dumps(payload, sort_keys=True, default=str)
+    cache_key = hashlib.md5(key_raw.encode("utf-8")).hexdigest()
+
+    cache_header = f"public, max-age=31536000, s-maxage={s_maxage}"
+    if immutable:
+        cache_header += ", immutable"
+    else:
+        cache_header += ", stale-while-revalidate=86400"
+
+    if cache_key in _API_RESPONSE_CACHE:
+        data = _API_RESPONSE_CACHE[cache_key]
+        res = jsonify(data)
+        res.headers["Cache-Control"] = cache_header
+        res.headers["X-Cache-Status"] = "HIT-MEMORY"
+        return res
+
+    data = compute_fn()
+    if isinstance(data, dict) and data.get("ok"):
+        if len(_API_RESPONSE_CACHE) >= _MAX_CACHE_ENTRIES:
+            _API_RESPONSE_CACHE.clear()
+        _API_RESPONSE_CACHE[cache_key] = data
+
+    res = jsonify(data)
+    res.headers["Cache-Control"] = cache_header
+    res.headers["X-Cache-Status"] = "MISS"
+    return res
+
+
+# ---------------------------------------------------------------------------
 # Endpoint: cari semua ijtimak (konjungsi) sepanjang tahun tertentu.
 # ---------------------------------------------------------------------------
 @app.route("/api/ijtimak")
 def api_ijtimak():
     tahun_str = request.args.get("tahun", "").strip()
+    mode = request.args.get("mode", "jpl").strip().lower()
+    if mode not in ("jpl", "ringan"):
+        mode = "jpl"
+
     if not (tahun_str.isdigit() and len(tahun_str) == 4):
         return _error_response("Masukkan tahun 4 digit, misalnya 2026.")
     tahun = int(tahun_str)
 
-    try:
+    def _hitung():
         with _state_lock:
-            _pastikan_ephemeris()
-            waktu_list = hw.cari_ijtimak_tahun(tahun, _ts, _eph, mode="jpl")
+            if mode == "jpl":
+                _pastikan_ephemeris()
+                ts_arg, eph_arg = _ts, _eph
+            else:
+                ts_arg, eph_arg = None, None
+            waktu_list = hw.cari_ijtimak_tahun(tahun, ts_arg, eph_arg, mode=mode)
             waktu_utc = [hw.ke_utc_datetime(t) for t in waktu_list]
-            _cache_ijtimak[tahun] = waktu_utc
+
+        hasil = [
+            {"index": i, "iso": dt.isoformat(), "label": hw.format_waktu_ijtimak(dt)}
+            for i, dt in enumerate(waktu_utc)
+        ]
+        return {"ok": True, "tahun": tahun, "mode": mode, "ijtimak": hasil}
+
+    try:
+        return _make_cached_response("/api/ijtimak", {"tahun": tahun, "mode": mode}, _hitung, s_maxage=31536000, immutable=True)
     except Exception as e:
         traceback.print_exc()
         return _error_response(f"Gagal mencari ijtimak: {e}", 500)
-
-    hasil = [
-        {"index": i, "iso": dt.isoformat(), "label": hw.format_waktu_ijtimak(dt)}
-        for i, dt in enumerate(waktu_utc)
-    ]
-    return jsonify({"ok": True, "tahun": tahun, "ijtimak": hasil})
 
 
 # ---------------------------------------------------------------------------
@@ -187,136 +389,395 @@ def api_ijtimak():
 @app.route("/api/peta", methods=["POST"])
 def api_peta():
     data = request.get_json(force=True, silent=True) or {}
-    tahun = data.get("tahun")
-    index = data.get("index")
+    iso = data.get("iso")
     hari = data.get("hari", "ijtimak")  # "ijtimak" atau "setelah"
+    mode = str(data.get("mode", "jpl")).strip().lower()
+    if mode not in ("jpl", "ringan"):
+        mode = "jpl"
 
-    if tahun is None or index is None:
-        return _error_response("Parameter 'tahun' dan 'index' wajib diisi.")
+    # CATATAN: endpoint ini SENGAJA dibuat stateless - client mengirim balik
+    # nilai "iso" (waktu ijtimak UTC) yang tadi didapat dari /api/ijtimak,
+    # bukan cuma "tahun"+"index" yang dulu dipakai untuk mencari lagi ke
+    # cache di memori server. Kenapa diubah: di lingkungan serverless
+    # (mis. Vercel) tiap request bisa ditangani instance proses yang
+    # berbeda-beda, jadi cache di memori dari request /api/ijtimak
+    # sebelumnya bisa saja sudah tidak ada lagi saat /api/peta dipanggil.
+    # Dengan client mengirim balik "iso" secara langsung, endpoint ini
+    # tidak bergantung sama sekali pada state dari request lain.
+    if not iso:
+        return _error_response("Parameter 'iso' (waktu ijtimak dari hasil /api/ijtimak) wajib diisi.")
     try:
-        tahun = int(tahun)
-        index = int(index)
+        waktu_ijtimak = datetime.fromisoformat(iso)
     except (TypeError, ValueError):
-        return _error_response("Parameter 'tahun'/'index' tidak valid.")
+        return _error_response("Parameter 'iso' tidak valid.")
 
-    if tahun not in _cache_ijtimak:
-        return _error_response("Cari ijtimak untuk tahun ini dahulu (panggil /api/ijtimak).")
-    waktu_list = _cache_ijtimak[tahun]
-    if not (0 <= index < len(waktu_list)):
-        return _error_response("Index ijtimak di luar jangkauan.")
-
-    waktu_ijtimak = waktu_list[index]
     tanggal_ijtimak = datetime(waktu_ijtimak.year, waktu_ijtimak.month, waktu_ijtimak.day)
     tanggal = tanggal_ijtimak if hari == "ijtimak" else tanggal_ijtimak + timedelta(days=1)
 
-    fig_tmp = None
+    def _hitung():
+        fig_tmp = None
+        try:
+            with _state_lock:
+                if mode == "jpl":
+                    _pastikan_ephemeris()
+                    ts_arg, eph_arg = _ts, _eph
+                else:
+                    ts_arg, eph_arg = None, None
+
+                grids = hw.hitung_grid(tanggal, ts_arg, eph_arg, mode=mode)
+                evaluasi = hw.evaluasi_pkg(
+                    grids, tanggal, waktu_ijtimak=waktu_ijtimak, ts=ts_arg, eph=eph_arg, mode=mode
+                )
+
+                lon_mesh, lat_mesh = grids["lon_mesh"], grids["lat_mesh"]
+                elong_grid, alt_grid = grids["elong_grid"], grids["alt_grid"]
+                geo_alt_grid, hours_utc_grid = grids["geo_alt_grid"], grids["hours_utc_grid"]
+
+                fig_tmp, ax_tmp = _dummy_axes()
+
+                # ---- Peta MABIMS: elongasi >= 6.4 derajat & tinggi hilal >= 3 derajat (toposentris) ----
+                mabims_zone = (elong_grid >= 6.4) & (alt_grid >= 3)
+                mabims = {
+                    "zona_memenuhi": _zona_geojson(ax_tmp, lon_mesh, lat_mesh, mabims_zone),
+                    "kontur_alt3": _garis_geojson(ax_tmp, lon_mesh, lat_mesh, alt_grid, 3),
+                    "kontur_elong64": _garis_geojson(ax_tmp, lon_mesh, lat_mesh, elong_grid, 6.4),
+                    "zona_no_sunset": _zona_geojson(ax_tmp, lon_mesh, lat_mesh, np.isnan(alt_grid)),
+                }
+
+                # ---- Peta Muhammadiyah: elongasi >= 8 derajat & tinggi hilal >= 5 derajat (geosentris) ----
+                pkg1 = evaluasi["pkg1_terpenuhi"]
+                pkg2 = evaluasi["pkg2_terpenuhi"]
+                titik_pkg2 = None
+
+                if pkg1:
+                    warna, label = "#e08a2e", "Zona memenuhi kriteria (PKG 1 & PKG 2 terpenuhi)"
+                    zona_kriteria = _zona_geojson(ax_tmp, lon_mesh, lat_mesh, evaluasi["zona_pkg1"])
+                elif pkg2:
+                    warna, label = "#e8c04a", "Zona memenuhi PKG 2 (fallback, daratan utama Amerika)"
+                    hasil_pkg2 = evaluasi["hasil_pkg2"]
+                    lon2, lat2, zona2 = hasil_pkg2["lon_mesh"], hasil_pkg2["lat_mesh"], hasil_pkg2["zona"]
+                    zona_kriteria = _zona_geojson(ax_tmp, lon2, lat2, zona2)
+                    if np.any(zona2):
+                        titik_pkg2 = {"lat": round(float(lat2[zona2].mean()), 3),
+                                      "lon": round(float(lon2[zona2].mean()), 3)}
+                else:
+                    warna, label = "#e08a2e", "Zona memenuhi kriteria Muhammadiyah"
+                    zona_kriteria = None
+
+                if pkg1:
+                    status_teks = "PKG 1 & PKG 2 terpenuhi"
+                elif pkg2:
+                    status_teks = "PKG 1 tidak terpenuhi — fallback ke PKG 2: terpenuhi"
+                else:
+                    status_teks = "PKG 1 & PKG 2 tidak terpenuhi"
+
+                catatan_pkg2 = None
+                if not pkg1:
+                    baris = []
+                    wfnz = evaluasi["waktu_fajar_nz"]
+                    if wfnz is not None:
+                        cek = "OK" if evaluasi["pkg2_ijtimak_ok"] else "TIDAK terpenuhi"
+                        baris.append(
+                            f"Ijtimak {waktu_ijtimak.strftime('%d %b %Y %H:%M')} UTC vs "
+                            f"fajar NZ {wfnz.strftime('%d %b %Y %H:%M')} UTC -> {cek}"
+                        )
+                    else:
+                        baris.append("Waktu fajar NZ tidak dapat dihitung.")
+                    hp2 = evaluasi["hasil_pkg2"]
+                    if hp2 is not None:
+                        ket = "terpenuhi" if hp2["ditemukan"] else "TIDAK terpenuhi"
+                        baris.append(f"Kriteria 5°/8° di daratan utama Amerika: {ket} (pencarian tahap {hp2['tahap']})")
+                    else:
+                        baris.append("Kriteria 5°/8° di daratan utama Amerika: tidak dapat diperiksa.")
+                    catatan_pkg2 = "\n".join(baris)
+
+                muhammadiyah = {
+                    "warna_zona": warna,
+                    "label_zona": label,
+                    "zona_kriteria": zona_kriteria,
+                    "titik_pkg2": titik_pkg2,
+                    "kontur_alt5": _garis_geojson(ax_tmp, lon_mesh, lat_mesh, geo_alt_grid, 5),
+                    "kontur_elong8": _garis_geojson(ax_tmp, lon_mesh, lat_mesh, elong_grid, 8),
+                    "zona_no_sunset": _zona_geojson(ax_tmp, lon_mesh, lat_mesh, evaluasi["no_sunset_masked"]),
+                    "kontur_cutoff": _garis_geojson(ax_tmp, lon_mesh, lat_mesh, hours_utc_grid, [0, 24]),
+                    "status_teks": status_teks,
+                    "catatan_pkg2": catatan_pkg2,
+                }
+            return {
+                "ok": True,
+                "mode": mode,
+                "tanggal": tanggal.strftime("%d %B %Y"),
+                "waktu_ijtimak": hw.format_waktu_ijtimak(waktu_ijtimak),
+                "evaluasi": {
+                    "pkg1_terpenuhi": bool(evaluasi.get("pkg1_terpenuhi")),
+                    "pkg2_terpenuhi": bool(evaluasi.get("pkg2_terpenuhi")),
+                    "pkg2_ijtimak_ok": bool(evaluasi.get("pkg2_ijtimak_ok")) if evaluasi.get("pkg2_ijtimak_ok") is not None else None,
+                },
+                "mabims": mabims,
+                "muhammadiyah": muhammadiyah,
+            }
+        finally:
+            if fig_tmp is not None:
+                plt.close(fig_tmp)
+
     try:
-        with _state_lock:
-            _pastikan_ephemeris()
-
-            grids = hw.hitung_grid(tanggal, _ts, _eph, mode="jpl")
-            evaluasi = hw.evaluasi_pkg(
-                grids, tanggal, waktu_ijtimak=waktu_ijtimak, ts=_ts, eph=_eph, mode="jpl"
-            )
-
-            lon_mesh, lat_mesh = grids["lon_mesh"], grids["lat_mesh"]
-            elong_grid, alt_grid = grids["elong_grid"], grids["alt_grid"]
-            geo_alt_grid, hours_utc_grid = grids["geo_alt_grid"], grids["hours_utc_grid"]
-
-            fig_tmp, ax_tmp = _dummy_axes()
-
-            # ---- Peta MABIMS: elongasi >= 6.4 derajat & tinggi hilal >= 3 derajat (toposentris) ----
-            mabims_zone = (elong_grid >= 6.4) & (alt_grid >= 3)
-            mabims = {
-                "zona_memenuhi": _zona_geojson(ax_tmp, lon_mesh, lat_mesh, mabims_zone),
-                "kontur_alt3": _garis_geojson(ax_tmp, lon_mesh, lat_mesh, alt_grid, 3),
-                "kontur_elong64": _garis_geojson(ax_tmp, lon_mesh, lat_mesh, elong_grid, 6.4),
-                "zona_no_sunset": _zona_geojson(ax_tmp, lon_mesh, lat_mesh, np.isnan(alt_grid)),
-            }
-
-            # ---- Peta Muhammadiyah: elongasi >= 8 derajat & tinggi hilal >= 5 derajat (geosentris) ----
-            pkg1 = evaluasi["pkg1_terpenuhi"]
-            pkg2 = evaluasi["pkg2_terpenuhi"]
-            titik_pkg2 = None
-
-            if pkg1:
-                warna, label = "#e08a2e", "Zona memenuhi kriteria (PKG 1 & PKG 2 terpenuhi)"
-                zona_kriteria = _zona_geojson(ax_tmp, lon_mesh, lat_mesh, evaluasi["zona_pkg1"])
-            elif pkg2:
-                warna, label = "#e8c04a", "Zona memenuhi PKG 2 (fallback, daratan utama Amerika)"
-                hasil_pkg2 = evaluasi["hasil_pkg2"]
-                lon2, lat2, zona2 = hasil_pkg2["lon_mesh"], hasil_pkg2["lat_mesh"], hasil_pkg2["zona"]
-                zona_kriteria = _zona_geojson(ax_tmp, lon2, lat2, zona2)
-                if np.any(zona2):
-                    titik_pkg2 = {"lat": round(float(lat2[zona2].mean()), 3),
-                                  "lon": round(float(lon2[zona2].mean()), 3)}
-            else:
-                warna, label = "#e08a2e", "Zona memenuhi kriteria Muhammadiyah"
-                zona_kriteria = None
-
-            if pkg1:
-                status_teks = "PKG 1 & PKG 2 terpenuhi"
-            elif pkg2:
-                status_teks = "PKG 1 tidak terpenuhi — fallback ke PKG 2: terpenuhi"
-            else:
-                status_teks = "PKG 1 & PKG 2 tidak terpenuhi"
-
-            catatan_pkg2 = None
-            if not pkg1:
-                baris = []
-                wfnz = evaluasi["waktu_fajar_nz"]
-                if wfnz is not None:
-                    cek = "OK" if evaluasi["pkg2_ijtimak_ok"] else "TIDAK terpenuhi"
-                    baris.append(
-                        f"Ijtimak {waktu_ijtimak.strftime('%d %b %Y %H:%M')} UTC vs "
-                        f"fajar NZ {wfnz.strftime('%d %b %Y %H:%M')} UTC -> {cek}"
-                    )
-                else:
-                    baris.append("Waktu fajar NZ tidak dapat dihitung.")
-                hp2 = evaluasi["hasil_pkg2"]
-                if hp2 is not None:
-                    ket = "terpenuhi" if hp2["ditemukan"] else "TIDAK terpenuhi"
-                    baris.append(f"Kriteria 5°/8° di daratan utama Amerika: {ket} (pencarian tahap {hp2['tahap']})")
-                else:
-                    baris.append("Kriteria 5°/8° di daratan utama Amerika: tidak dapat diperiksa.")
-                catatan_pkg2 = "\n".join(baris)
-
-            muhammadiyah = {
-                "warna_zona": warna,
-                "label_zona": label,
-                "zona_kriteria": zona_kriteria,
-                "titik_pkg2": titik_pkg2,
-                "kontur_alt5": _garis_geojson(ax_tmp, lon_mesh, lat_mesh, geo_alt_grid, 5),
-                "kontur_elong8": _garis_geojson(ax_tmp, lon_mesh, lat_mesh, elong_grid, 8),
-                "zona_no_sunset": _zona_geojson(ax_tmp, lon_mesh, lat_mesh, evaluasi["no_sunset_masked"]),
-                "kontur_cutoff": _garis_geojson(ax_tmp, lon_mesh, lat_mesh, hours_utc_grid, [0, 24]),
-                "status_teks": status_teks,
-                "catatan_pkg2": catatan_pkg2,
-            }
+        return _make_cached_response("/api/peta", {"iso": iso, "hari": hari, "mode": mode}, _hitung, s_maxage=31536000, immutable=True)
     except Exception as e:
         traceback.print_exc()
         return _error_response(f"Gagal menghitung peta: {e}", 500)
-    finally:
-        if fig_tmp is not None:
-            plt.close(fig_tmp)
 
-    return jsonify({
-        "ok": True,
-        "tanggal": tanggal.strftime("%d %B %Y"),
-        "waktu_ijtimak": hw.format_waktu_ijtimak(waktu_ijtimak),
-        "evaluasi": {
-            "pkg1_terpenuhi": bool(evaluasi.get("pkg1_terpenuhi")),
-            "pkg2_terpenuhi": bool(evaluasi.get("pkg2_terpenuhi")),
-            "pkg2_ijtimak_ok": bool(evaluasi.get("pkg2_ijtimak_ok")) if evaluasi.get("pkg2_ijtimak_ok") is not None else None,
-        },
-        "mabims": mabims,
-        "muhammadiyah": muhammadiyah,
-    })
 
+# ---------------------------------------------------------------------------
+# Endpoint: peta khusus wilayah Indonesia (tinggi hilal & elongasi, gaya
+# kontur BMKG tiap 0.2 derajat)
+# ---------------------------------------------------------------------------
+@app.route("/api/peta_indonesia", methods=["POST"])
+def api_peta_indonesia():
+    data = request.get_json(force=True, silent=True) or {}
+    iso = data.get("iso")
+    hari = data.get("hari", "ijtimak")
+    mode = str(data.get("mode", "jpl")).strip().lower()
+    if mode not in ("jpl", "ringan"):
+        mode = "jpl"
+
+    if not iso:
+        return _error_response("Parameter 'iso' (waktu ijtimak dari hasil /api/ijtimak) wajib diisi.")
+    try:
+        waktu_ijtimak = datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return _error_response("Parameter 'iso' tidak valid.")
+
+    tanggal_ijtimak = datetime(waktu_ijtimak.year, waktu_ijtimak.month, waktu_ijtimak.day)
+    tanggal = tanggal_ijtimak if hari == "ijtimak" else tanggal_ijtimak + timedelta(days=1)
+
+    def _hitung():
+        fig_tmp = None
+        try:
+            with _state_lock:
+                if mode == "jpl":
+                    _pastikan_ephemeris()
+                    ts_arg, eph_arg = _ts, _eph
+                else:
+                    ts_arg, eph_arg = None, None
+
+                grids_id = hw.hitung_grid_indonesia(tanggal, ts_arg, eph_arg, mode=mode)
+                lon_mesh, lat_mesh = grids_id["lon_mesh"], grids_id["lat_mesh"]
+                alt_grid, elong_grid = grids_id["alt_grid"], grids_id["elong_grid"]
+
+                fig_tmp, ax_tmp = _dummy_axes()
+
+                # ---- Peta tinggi hilal toposentris (garis tiap 0.2°, ambang MABIMS 3°) ----
+                tinggi_hilal = {
+                    "kontur": _kontur_berlabel_geojson(
+                        ax_tmp, lon_mesh, lat_mesh, alt_grid, _levels_02(alt_grid, -2.0, 10.0)
+                    ),
+                    "kontur_ambang": _garis_geojson(ax_tmp, lon_mesh, lat_mesh, alt_grid, 3.0),
+                    "ambang": 3.0,
+                    "ambang_label": "Ambang MABIMS: tinggi hilal 3°",
+                }
+
+                # ---- Peta elongasi (garis tiap 0.2°, ambang MABIMS 6.4°) ----
+                elongasi = {
+                    "kontur": _kontur_berlabel_geojson(
+                        ax_tmp, lon_mesh, lat_mesh, elong_grid, _levels_02(elong_grid, 0.0, 12.0)
+                    ),
+                    "kontur_ambang": _garis_geojson(ax_tmp, lon_mesh, lat_mesh, elong_grid, 6.4),
+                    "ambang": 6.4,
+                    "ambang_label": "Ambang MABIMS: elongasi 6.4°",
+                }
+            return {
+                "ok": True,
+                "mode": mode,
+                "tanggal": tanggal.strftime("%d %B %Y"),
+                "waktu_ijtimak": hw.format_waktu_ijtimak(waktu_ijtimak),
+                "bounds": {
+                    "lat_min": hw.INDONESIA_LAT_RANGE[0], "lat_max": hw.INDONESIA_LAT_RANGE[1],
+                    "lon_min": hw.INDONESIA_LON_RANGE[0], "lon_max": hw.INDONESIA_LON_RANGE[1],
+                },
+                "tinggi_hilal": tinggi_hilal,
+                "elongasi": elongasi,
+            }
+        finally:
+            if fig_tmp is not None:
+                plt.close(fig_tmp)
+
+    try:
+        return _make_cached_response("/api/peta_indonesia", {"iso": iso, "hari": hari, "mode": mode}, _hitung, s_maxage=31536000, immutable=True)
+    except Exception as e:
+        traceback.print_exc()
+        return _error_response(f"Gagal menghitung peta Indonesia: {e}", 500)
+
+
+# ---------------------------------------------------------------------------
+# Endpoint: hitung waktu sholat hari ini & arah kiblat
+# ---------------------------------------------------------------------------
+@app.route("/api/sholat", methods=["POST"])
+def api_sholat():
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        tgl_str = data.get("tanggal")
+        if tgl_str:
+            tanggal = datetime.fromisoformat(tgl_str)
+        else:
+            now = datetime.now()
+            tanggal = datetime(now.year, now.month, now.day)
+
+        lat = float(data.get("lat", -6.1751))
+        lon = float(data.get("lon", 106.8272))
+        zona = float(data.get("zona", 7.0))
+        elevasi = float(data.get("elevasi", 0.0))
+        sudut_fajar = float(data.get("sudut_fajar", -20.0))
+        sudut_isya = float(data.get("sudut_isya", -18.0))
+        ihtiyat = float(data.get("ihtiyat", 2.0))
+        imsak_offset = float(data.get("imsak_offset", 10.0))
+        mazhab = str(data.get("mazhab", "syafii")).lower()
+        mode = str(data.get("mode", "jpl")).strip().lower()
+        if mode not in ("jpl", "ringan"):
+            mode = "jpl"
+    except Exception as e:
+        return _error_response(f"Parameter input tidak valid: {e}")
+
+    def _hitung():
+        with _state_lock:
+            if mode == "jpl":
+                _pastikan_ephemeris()
+                ts_arg, eph_arg = _ts, _eph
+            else:
+                ts_arg, eph_arg = None, None
+
+            waktu_dict = hw.hitung_waktu_sholat_otomatis(
+                tanggal, lat, lon, zona, mode=mode, ts=ts_arg, eph=eph_arg,
+                elevasi_m=elevasi, sudut_fajar=sudut_fajar, sudut_isya=sudut_isya,
+                ihtiyat_menit=ihtiyat, imsak_sebelum_fajr_menit=imsak_offset, mazhab_ashar=mazhab
+            )
+            az_v, dist_v = hw.qibla_vincenty(lat, lon)
+            az_s, dist_s = hw.qibla_spherical(lat, lon)
+
+        waktu_formatted = {k: hw.format_jam_desimal(v) for k, v in waktu_dict.items()}
+
+        dms_lat = hw.format_dms(lat, "lat")
+        dms_lon = hw.format_dms(lon, "lon")
+
+        selisih_u = (az_v - 270.0) if az_v >= 270 else (360.0 - az_v)
+        arah_kiblat_str = f"U {selisih_u:.2f}° B ({az_v:.2f}° Azimuth)"
+
+        return {
+            "ok": True,
+            "mode": mode,
+            "tanggal_iso": tanggal.strftime("%Y-%m-%d"),
+            "tanggal_formatted": f"{tanggal.day} {hw.BULAN_ID[tanggal.month-1]} {tanggal.year}",
+            "koordinat": {
+                "lat": lat, "lon": lon, "zona": zona, "elevasi": elevasi,
+                "lat_dms": dms_lat, "lon_dms": dms_lon
+            },
+            "waktu": waktu_formatted,
+            "waktu_desimal": {k: (round(v, 4) if v is not None else None) for k, v in waktu_dict.items()},
+            "kiblat": {
+                "az_vincenty": round(az_v, 2),
+                "az_spherical": round(az_s, 2),
+                "jarak_km": round(dist_v, 1),
+                "arah_teks": arah_kiblat_str,
+                "kiblat_v_jam": hw.format_jam_desimal(waktu_dict.get("kiblat_v")),
+                "kiblat_s_jam": hw.format_jam_desimal(waktu_dict.get("kiblat_s"))
+            }
+        }
+
+    try:
+        return _make_cached_response("/api/sholat", data, _hitung)
+    except Exception as e:
+        traceback.print_exc()
+        return _error_response(f"Gagal menghitung waktu sholat: {e}", 500)
+
+
+# ---------------------------------------------------------------------------
+# Endpoint: hitung jadwal sholat 1 bulan penuh
+# ---------------------------------------------------------------------------
+@app.route("/api/sholat_bulan", methods=["POST"])
+def api_sholat_bulan():
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        now = datetime.now()
+        tahun = int(data.get("tahun", now.year))
+        bulan = int(data.get("bulan", now.month))
+        lat = float(data.get("lat", -6.1751))
+        lon = float(data.get("lon", 106.8272))
+        zona = float(data.get("zona", 7.0))
+        elevasi = float(data.get("elevasi", 0.0))
+        sudut_fajar = float(data.get("sudut_fajar", -20.0))
+        sudut_isya = float(data.get("sudut_isya", -18.0))
+        ihtiyat = float(data.get("ihtiyat", 2.0))
+        imsak_offset = float(data.get("imsak_offset", 10.0))
+        mazhab = str(data.get("mazhab", "syafii")).lower()
+        mode = str(data.get("mode", "jpl")).strip().lower()
+        if mode not in ("jpl", "ringan"):
+            mode = "jpl"
+    except Exception as e:
+        return _error_response(f"Parameter input tidak valid: {e}")
+
+    def _hitung():
+        with _state_lock:
+            if mode == "jpl":
+                _pastikan_ephemeris()
+                ts_arg, eph_arg = _ts, _eph
+            else:
+                ts_arg, eph_arg = None, None
+
+            jadwal_raw = hw.hitung_jadwal_sholat_bulan(
+                tahun, bulan, lat, lon, zona, mode=mode, ts=ts_arg, eph=eph_arg,
+                elevasi_m=elevasi, sudut_fajar=sudut_fajar, sudut_isya=sudut_isya,
+                ihtiyat_menit=ihtiyat, imsak_sebelum_fajr_menit=imsak_offset, mazhab_ashar=mazhab
+            )
+
+        jadwal = []
+        for tgl, w_dict in jadwal_raw:
+            idx_hari = (tgl.weekday() + 1) % 7
+            hari_nama = hw.HARI_ID[idx_hari]
+            jadwal.append({
+                "tgl": tgl.day,
+                "iso": tgl.strftime("%Y-%m-%d"),
+                "tanggal_formatted": f"{tgl.day:02d} {hw.BULAN_ID[bulan-1]} {tahun}",
+                "hari_nama": hari_nama,
+                "imsak": hw.format_jam_desimal(w_dict.get("imsak")),
+                "subuh": hw.format_jam_desimal(w_dict.get("subuh")),
+                "terbit": hw.format_jam_desimal(w_dict.get("terbit")),
+                "dhuha": hw.format_jam_desimal(w_dict.get("dhuha")),
+                "dzuhur": hw.format_jam_desimal(w_dict.get("dzuhur")),
+                "ashar": hw.format_jam_desimal(w_dict.get("ashar")),
+                "maghrib": hw.format_jam_desimal(w_dict.get("maghrib")),
+                "isya": hw.format_jam_desimal(w_dict.get("isya")),
+                "kiblat_v": hw.format_jam_desimal(w_dict.get("kiblat_v"))
+            })
+
+        return {
+            "ok": True,
+            "tahun": tahun,
+            "bulan": bulan,
+            "bulan_nama": hw.BULAN_ID[bulan-1],
+            "jumlah_hari": len(jadwal),
+            "jadwal": jadwal
+        }
+
+    try:
+        return _make_cached_response("/api/sholat_bulan", data, _hitung)
+    except Exception as e:
+        traceback.print_exc()
+        return _error_response(f"Gagal menghitung jadwal sholat bulanan: {e}", 500)
+
+
+from flask import make_response
 
 @app.route("/")
 def index():
-    return send_from_directory(BASE_DIR, "index.html")
+    res = make_response(send_from_directory(BASE_DIR, "index.html"))
+    res.headers["Cache-Control"] = "public, max-age=3600, s-maxage=86400"
+    return res
+
+
+@app.route("/<path:filename>")
+def static_files(filename):
+    res = make_response(send_from_directory(BASE_DIR, filename))
+    res.headers["Cache-Control"] = "public, max-age=31536000, s-maxage=31536000, immutable"
+    return res
 
 
 def _jalankan_flask():

@@ -4,226 +4,626 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>HisabWin — Peta Visibilitas Hilal</title>
+<link rel="icon" type="image/x-icon" href="logo.ico" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,600;0,700;0,800;1,600&family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" />
 <style>
+  .material-symbols-outlined {
+    font-family: 'Material Symbols Outlined';
+    font-weight: normal;
+    font-style: normal;
+    font-size: 1.18rem;
+    line-height: 1;
+    display: inline-block;
+    white-space: nowrap;
+    word-wrap: normal;
+    direction: ltr;
+    vertical-align: -0.22em;
+    -webkit-font-smoothing: antialiased;
+  }
   :root{
-    --langit-1:#070c17;
-    --langit-2:#131f36;
-    --langit-3:#1c2c4a;
-    --cakrawala:#3a2a3f;
-    --emas:#e8b565;
-    --emas-redup:#8a6a3a;
-    --teks:#eef1f6;
-    --teks-redup:#93a0ba;
-    --garis:#28324a;
-    --hijau:#5fae7a;
-    --merah:#c96a5a;
+    --font-heading: 'Montserrat', sans-serif;
+    --font-body: 'Plus Jakarta Sans', sans-serif;
+    --font-mono: 'Consolas', 'Courier New', monospace;
+
+    --portal-bg: #f8f9fa;
+    --portal-card-bg: #ffffff;
+    --portal-border: #a2a9b1;
+    --portal-border-light: #c8ccd1;
+    --portal-header-bg: #eaecf0;
+    
+    --teks-utama: #101418;
+    --teks-redup: #54595d;
+    
+    --aksen-desktop: #0F6E5B;
+    --aksen-teal-dark: #0B5747;
+    --aksen-blue: #005580;
+    --emas: #d99b26;
+    
+    --terminal-bg: #0d1117;
+    --terminal-fg: #39d353;
   }
   *{box-sizing:border-box;}
   html,body{margin:0;padding:0;}
   body{
     min-height:100vh;
-    background:
-      radial-gradient(ellipse 900px 500px at 15% 0%, var(--langit-3), transparent),
-      linear-gradient(180deg, var(--langit-1) 0%, var(--langit-2) 55%, var(--cakrawala) 100%);
-    color:var(--teks);
-    font-family:'Iowan Old Style','Georgia',ui-serif,serif;
-    padding:0 0 60px 0;
+    background-color: var(--portal-bg);
+    color: var(--teks-utama);
+    font-family: var(--font-body);
+    font-size: 0.94rem;
+    line-height: 1.5;
+    padding: 0 0 50px 0;
+    position: relative;
   }
-  .bintang{
-    position:fixed; inset:0; pointer-events:none; z-index:0;
-    background-image:
-      radial-gradient(1px 1px at 20% 20%, #ffffffaa, transparent),
-      radial-gradient(1px 1px at 60% 10%, #ffffff88, transparent),
-      radial-gradient(1px 1px at 80% 30%, #ffffff99, transparent),
-      radial-gradient(1.5px 1.5px at 40% 15%, #ffffffcc, transparent),
-      radial-gradient(1px 1px at 90% 8%, #ffffff77, transparent),
-      radial-gradient(1px 1px at 30% 35%, #ffffff66, transparent);
-    background-repeat:no-repeat;
-    opacity:.8;
+  body::before {
+    content: ''; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: url('bg.png') no-repeat center top / cover;
+    opacity: 0.04; pointer-events: none; z-index: 0;
   }
   header{
-    position:relative; z-index:1;
-    max-width:1100px; margin:0 auto; padding:52px 24px 18px;
-    text-align:center;
+    position:relative; z-index:10;
+    background:#ffffff; border-bottom:3px solid var(--aksen-desktop);
+    padding:12px 24px; box-shadow:0 1px 4px rgba(0,0,0,0.06);
   }
-  .bulan-sabit{
-    width:46px; height:46px; margin:0 auto 18px;
-    border-radius:50%;
-    background:var(--emas);
-    box-shadow: -14px 0 0 -6px var(--langit-1), inset 10px 0 0 0 var(--langit-2);
-    position:relative;
+  .logo-container {
+    max-width:1350px; margin:0 auto;
+    display: flex; align-items: center; gap: 14px; text-align: left;
   }
-  h1{ font-size:2.2rem; font-weight:600; letter-spacing:.02em; margin:0 0 6px; }
-  .sub{
-    font-family:ui-monospace,'SF Mono',Menlo,monospace;
-    font-size:.78rem; letter-spacing:.14em; text-transform:uppercase;
-    color:var(--emas-redup);
+  .brand-logo {
+    height: 44px; width: auto; object-fit: contain;
+    border-radius: 4px; border: 1px solid var(--portal-border-light); padding: 2px; background: #ffffff;
+  }
+  .header-text h1{
+    font-family: var(--font-heading); font-size:1.4rem; font-weight:700;
+    margin:0; color: var(--teks-utama); line-height: 1.2; letter-spacing: -0.01em;
+  }
+  .header-text .sub{
+    font-family: var(--font-body); font-size:.84rem; color: var(--teks-redup);
+    font-weight: 500; margin-top: 2px;
   }
   main{
     position:relative; z-index:1;
-    max-width:1100px; margin:0 auto; padding:0 24px;
+    max-width:1350px; margin:0 auto; padding:0 24px;
+    transition: max-width 0.3s ease;
+  }
+  .hero-banner {
+    margin-top: 16px; border-radius: 4px; overflow: hidden;
+    border: 1px solid var(--portal-border); box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+    max-height: 440px; position: relative; background: #0a1120; transition: all 0.3s ease;
+  }
+  .hero-img {
+    width: 100%; height: 440px; object-fit: cover; object-position: center 35%; display: block;
   }
   .kartu{
-    background:linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.01));
-    border:1px solid var(--garis);
-    border-radius:14px;
-    padding:26px 26px 28px;
-    margin-top:26px;
-    backdrop-filter: blur(6px);
+    background: var(--portal-card-bg);
+    border: 1px solid var(--portal-border);
+    border-radius: 4px;
+    padding: 20px 22px;
+    margin-top: 16px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+    position: relative; overflow: hidden;
   }
-  .langkah{ display:flex; align-items:center; gap:10px; margin-bottom:18px; }
+  .langkah{
+    display:flex; align-items:center; gap:10px; margin-bottom:16px;
+    padding-bottom: 8px; border-bottom: 1px solid var(--portal-border-light);
+  }
   .langkah .no{
-    font-family:ui-monospace,monospace; font-size:.75rem;
-    color:var(--langit-1); background:var(--emas);
-    width:22px; height:22px; border-radius:50%;
+    font-family: var(--font-heading); font-size:.78rem; font-weight:700;
+    color:#ffffff; background: var(--aksen-desktop);
+    width:24px; height:24px; border-radius:4px;
     display:flex; align-items:center; justify-content:center; flex:none;
   }
-  .langkah h2{ font-size:1.05rem; font-weight:600; margin:0; letter-spacing:.01em; }
+  .langkah h2{
+    font-family: var(--font-heading); font-size:1.1rem; font-weight:700;
+    margin:0; color: var(--teks-utama);
+  }
   label{
-    display:block; font-family:ui-monospace,monospace; font-size:.72rem;
-    letter-spacing:.08em; text-transform:uppercase; color:var(--teks-redup);
-    margin-bottom:7px;
+    display:block; font-family: var(--font-body); font-size:.76rem;
+    font-weight:700; text-transform:uppercase; letter-spacing:.04em;
+    color: var(--teks-redup); margin-bottom:6px;
   }
-  input[type=text], select{
-    font-family:'Iowan Old Style','Georgia',serif;
-    background:var(--langit-1); border:1px solid var(--garis); color:var(--teks);
-    border-radius:8px; padding:10px 12px; font-size:1rem; width:100%;
+  input[type=text], input[type=date], select{
+    font-family: var(--font-body); font-size: 0.92rem;
+    background:#ffffff; border:1px solid var(--portal-border); color: var(--teks-utama);
+    border-radius:4px; padding:8px 12px; width:100%;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
   }
-  input[type=text]:focus{ outline:1px solid var(--emas); }
+  input[type=text]:focus, input[type=date]:focus, select:focus{
+    outline:none; border-color: var(--aksen-blue);
+    box-shadow: 0 0 0 2px rgba(0, 85, 128, 0.15);
+  }
   .baris{ display:flex; gap:14px; flex-wrap:wrap; align-items:flex-end; }
   .baris > div{ flex:1; min-width:160px; }
   button{
-    font-family:'Iowan Old Style','Georgia',serif;
-    background:var(--emas); color:#211405; border:none;
-    border-radius:8px; padding:11px 20px; font-size:.95rem; font-weight:600;
-    cursor:pointer; letter-spacing:.01em;
-    transition:transform .12s ease, filter .12s ease;
+    font-family: var(--font-heading); font-size:.88rem; font-weight:600;
+    background: #eaecf0; color: var(--teks-utama);
+    border: 1px solid var(--portal-border); border-radius: 4px;
+    padding: 8px 18px; cursor: pointer; transition: all .15s ease;
   }
-  button:hover{ filter:brightness(1.08); }
-  button:active{ transform:translateY(1px); }
-  button:disabled{ opacity:.45; cursor:not-allowed; filter:none; }
+  button:hover{ background:#e1e5ea; border-color:#72777d; }
+  button:active{ background:#c8ccd1; }
+  button:disabled{ opacity:.5; cursor:not-allowed; }
+  
   .radio-grup{ display:flex; gap:18px; margin-top:4px; }
   .radio-grup label{
     display:flex; align-items:center; gap:6px; text-transform:none;
-    letter-spacing:0; font-size:.92rem; color:var(--teks); cursor:pointer;
+    letter-spacing:0; font-size:.9rem; color: var(--teks-utama); cursor:pointer; font-weight: 500;
   }
   .daftar-ijtimak{
-    margin-top:16px; max-height:230px; overflow-y:auto;
-    border:1px solid var(--garis); border-radius:8px;
+    margin-top:14px; max-height:220px; overflow-y:auto;
+    border:1px solid var(--portal-border); border-radius:4px; background: #ffffff;
   }
   .item-ijtimak{
-    padding:10px 14px; font-family:ui-monospace,monospace; font-size:.85rem;
-    border-bottom:1px solid var(--garis); cursor:pointer;
+    padding:8px 14px; font-family: var(--font-mono); font-size:.84rem;
+    border-bottom:1px solid var(--portal-border-light); cursor:pointer; transition: background 0.15s ease;
+    color: var(--teks-utama);
   }
   .item-ijtimak:last-child{ border-bottom:none; }
-  .item-ijtimak:hover{ background:rgba(232,181,101,.08); }
-  .item-ijtimak.aktif{ background:rgba(232,181,101,.16); color:var(--emas); }
-  .catatan{ font-size:.85rem; color:var(--teks-redup); margin-top:10px; line-height:1.5; white-space:pre-line; }
+  .item-ijtimak:hover{ background: #eef2f6; }
+  .item-ijtimak.aktif{ background: #d1e7dd; color: #0f5132; font-weight:bold; }
+  
+  .catatan{ font-size:.85rem; color: var(--teks-redup); margin-top:10px; line-height:1.5; white-space:pre-line; }
+  
+  /* mIRC Terminal Box */
   .status{
-    margin-top:14px; font-family:ui-monospace,monospace; font-size:.82rem;
-    color:var(--teks-redup); min-height:1.2em; white-space:pre-line;
+    margin-top:12px; font-family: var(--font-mono); font-size:.82rem;
+    background: var(--terminal-bg); color: var(--terminal-fg);
+    border: 1px solid var(--portal-border); border-radius: 4px;
+    padding: 9px 12px; min-height: 1.4em; white-space: pre-line;
   }
-  .status.error{ color:var(--merah); }
+  .status.error{ color: #ff6b6b; }
+  
   .hasil{ display:none; margin-top:8px; }
   .hasil.tampil{ display:block; }
-  .ringkas{ display:flex; gap:10px; flex-wrap:wrap; margin:6px 0 18px; }
+  .ringkas{ display:flex; gap:10px; flex-wrap:wrap; margin:6px 0 16px; }
   .pil{
-    font-family:ui-monospace,monospace; font-size:.75rem; padding:5px 11px;
-    border-radius:999px; border:1px solid var(--garis);
+    font-family: var(--font-body); font-size:.78rem; padding:4px 12px;
+    border-radius:4px; border:1px solid var(--portal-border); font-weight: 600;
   }
-  .pil.ya{ color:var(--hijau); border-color:var(--hijau); }
-  .pil.tidak{ color:var(--merah); border-color:var(--merah); }
-  .tab-tombol{ display:flex; gap:8px; margin-bottom:14px; }
+  .pil.ya{ color:#0f5132; border-color:#badbcc; background: #d1e7dd; }
+  .pil.tidak{ color:#842029; border-color:#f5c2c7; background: #f8d7da; }
+  
+  /* Sub-Tabs MABIMS / Muhammadiyah */
+  .tab-tombol{ display:flex; gap:6px; margin-bottom:12px; flex-wrap:wrap; }
   .tab-tombol button{
-    background:transparent; color:var(--teks-redup); border:1px solid var(--garis);
-    font-weight:500; font-size:.88rem;
+    background:#f8f9fa; color: var(--teks-redup); border:1px solid var(--portal-border);
+    font-family: var(--font-heading); font-weight:600; font-size:.82rem; border-radius:4px;
   }
-  .tab-tombol button.aktif{ background:var(--emas); color:#211405; border-color:var(--emas); }
+  .tab-tombol button.aktif{
+    background: var(--aksen-desktop); color:#ffffff; border-color: var(--aksen-teal-dark); font-weight:700;
+  }
+  
+  .peta-toolbar {
+    display: flex; justify-content: space-between; align-items: center;
+    background: var(--portal-header-bg); padding: 8px 14px;
+    border-bottom: 1px solid var(--portal-border); border-top-left-radius: 4px; border-top-right-radius: 4px;
+  }
+  .peta-toolbar-info {
+    font-family: var(--font-heading); font-size: 0.82rem; color: var(--teks-utama);
+    font-weight: 700; display: flex; align-items: center; gap: 6px;
+  }
+  .peta-toolbar-aksi { display: flex; gap: 6px; }
+  .peta-toolbar-aksi button {
+    font-family: var(--font-heading); font-size: 0.78rem; padding: 5px 12px;
+    background: #ffffff; color: var(--teks-utama); border: 1px solid var(--portal-border);
+    border-radius: 4px; cursor: pointer; transition: all 0.15s ease;
+  }
+  .peta-toolbar-aksi button:hover {
+    background: var(--aksen-desktop); color: #ffffff; border-color: var(--aksen-teal-dark);
+  }
   .peta-bungkus{
-    border:1px solid var(--garis); border-radius:10px; overflow:hidden;
-    background:#0a1120; position:relative;
+    border:1px solid var(--portal-border); border-radius:4px; overflow:hidden;
+    background:#0a1120; position:relative; transition: all 0.25s ease;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
   }
-  #peta{ width:100%; height:560px; }
+  .peta-bungkus.layar-penuh {
+    position: fixed !important; top: 0; left: 0; right: 0; bottom: 0;
+    width: 100vw !important; height: 100vh !important; z-index: 999999 !important;
+    border-radius: 0 !important; border: none !important; margin: 0 !important;
+    display: flex; flex-direction: column; background: #070c17;
+  }
+  .peta-bungkus.layar-penuh .peta-toolbar {
+    border-radius: 0; padding: 10px 18px; background: rgba(7, 12, 23, 0.98); color: #ffffff;
+  }
+  .peta-bungkus.layar-penuh #peta {
+    flex: 1; height: calc(100vh - 44px) !important; border-radius: 0 !important;
+  }
+  #peta{ width:100%; height: clamp(560px, 75vh, 880px); }
   .legenda{
-    background:rgba(7,12,23,.88); border:1px solid var(--garis); border-radius:8px;
-    padding:10px 12px; font-family:ui-monospace,monospace; font-size:.72rem;
-    color:var(--teks); line-height:1.9; backdrop-filter: blur(4px);
+    background: rgba(255,255,255,0.95); border:1px solid var(--portal-border); border-radius:4px;
+    padding:8px 12px; font-family: var(--font-mono); font-size:.74rem;
+    color: var(--teks-utama); line-height:1.8; box-shadow: 0 2px 6px rgba(0,0,0,0.15);
   }
   .legenda .baris-l{ display:flex; align-items:center; gap:8px; white-space:nowrap; }
-  .legenda .swatch{ width:14px; height:14px; border-radius:3px; flex:none; }
+  .legenda .swatch{ width:14px; height:14px; border-radius:2px; flex:none; border:1px solid rgba(0,0,0,0.2); }
   .legenda .garis{ width:16px; height:0; border-top-width:2px; border-top-style:solid; flex:none; }
   .legenda .garis.putus{ border-top-style:dashed; }
   .spinner{
     display:inline-block; width:13px; height:13px; border-radius:50%;
-    border:2px solid var(--emas-redup); border-top-color:var(--emas);
+    border:2px solid #54595d; border-top-color: var(--aksen-desktop);
     animation:putar .8s linear infinite; margin-right:8px; vertical-align:-2px;
   }
   @keyframes putar{ to{ transform:rotate(360deg); } }
   footer{
     position:relative; z-index:1; text-align:center; margin-top:34px;
-    font-family:ui-monospace,monospace; font-size:.72rem; color:var(--emas-redup);
-    letter-spacing:.06em;
+    font-family: var(--font-body); font-size:.78rem; color: var(--teks-redup);
+    display: flex; justify-content: center; align-items: center; gap: 8px;
   }
-  .leaflet-popup-content-wrapper, .leaflet-popup-tip{ background:#131f36; color:var(--teks); }
+  footer img { height: 16px; opacity: 0.7; }
+  .leaflet-popup-content-wrapper, .leaflet-popup-tip{ background:#ffffff; color: var(--teks-utama); font-family: var(--font-body); }
+  .label-kontur{
+    font-family: var(--font-mono); font-size:.68rem; font-weight:700;
+    background:rgba(255,255,255,.95); padding:1px 5px; border-radius:2px;
+    white-space:nowrap; border: 1px solid var(--portal-border); pointer-events:none;
+  }
+
+  /* Navigation Bar Wikipedia / Portal Tabs Style */
+  .nav-fitur-utama {
+    display: flex; justify-content: flex-start; gap: 4px; margin: 16px auto 0;
+    max-width: 1350px; padding: 0 24px; z-index: 5; position: relative;
+    border-bottom: 1px solid var(--portal-border);
+  }
+  .nav-btn {
+    background: #eaecf0; color: var(--teks-redup); border: 1px solid var(--portal-border);
+    border-bottom: none; border-top-left-radius: 4px; border-top-right-radius: 4px;
+    padding: 8px 18px; font-family: var(--font-heading); font-size: 0.88rem; font-weight: 600;
+    cursor: pointer; transition: all 0.15s ease; margin-bottom: -1px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .nav-btn:hover { background: #f1f3f5; color: var(--teks-utama); }
+  .nav-btn.aktif {
+    background: #ffffff; color: var(--aksen-desktop);
+    border-color: var(--portal-border); border-bottom-color: #ffffff;
+    border-top: 3px solid var(--aksen-desktop); font-weight: 700;
+  }
+  .btn-aksen-teal {
+    background: var(--aksen-desktop) !important; color: #ffffff !important;
+    border: 1px solid var(--aksen-teal-dark) !important; border-radius: 4px;
+    padding: 9px 18px; font-weight: 600; font-family: var(--font-heading);
+    cursor: pointer; transition: all 0.15s ease;
+  }
+  .btn-aksen-teal:hover {
+    background: var(--aksen-teal-dark) !important;
+  }
+
+  /* Sholat Cards & Grid */
+  .grid-sholat {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 10px; margin-top: 14px;
+  }
+  .kartu-waktu {
+    background: #f8f9fa; border: 1px solid var(--portal-border);
+    border-radius: 4px; padding: 12px 10px; text-align: center;
+    transition: all 0.15s ease;
+  }
+  .kartu-waktu.aktif {
+    border-color: var(--aksen-desktop); background: #d1e7dd;
+  }
+  .kartu-waktu .nama-sholat {
+    font-family: var(--font-heading); font-size: 0.72rem; font-weight: 700;
+    text-transform: uppercase; color: var(--teks-redup); margin-bottom: 4px;
+  }
+  .kartu-waktu .jam-sholat {
+    font-family: var(--font-mono); font-size: 1.4rem; font-weight: 700;
+    color: var(--aksen-desktop);
+  }
+  .kartu-waktu.aktif .jam-sholat { color: #0f5132; }
+
+  /* Qibla & Compass Box */
+  .box-kiblat-container {
+    display: grid; grid-template-columns: 1fr 240px; gap: 20px;
+    align-items: center; margin-top: 18px; background: #f8f9fa;
+    border: 1px solid var(--portal-border); border-radius: 4px; padding: 16px;
+  }
+  @media (max-width: 768px) {
+    .box-kiblat-container { grid-template-columns: 1fr; }
+  }
+  .kompas-wrapper {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+  }
+  .kompas-svg {
+    width: 180px; height: 180px; filter: drop-shadow(0 2px 6px rgba(0,0,0,0.15));
+    transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  /* Wikipedia-Style Table */
+  .tabel-wrapper {
+    overflow-x: auto; max-height: 440px; margin-top: 14px;
+    border: 1px solid var(--portal-border); border-radius: 4px; background: #ffffff;
+  }
+  .tabel-sholat {
+    width: 100%; border-collapse: collapse; font-family: var(--font-body);
+    font-size: 0.85rem; text-align: center;
+  }
+  .tabel-sholat th {
+    font-family: var(--font-heading); background: #eaecf0; color: #101418;
+    font-weight: 700; padding: 9px 12px; border-bottom: 2px solid var(--portal-border);
+    position: sticky; top: 0; z-index: 2;
+  }
+  .tabel-sholat td {
+    padding: 8px 12px; border-bottom: 1px solid var(--portal-border-light);
+  }
+  .tabel-sholat tr:nth-child(even) { background: #f8f9fa; }
+  .tabel-sholat tr:hover { background: #eef2f6; }
+  .tabel-sholat tr.hari-ini { background: #d1e7dd; font-weight: bold; color: #0f5132; }
+  
+  .next-prayer-banner {
+    background: #e6f4f1; border: 1px solid var(--aksen-desktop);
+    border-radius: 4px; padding: 10px 16px; margin-bottom: 14px;
+    font-family: var(--font-body); font-size: 0.9rem; color: #0f5132;
+    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+  }
 </style>
 </head>
 <body>
 <div class="bintang"></div>
 
 <header>
-  <div class="bulan-sabit"></div>
-  <h1>HisabWin</h1>
-  <div class="sub">Peta Visibilitas Hilal · MABIMS &amp; Muhammadiyah</div>
+  <div class="logo-container" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+    <div style="display:flex; align-items:center; gap:14px;">
+      <img src="logo.png" alt="HisabWin" class="brand-logo">
+      <div class="header-text">
+        <h1>HisabWin</h1>
+        <div class="sub">Peta Visibilitas Hilal — Kriteria MABIMS &amp; Muhammadiyah</div>
+      </div>
+    </div>
+    <div style="display:flex; align-items:center; gap:8px;">
+      <label for="select-mode" style="margin:0; font-size:0.78rem; font-family:var(--font-heading); color:var(--teks-redup); text-transform:none;">Mode Komputasi:</label>
+      <select id="select-mode" style="width:auto; padding:6px 10px; font-size:0.82rem; font-family:var(--font-body); border-radius:4px;">
+        <option value="jpl" selected>Presisi Tinggi (NASA JPL DE421)</option>
+        <option value="ringan">Mode Ringan (VSOP87 / Analitis Fast)</option>
+      </select>
+    </div>
+  </div>
 </header>
 
+<nav class="nav-fitur-utama">
+  <button id="nav-hilal" class="nav-btn aktif"><span class="material-symbols-outlined">nights_stay</span> Visibilitas Hilal &amp; Peta</button>
+  <button id="nav-sholat" class="nav-btn"><span class="material-symbols-outlined">mosque</span> Waktu Sholat &amp; Kiblat</button>
+</nav>
+
 <main>
-  <!-- LANGKAH 1: cari ijtimak -->
-  <section class="kartu">
-    <div class="langkah"><span class="no">1</span><h2>Cari Ijtimak</h2></div>
-    <div class="baris">
-      <div>
-        <label for="input-tahun">Tahun Masehi</label>
-        <input type="text" id="input-tahun" placeholder="mis. 2026" maxlength="4" inputmode="numeric">
+  <!-- VIEW 1: HILAL & PETA -->
+  <div id="view-hilal">
+    <!-- HERO BANNER (bg.png seperti di desktop) -->
+    <div class="hero-banner" id="hero-banner">
+      <img src="bg.png" alt="HisabWin" class="hero-img">
+    </div>
+    <!-- LANGKAH 1: cari ijtimak -->
+    <section class="kartu">
+      <div class="langkah"><span class="no">1</span><h2>Cari Ijtimak</h2></div>
+      <div class="baris">
+        <div>
+          <label for="input-tahun">Tahun Masehi</label>
+          <input type="text" id="input-tahun" placeholder="mis. 2026" maxlength="4" inputmode="numeric">
+        </div>
+        <div style="flex:none;"><button id="btn-cari">Cari Ijtimak</button></div>
       </div>
-      <div style="flex:none;"><button id="btn-cari">Cari Ijtimak</button></div>
-    </div>
-    <div id="status-cari" class="status"></div>
-    <div id="daftar-ijtimak" class="daftar-ijtimak" style="display:none;"></div>
-  </section>
+      <div id="status-cari" class="status"></div>
+      <div id="daftar-ijtimak" class="daftar-ijtimak" style="display:none;"></div>
+    </section>
 
-  <!-- LANGKAH 2: pilih hari & tampilkan peta -->
-  <section class="kartu" id="kartu-proses" style="opacity:.45; pointer-events:none;">
-    <div class="langkah"><span class="no">2</span><h2>Tampilkan Peta</h2></div>
-    <label>Tanggal yang dihitung</label>
-    <div class="radio-grup">
-      <label><input type="radio" name="hari" value="ijtimak" checked> Hari Ijtimak</label>
-      <label><input type="radio" name="hari" value="setelah"> Sehari Setelah Ijtimak</label>
-    </div>
-    <div style="margin-top:18px;"><button id="btn-proses">Hitung &amp; Tampilkan Peta</button></div>
-    <div id="status-proses" class="status"></div>
-  </section>
+    <!-- LANGKAH 2: pilih hari & tampilkan peta -->
+    <section class="kartu" id="kartu-proses" style="opacity:.45; pointer-events:none;">
+      <div class="langkah"><span class="no">2</span><h2>Tampilkan Peta</h2></div>
+      <label>Tanggal yang dihitung</label>
+      <div class="radio-grup">
+        <label><input type="radio" name="hari" value="ijtimak" checked> Hari Ijtimak</label>
+        <label><input type="radio" name="hari" value="setelah"> Sehari Setelah Ijtimak</label>
+      </div>
+      <div style="margin-top:18px;"><button id="btn-proses">Hitung &amp; Tampilkan Peta</button></div>
+      <div id="status-proses" class="status"></div>
+    </section>
 
-  <!-- HASIL -->
-  <section class="kartu hasil" id="kartu-hasil">
-    <div class="langkah"><span class="no">✓</span><h2>Hasil</h2></div>
-    <div class="catatan" id="ringkasan-teks"></div>
-    <div class="ringkas" id="ringkas-pkg"></div>
+    <!-- HASIL PETA -->
+    <section class="kartu hasil" id="kartu-hasil">
+      <div class="langkah"><span class="no"><span class="material-symbols-outlined" style="font-size:1.1rem;color:#1a1003;">check</span></span><h2>Hasil</h2></div>
+      <div class="catatan" id="ringkasan-teks"></div>
+      <div class="ringkas" id="ringkas-pkg"></div>
 
-    <div class="tab-tombol">
-      <button id="tab-mabims" class="aktif">Kriteria MABIMS</button>
-      <button id="tab-muhammadiyah">Kriteria Muhammadiyah</button>
-    </div>
-    <div class="peta-bungkus"><div id="peta"></div></div>
-    <div class="catatan" id="catatan-pkg2"></div>
-  </section>
+      <div class="tab-tombol">
+        <button id="tab-mabims" class="aktif">Kriteria MABIMS</button>
+        <button id="tab-muhammadiyah">Kriteria Muhammadiyah</button>
+        <button id="tab-id-tinggi">Tinggi Hilal (Indonesia)</button>
+        <button id="tab-id-elongasi">Elongasi (Indonesia)</button>
+      </div>
+      <div class="peta-bungkus" id="peta-bungkus">
+        <div class="peta-toolbar">
+          <div class="peta-toolbar-info" id="peta-toolbar-info"><img src="logo.png" style="height:16px;vertical-align:-3px;margin-right:6px;"> Peta Visibilitas Hilal — Kriteria MABIMS</div>
+          <div class="peta-toolbar-aksi">
+            <button id="btn-reset-view" title="Reset Tampilan Peta"><span class="material-symbols-outlined">center_focus_strong</span> Reset View</button>
+            <button id="btn-fullscreen" title="Tampilkan Layar Penuh"><span class="material-symbols-outlined">fullscreen</span> Layar Penuh</button>
+          </div>
+        </div>
+        <div id="peta"></div>
+      </div>
+      <div class="catatan" id="catatan-pkg2"></div>
+    </section>
+  </div>
+
+  <!-- VIEW 2: SHOLAT & KIBLAT -->
+  <div id="view-sholat" style="display:none;">
+    <section class="kartu">
+      <div class="langkah"><span class="no"><span class="material-symbols-outlined" style="font-size:1.1rem;color:#1a1003;">mosque</span></span><h2>Waktu Sholat &amp; Kiblat — HisabWin</h2></div>
+      
+      <!-- Baris Input Lokasi -->
+      <div class="baris" style="margin-bottom: 14px;">
+        <div style="flex:2; min-width:200px;">
+          <label for="sholat-preset-kota">Preset Kota</label>
+          <select id="sholat-preset-kota">
+            <option value="custom">-- Koordinat Kustom --</option>
+            <option value="jakarta" selected>Jakarta (-6.1751, 106.8272, UTC+7)</option>
+            <option value="surabaya">Surabaya (-7.2575, 112.7521, UTC+7)</option>
+            <option value="bandung">Bandung (-6.9175, 107.6191, UTC+7)</option>
+            <option value="medan">Medan (3.5952, 98.6722, UTC+7)</option>
+            <option value="semarang">Semarang (-6.9667, 110.4167, UTC+7)</option>
+            <option value="yogyakarta">Yogyakarta (-7.7956, 110.3695, UTC+7)</option>
+            <option value="makassar">Makassar (-5.1477, 119.4327, UTC+8)</option>
+            <option value="palembang">Palembang (-2.9761, 104.7754, UTC+7)</option>
+            <option value="denpasar">Denpasar / Bali (-8.6705, 115.2126, UTC+8)</option>
+            <option value="aceh">Banda Aceh (5.5483, 95.3238, UTC+7)</option>
+            <option value="jayapura">Jayapura (-2.5489, 140.7196, UTC+9)</option>
+            <option value="makkah">Makkah (21.4225, 39.8262, UTC+3)</option>
+            <option value="madinah">Madinah (24.4672, 39.6112, UTC+3)</option>
+          </select>
+        </div>
+        <div style="flex:none;">
+          <button id="btn-auto-lokasi" style="background:var(--langit-3); color:var(--teks); border:1px solid var(--garis); padding:10px 16px;"><span class="material-symbols-outlined">my_location</span> Lokasi Saya</button>
+        </div>
+      </div>
+
+      <div class="baris">
+        <div>
+          <label for="sholat-lat">Lintang (Lat °)</label>
+          <input type="text" id="sholat-lat" value="-6.1751">
+        </div>
+        <div>
+          <label for="sholat-lon">Bujur (Lon °)</label>
+          <input type="text" id="sholat-lon" value="106.8272">
+        </div>
+        <div>
+          <label for="sholat-zona">Zona Waktu (Jam UTC)</label>
+          <input type="text" id="sholat-zona" value="7.0">
+        </div>
+        <div>
+          <label for="sholat-tanggal">Tanggal</label>
+          <input type="date" id="sholat-tanggal">
+        </div>
+      </div>
+
+      <!-- Parameter Lanjutan -->
+      <div class="baris" style="margin-top: 14px;">
+        <div style="flex:2;">
+          <label for="sholat-preset-sudut">Kriteria / Standard Sudut</label>
+          <select id="sholat-preset-sudut">
+            <option value="kemenag" selected>Kemenag RI (Subuh -20°, Isya -18°)</option>
+            <option value="muhammadiyah">Muhammadiyah (Subuh -18°, Isya -18°)</option>
+            <option value="mwl">MWL — Muslim World League (Subuh -18°, Isya -17°)</option>
+            <option value="egyptian">Egyptian General Authority (Subuh -19.5°, Isya -17.5°)</option>
+          </select>
+        </div>
+        <div>
+          <label for="sholat-mazhab">Mazhab Ashar</label>
+          <select id="sholat-mazhab">
+            <option value="syafii" selected>Syafi'i / Maliki / Hanbali (Faktor 1)</option>
+            <option value="hanafi">Hanafi (Faktor 2)</option>
+          </select>
+        </div>
+        <div>
+          <label for="sholat-elevasi">Elevasi (mdpl)</label>
+          <input type="text" id="sholat-elevasi" value="0">
+        </div>
+        <div>
+          <label for="sholat-ihtiyat">Ihtiyat (menit)</label>
+          <input type="text" id="sholat-ihtiyat" value="2">
+        </div>
+      </div>
+
+      <div style="display:flex; gap:12px; margin-top:20px; flex-wrap:wrap;">
+        <button id="btn-hitung-sholat" class="btn-aksen-teal"><span class="material-symbols-outlined">mosque</span> Hitung Waktu Sholat Hari Ini &amp; Kiblat</button>
+        <button id="btn-hitung-sholat-bulan" style="background:var(--langit-3); color:var(--teks); border:1px solid var(--garis);"><span class="material-symbols-outlined">calendar_month</span> Jadwal 1 Bulan Penuh</button>
+      </div>
+
+      <div id="status-sholat" class="status"></div>
+    </section>
+
+    <!-- HASIL SHOLAT HARI INI -->
+    <section class="kartu hasil" id="kartu-hasil-sholat" style="display:none;">
+      <div class="langkah"><span class="no"><span class="material-symbols-outlined" style="font-size:1.1rem;color:#1a1003;">check</span></span><h2>Hasil Waktu Sholat Hari Ini</h2></div>
+      
+      <div id="next-prayer-banner" class="next-prayer-banner"></div>
+      
+      <div class="grid-sholat" id="grid-waktu-sholat"></div>
+
+      <!-- KIBLAT & KOMPAS BOX -->
+      <div class="box-kiblat-container">
+        <div>
+          <h3 style="margin:0 0 10px 0; color:var(--emas); font-size:1.1rem;"><span class="material-symbols-outlined" style="vertical-align:-3px;color:var(--emas);">explore</span> Arah Kiblat &amp; Rashdul Kiblat</h3>
+          <div class="catatan" id="info-kiblat-detail" style="font-size:0.9rem; line-height:1.8;"></div>
+        </div>
+        <div class="kompas-wrapper">
+          <svg class="kompas-svg" id="kompas-svg" viewBox="0 0 200 200">
+            <circle cx="100" cy="100" r="92" fill="#070c17" stroke="#28324a" stroke-width="4"/>
+            <circle cx="100" cy="100" r="80" fill="none" stroke="#1c2c4a" stroke-width="2" stroke-dasharray="4 3"/>
+            
+            <!-- Degree Marks -->
+            <text x="100" y="24" fill="#ffffff" font-size="12" font-weight="bold" text-anchor="middle">U</text>
+            <text x="178" y="104" fill="#93a0ba" font-size="12" font-weight="bold" text-anchor="middle">T</text>
+            <text x="100" y="184" fill="#93a0ba" font-size="12" font-weight="bold" text-anchor="middle">S</text>
+            <text x="22" y="104" fill="#93a0ba" font-size="12" font-weight="bold" text-anchor="middle">B</text>
+
+            <!-- Needle Container (Rotated by JS) -->
+            <g id="needle-group" transform="rotate(0, 100, 100)">
+              <!-- North Needle -->
+              <polygon points="100,28 92,100 108,100" fill="#e8b565"/>
+              <!-- Kaaba Vector Icon on Needle -->
+              <rect x="94" y="32" width="12" height="12" fill="#111827" stroke="#e8b565" stroke-width="1.5" rx="2"/>
+              <line x1="94" y1="36" x2="106" y2="36" stroke="#e8b565" stroke-width="1.5"/>
+              <!-- Center Dot -->
+              <circle cx="100" cy="100" r="6" fill="#ffffff"/>
+            </g>
+          </svg>
+          <div style="font-family:ui-monospace,monospace; font-size:0.75rem; color:var(--emas); margin-top:8px;" id="kompas-degree-label">295° NW</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- HASIL JADWAL BULAN -->
+    <section class="kartu hasil" id="kartu-jadwal-bulan" style="display:none;">
+      <div class="langkah" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <span class="no"><span class="material-symbols-outlined" style="font-size:1.1rem;color:#1a1003;">calendar_month</span></span><h2 id="judul-jadwal-bulan">Jadwal Sholat 1 Bulan Penuh</h2>
+        </div>
+        <button id="btn-export-csv" style="font-size:0.8rem; padding:6px 14px; background:var(--langit-3); color:var(--teks); border:1px solid var(--garis);"><span class="material-symbols-outlined">download</span> Unduh CSV</button>
+      </div>
+
+      <div class="tabel-wrapper">
+        <table class="tabel-sholat">
+          <thead>
+            <tr>
+              <th>Tgl</th>
+              <th>Hari</th>
+              <th>Imsak</th>
+              <th>Subuh</th>
+              <th>Terbit</th>
+              <th>Dhuha</th>
+              <th>Dzuhur</th>
+              <th>Ashar</th>
+              <th>Maghrib</th>
+              <th>Isya</th>
+              <th>Kiblat</th>
+            </tr>
+          </thead>
+          <tbody id="tbody-jadwal-bulan"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
 </main>
 
-<footer>tribute to WinHisab — peta interaktif Leaflet, tanpa render gambar</footer>
+<footer><img src="logo.png" style="height:18px;vertical-align:-3px;"> HisabWin — Peta Visibilitas Hilal · Leaflet Interaktif</footer>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 const $ = (sel) => document.querySelector(sel);
+
+// Client-Side Cache (Sub-milidetik untuk re-query di browser, hemat HTTP request 100%)
+const clientFetchCache = new Map();
+async function fetchCached(url, options = {}) {
+  const cacheKey = url + ':' + (options.body || '');
+  if (clientFetchCache.has(cacheKey)) {
+    return clientFetchCache.get(cacheKey);
+  }
+  const res = await fetch(url, options);
+  const data = await res.json();
+  if (data && data.ok) {
+    clientFetchCache.set(cacheKey, data);
+  }
+  return data;
+}
 
 const btnCari = $('#btn-cari');
 const inputTahun = $('#input-tahun');
@@ -238,10 +638,18 @@ const ringkasPkg = $('#ringkas-pkg');
 const catatanPkg2 = $('#catatan-pkg2');
 const tabMabims = $('#tab-mabims');
 const tabMuhammadiyah = $('#tab-muhammadiyah');
+const tabIdTinggi = $('#tab-id-tinggi');
+const tabIdElongasi = $('#tab-id-elongasi');
+
+const petaBungkus = $('#peta-bungkus');
+const btnFullscreen = $('#btn-fullscreen');
+const btnResetView = $('#btn-reset-view');
+const petaToolbarInfo = $('#peta-toolbar-info');
 
 let tahunAktif = null;
-let indexTerpilih = null;
+let isoTerpilih = null;
 let hasilTerakhir = null;
+let tabAktifNama = 'mabims';
 
 function setStatus(el, teks, error=false, loading=false){
   el.classList.toggle('error', !!error);
@@ -249,17 +657,64 @@ function setStatus(el, teks, error=false, loading=false){
 }
 
 // ---------------------------------------------------------------------
-// Peta Leaflet: basemap gelap (CartoDB dark_matter) + layer group
-// terpisah untuk MABIMS & Muhammadiyah, diisi dari GeoJSON backend.
+// Peta Leaflet Canvas Mode & Strict World Bounds:
+// Canvas renderer memastikan kontur & poligon TIDAK HILANG saat zoom / drag.
+// maxBounds & noWrap mengunci peta agar kontur tetap stabil & presisi.
 // ---------------------------------------------------------------------
-const peta = L.map('peta', { worldCopyJump: true }).setView([10, 20], 2);
+const canvasRenderer = L.canvas({ padding: 0.5 });
+const peta = L.map('peta', {
+  preferCanvas: true,
+  renderer: canvasRenderer,
+  worldCopyJump: false,
+  maxBounds: [[-89.9, -180], [89.9, 180]],
+  maxBoundsViscosity: 0.8,
+  minZoom: 2,
+  maxZoom: 10,
+  zoomSnap: 0.5
+}).setView([10, 20], 2);
+
 L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
   attribution: '&copy; OpenStreetMap &copy; CARTO',
-  subdomains: 'abcd', maxZoom: 8, minZoom: 1
+  subdomains: 'abcd', maxZoom: 10, minZoom: 2,
+  noWrap: true,
+  bounds: [[-90, -180], [90, 180]]
 }).addTo(peta);
 
 const layerMabims = L.layerGroup().addTo(peta);
 const layerMuhammadiyah = L.layerGroup();
+const layerIndonesiaTinggi = L.layerGroup();
+const layerIndonesiaElongasi = L.layerGroup();
+const SEMUA_LAYER = [layerMabims, layerMuhammadiyah, layerIndonesiaTinggi, layerIndonesiaElongasi];
+const VIEW_DUNIA = { center:[10, 20], zoom:2 };
+
+// Fullscreen & Invalidation Handler
+  function toggleLayarPenuh(){
+    const isFull = petaBungkus.classList.toggle('layar-penuh');
+    btnFullscreen.innerHTML = isFull ? '<span class="material-symbols-outlined">fullscreen_exit</span> Keluar Layar Penuh' : '<span class="material-symbols-outlined">fullscreen</span> Layar Penuh';
+    document.body.style.overflow = isFull ? 'hidden' : '';
+    setTimeout(() => peta.invalidateSize(), 60);
+  }
+
+btnFullscreen.addEventListener('click', toggleLayarPenuh);
+document.addEventListener('keydown', (e) => {
+  if(e.key === 'Escape' && petaBungkus.classList.contains('layar-penuh')){
+    toggleLayarPenuh();
+  }
+});
+
+btnResetView.addEventListener('click', () => {
+  if(tabAktifNama === 'id-tinggi' || tabAktifNama === 'id-elongasi'){
+    if(hasilTerakhir && hasilTerakhir.peta_indonesia){
+      const b = hasilTerakhir.peta_indonesia.bounds;
+      peta.fitBounds([[b.lat_min, b.lon_min], [b.lat_max, b.lon_max]]);
+    }
+  } else {
+    peta.setView(VIEW_DUNIA.center, VIEW_DUNIA.zoom);
+  }
+  peta.invalidateSize();
+});
+
+window.addEventListener('resize', () => peta.invalidateSize());
 
 let legendaCtrl = null;
 function pasangLegenda(baris){
@@ -282,14 +737,35 @@ function pasangLegenda(baris){
 function gambarZona(layerGroup, geojson, warna, opasitas){
   if(!geojson) return;
   L.geoJSON(geojson, {
+    renderer: canvasRenderer,
     style: { color: warna, weight: 0, fillColor: warna, fillOpacity: opasitas, fillRule: 'evenodd' }
   }).addTo(layerGroup);
 }
 function gambarGaris(layerGroup, geojson, warna, putus){
   if(!geojson) return;
   L.geoJSON(geojson, {
+    renderer: canvasRenderer,
     style: { color: warna, weight: 2, dashArray: putus ? '6 5' : null }
   }).addTo(layerGroup);
+}
+
+function gambarKonturBerlabel(layerGroup, geojsonFC, warna){
+  if(!geojsonFC) return;
+  geojsonFC.features.forEach(feature => {
+    const latlngs = feature.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+    if(latlngs.length < 2) return;
+    L.polyline(latlngs, { renderer: canvasRenderer, color: warna, weight: 1.2, opacity: .65 }).addTo(layerGroup);
+
+    const tengah = latlngs[Math.floor(latlngs.length / 2)];
+    L.marker(tengah, {
+      icon: L.divIcon({
+        className: 'label-kontur',
+        html: `<span style="color:${warna}">${feature.properties.level.toFixed(1)}°</span>`,
+        iconSize: null
+      }),
+      interactive: false
+    }).addTo(layerGroup);
+  });
 }
 
 function bangunLayerMabims(mabims){
@@ -317,13 +793,31 @@ function bangunLayerMuhammadiyah(mu){
   }
 }
 
+function bangunLayerIndonesiaTinggi(dataID){
+  layerIndonesiaTinggi.clearLayers();
+  gambarKonturBerlabel(layerIndonesiaTinggi, dataID.tinggi_hilal.kontur, '#6f9fd8');
+  gambarGaris(layerIndonesiaTinggi, dataID.tinggi_hilal.kontur_ambang, '#e8b565', false);
+}
+
+function bangunLayerIndonesiaElongasi(dataID){
+  layerIndonesiaElongasi.clearLayers();
+  gambarKonturBerlabel(layerIndonesiaElongasi, dataID.elongasi.kontur, '#d88f6f');
+  gambarGaris(layerIndonesiaElongasi, dataID.elongasi.kontur_ambang, '#e8b565', false);
+}
+
 function tampilkanTab(nama){
   if(!hasilTerakhir) return;
-  tabMabims.classList.toggle('aktif', nama === 'mabims');
-  tabMuhammadiyah.classList.toggle('aktif', nama === 'muhammadiyah');
+  tabAktifNama = nama;
+  [tabMabims, tabMuhammadiyah, tabIdTinggi, tabIdElongasi].forEach(btn => btn.classList.remove('aktif'));
+  SEMUA_LAYER.forEach(l => peta.removeLayer(l));
+
+  const logoPrefix = '<img src="logo.png" style="height:16px;vertical-align:-3px;margin-right:6px;"> ';
+
   if(nama === 'mabims'){
-    peta.removeLayer(layerMuhammadiyah);
+    petaToolbarInfo.innerHTML = logoPrefix + 'Peta Visibilitas Hilal — Kriteria MABIMS';
+    tabMabims.classList.add('aktif');
     layerMabims.addTo(peta);
+    peta.setView(VIEW_DUNIA.center, VIEW_DUNIA.zoom);
     pasangLegenda([
       {tipe:'garis', warna:'#4d8fe0', label:'Tinggi hilal = 3°'},
       {tipe:'garis', warna:'#e05a4d', label:'Elongasi = 6.4°'},
@@ -331,9 +825,11 @@ function tampilkanTab(nama){
       {tipe:'area', warna:'#6b7280', opasitas:.35, label:'Tidak ada sunset'},
     ]);
     catatanPkg2.textContent = '';
-  } else {
-    peta.removeLayer(layerMabims);
+  } else if(nama === 'muhammadiyah'){
+    petaToolbarInfo.innerHTML = logoPrefix + 'Peta Visibilitas Hilal — Kriteria Muhammadiyah';
+    tabMuhammadiyah.classList.add('aktif');
     layerMuhammadiyah.addTo(peta);
+    peta.setView(VIEW_DUNIA.center, VIEW_DUNIA.zoom);
     const mu = hasilTerakhir.muhammadiyah;
     pasangLegenda([
       {tipe:'garis', warna:'#4d8fe0', label:'Tinggi hilal geosentris = 5°'},
@@ -343,16 +839,46 @@ function tampilkanTab(nama){
       {tipe:'area', warna:'#6b7280', opasitas:.3, label:'Tidak ada sunset'},
     ]);
     catatanPkg2.textContent = mu.catatan_pkg2 || '';
+  } else {
+    // 'id-tinggi' atau 'id-elongasi' - peta khusus wilayah Indonesia
+    const tab = nama === 'id-tinggi' ? tabIdTinggi : tabIdElongasi;
+    petaToolbarInfo.innerHTML = logoPrefix + (nama === 'id-tinggi' ? 'Peta Kontur Tinggi Hilal — Indonesia' : 'Peta Kontur Elongasi — Indonesia');
+    tab.classList.add('aktif');
+    catatanPkg2.textContent = '';
+    const dataID = hasilTerakhir.peta_indonesia;
+    if(!dataID){
+      pasangLegenda([{tipe:'garis', warna:'#6b7280', label:'Peta Indonesia gagal dihitung, coba proses ulang.'}]);
+      return;
+    }
+    const b = dataID.bounds;
+    peta.fitBounds([[b.lat_min, b.lon_min], [b.lat_max, b.lon_max]]);
+    if(nama === 'id-tinggi'){
+      layerIndonesiaTinggi.addTo(peta);
+      pasangLegenda([
+        {tipe:'garis', warna:'#6f9fd8', label:'Kontur tinggi hilal, berlabel tiap 0.2°'},
+        {tipe:'garis', warna:'#e8b565', label: dataID.tinggi_hilal.ambang_label},
+      ]);
+    } else {
+      layerIndonesiaElongasi.addTo(peta);
+      pasangLegenda([
+        {tipe:'garis', warna:'#d88f6f', label:'Kontur elongasi, berlabel tiap 0.2°'},
+        {tipe:'garis', warna:'#e8b565', label: dataID.elongasi.ambang_label},
+      ]);
+    }
   }
+  setTimeout(() => peta.invalidateSize(), 50);
 }
 tabMabims.addEventListener('click', () => tampilkanTab('mabims'));
 tabMuhammadiyah.addEventListener('click', () => tampilkanTab('muhammadiyah'));
+tabIdTinggi.addEventListener('click', () => tampilkanTab('id-tinggi'));
+tabIdElongasi.addEventListener('click', () => tampilkanTab('id-elongasi'));
 
 // ---------------------------------------------------------------------
 // Langkah 1: cari ijtimak
 // ---------------------------------------------------------------------
 btnCari.addEventListener('click', async () => {
   const tahun = inputTahun.value.trim();
+  const mode = $('#select-mode').value;
   if(!/^\d{4}$/.test(tahun)){
     setStatus(statusCari, 'Masukkan tahun 4 digit, misalnya 2026.', true);
     return;
@@ -362,15 +888,14 @@ btnCari.addEventListener('click', async () => {
   kartuProses.style.opacity = .45;
   kartuProses.style.pointerEvents = 'none';
   kartuHasil.classList.remove('tampil');
-  setStatus(statusCari, 'Mencari waktu ijtimak sepanjang tahun ' + tahun + '…', false, true);
+  setStatus(statusCari, `Mencari waktu ijtimak (${mode === 'ringan' ? 'Mode Ringan' : 'JPL DE421'}) sepanjang tahun ${tahun}…`, false, true);
 
   try{
-    const res = await fetch('/api/ijtimak?tahun=' + encodeURIComponent(tahun));
-    const data = await res.json();
+    const data = await fetchCached('/api/ijtimak?tahun=' + encodeURIComponent(tahun) + '&mode=' + encodeURIComponent(mode));
     if(!data.ok){ throw new Error(data.error || 'Gagal mencari ijtimak.'); }
 
     tahunAktif = data.tahun;
-    indexTerpilih = null;
+    isoTerpilih = null;
     daftarIjtimak.innerHTML = '';
     data.ijtimak.forEach(item => {
       const div = document.createElement('div');
@@ -379,7 +904,7 @@ btnCari.addEventListener('click', async () => {
       div.addEventListener('click', () => {
         [...daftarIjtimak.children].forEach(c => c.classList.remove('aktif'));
         div.classList.add('aktif');
-        indexTerpilih = item.index;
+        isoTerpilih = item.iso;
         kartuProses.style.opacity = 1;
         kartuProses.style.pointerEvents = 'auto';
         setStatus(statusProses, '');
@@ -399,23 +924,29 @@ btnCari.addEventListener('click', async () => {
 // Langkah 2: hitung grid & gambar peta interaktif
 // ---------------------------------------------------------------------
 btnProses.addEventListener('click', async () => {
-  if(tahunAktif === null || indexTerpilih === null){
+  if(isoTerpilih === null){
     setStatus(statusProses, 'Pilih salah satu ijtimak dari daftar di atas dahulu.', true);
     return;
   }
   const hari = document.querySelector('input[name=hari]:checked').value;
+  const mode = $('#select-mode').value;
   btnProses.disabled = true;
   kartuHasil.classList.remove('tampil');
-  setStatus(statusProses, 'Menghitung grid & kontur peta…', false, true);
+  setStatus(statusProses, `Menghitung grid & kontur peta (${mode === 'ringan' ? 'Mode Ringan' : 'JPL DE421'})…`, false, true);
 
   try{
-    const res = await fetch('/api/peta', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ tahun: tahunAktif, index: indexTerpilih, hari })
-    });
-    const data = await res.json();
-    if(!data.ok){ throw new Error(data.error || 'Gagal menghitung peta.'); }
+    const body = JSON.stringify({ iso: isoTerpilih, hari, mode });
+    const [hasilPeta, hasilID] = await Promise.allSettled([
+      fetchCached('/api/peta', { method:'POST', headers:{'Content-Type':'application/json'}, body }),
+      fetchCached('/api/peta_indonesia', { method:'POST', headers:{'Content-Type':'application/json'}, body }),
+    ]);
+
+    if(hasilPeta.status !== 'fulfilled' || !hasilPeta.value.ok){
+      const pesan = hasilPeta.status === 'fulfilled' ? hasilPeta.value.error : (hasilPeta.reason ? hasilPeta.reason.message : 'Gagal menghitung peta.');
+      throw new Error(pesan || 'Gagal menghitung peta.');
+    }
+    const data = hasilPeta.value;
+    data.peta_indonesia = (hasilID.status === 'fulfilled' && hasilID.value.ok) ? hasilID.value : null;
 
     hasilTerakhir = data;
     ringkasanTeks.textContent = `Ijtimak: ${data.waktu_ijtimak}  ·  Tanggal dihitung: ${data.tanggal}`;
@@ -428,7 +959,14 @@ btnProses.addEventListener('click', async () => {
 
     bangunLayerMabims(data.mabims);
     bangunLayerMuhammadiyah(data.muhammadiyah);
+    if(data.peta_indonesia){
+      bangunLayerIndonesiaTinggi(data.peta_indonesia);
+      bangunLayerIndonesiaElongasi(data.peta_indonesia);
+    }
     tampilkanTab('mabims');
+
+    const heroBanner = $('#hero-banner');
+    if(heroBanner) heroBanner.style.display = 'none';
 
     kartuHasil.classList.add('tampil');
     setTimeout(() => peta.invalidateSize(), 60);
@@ -442,6 +980,311 @@ btnProses.addEventListener('click', async () => {
 });
 
 inputTahun.addEventListener('keydown', (e) => { if(e.key === 'Enter') btnCari.click(); });
+
+// ---------------------------------------------------------------------
+// Navigation Utama: Hilal vs Sholat & Kiblat
+// ---------------------------------------------------------------------
+const navHilal = $('#nav-hilal');
+const navSholat = $('#nav-sholat');
+const viewHilal = $('#view-hilal');
+const viewSholat = $('#view-sholat');
+
+navHilal.addEventListener('click', () => {
+  navHilal.classList.add('aktif');
+  navSholat.classList.remove('aktif');
+  viewHilal.style.display = 'block';
+  viewSholat.style.display = 'none';
+  setTimeout(() => peta.invalidateSize(), 50);
+});
+
+navSholat.addEventListener('click', () => {
+  navSholat.classList.add('aktif');
+  navHilal.classList.remove('aktif');
+  viewSholat.style.display = 'block';
+  viewHilal.style.display = 'none';
+});
+
+// Preset Tanggal Hari Ini
+const sholatTanggalInput = $('#sholat-tanggal');
+if(sholatTanggalInput){
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+  sholatTanggalInput.value = `${yyyy}-${mm}-${dd}`;
+}
+
+// Preset Kota Handler
+const KOTA_PRESETS = {
+  jakarta: { lat: -6.1751, lon: 106.8272, zona: 7.0 },
+  surabaya: { lat: -7.2575, lon: 112.7521, zona: 7.0 },
+  bandung: { lat: -6.9175, lon: 107.6191, zona: 7.0 },
+  medan: { lat: 3.5952, lon: 98.6722, zona: 7.0 },
+  semarang: { lat: -6.9667, lon: 110.4167, zona: 7.0 },
+  yogyakarta: { lat: -7.7956, lon: 110.3695, zona: 7.0 },
+  makassar: { lat: -5.1477, lon: 119.4327, zona: 8.0 },
+  palembang: { lat: -2.9761, lon: 104.7754, zona: 7.0 },
+  denpasar: { lat: -8.6705, lon: 115.2126, zona: 8.0 },
+  aceh: { lat: 5.5483, lon: 95.3238, zona: 7.0 },
+  jayapura: { lat: -2.5489, lon: 140.7196, zona: 9.0 },
+  makkah: { lat: 21.4225, lon: 39.8262, zona: 3.0 },
+  madinah: { lat: 24.4672, lon: 39.6112, zona: 3.0 }
+};
+
+$('#sholat-preset-kota').addEventListener('change', (e) => {
+  const p = KOTA_PRESETS[e.target.value];
+  if(p){
+    $('#sholat-lat').value = p.lat;
+    $('#sholat-lon').value = p.lon;
+    $('#sholat-zona').value = p.zona;
+  }
+});
+
+// Auto-Lokasi Browser
+$('#btn-auto-lokasi').addEventListener('click', () => {
+  const statusSholat = $('#status-sholat');
+  if(!navigator.geolocation){
+    setStatus(statusSholat, 'Browser Anda tidak mendukung Geolocation.', true);
+    return;
+  }
+  setStatus(statusSholat, 'Mengambil posisi koordinat lokasi Anda…', false, true);
+  navigator.geolocation.getCurrentPosition(pos => {
+    const lat = pos.coords.latitude;
+    const lon = pos.coords.longitude;
+    const tzOffset = -new Date().getTimezoneOffset() / 60;
+    $('#sholat-lat').value = lat.toFixed(4);
+    $('#sholat-lon').value = lon.toFixed(4);
+    $('#sholat-zona').value = tzOffset.toFixed(1);
+    $('#sholat-preset-kota').value = 'custom';
+    setStatus(statusSholat, 'Lokasi otomatis terdeteksi: ' + lat.toFixed(4) + ', ' + lon.toFixed(4));
+  }, err => {
+    setStatus(statusSholat, 'Gagal mengambil lokasi: ' + err.message, true);
+  });
+});
+
+// Sudut Standard Helper
+const SUDUT_PRESETS = {
+  kemenag: { fajar: -20.0, isya: -18.0 },
+  muhammadiyah: { fajar: -18.0, isya: -18.0 },
+  mwl: { fajar: -18.0, isya: -17.0 },
+  egyptian: { fajar: -19.5, isya: -17.5 }
+};
+
+let currentSholatResult = null;
+let intervalCountdown = null;
+
+function updateCountdownSholat(){
+  if(!currentSholatResult || !currentSholatResult.waktu_desimal) return;
+  const des = currentSholatResult.waktu_desimal;
+  const now = new Date();
+  const currentDec = now.getHours() + now.getMinutes()/60 + now.getSeconds()/3600;
+
+  const list = [
+    { key: 'subuh', nama: 'Subuh', jam: des.subuh },
+    { key: 'terbit', nama: 'Terbit', jam: des.terbit },
+    { key: 'dhuha', nama: 'Dhuha', jam: des.dhuha },
+    { key: 'dzuhur', nama: 'Dzuhur', jam: des.dzuhur },
+    { key: 'ashar', nama: 'Ashar', jam: des.ashar },
+    { key: 'maghrib', nama: 'Maghrib', jam: des.maghrib },
+    { key: 'isya', nama: 'Isya', jam: des.isya }
+  ];
+
+  let next = list.find(item => item.jam !== null && item.jam > currentDec);
+  if(!next){
+    next = { key: 'subuh', nama: 'Subuh (Besok)', jam: des.subuh + 24 };
+  }
+
+  const diffHours = next.jam - currentDec;
+  const totalSec = Math.floor(diffHours * 3600);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+
+  const banner = $('#next-prayer-banner');
+  const jamFormatted = currentSholatResult.waktu[next.key] || '';
+  if(banner){
+    banner.innerHTML = `<div><strong><span class="material-symbols-outlined" style="vertical-align:-3px;margin-right:4px;">schedule</span> Sholat Berikutnya: ${next.nama} (${jamFormatted})</strong></div>` +
+                       `<div><span class="material-symbols-outlined" style="vertical-align:-3px;color:var(--emas);margin-right:4px;">hourglass_top</span> <span style="color:var(--emas);font-weight:bold;font-size:1.1rem;">${h}j ${m}m ${s}d</span> lagi</div>`;
+  }
+
+  document.querySelectorAll('.kartu-waktu').forEach(el => el.classList.remove('aktif'));
+  const activeCard = document.querySelector(`.kartu-waktu[data-key="${next.key}"]`);
+  if(activeCard) activeCard.classList.add('aktif');
+}
+
+// ---------------------------------------------------------------------
+// Hitung Sholat Hari Ini
+// ---------------------------------------------------------------------
+$('#btn-hitung-sholat').addEventListener('click', async () => {
+  const status = $('#status-sholat');
+  const lat = parseFloat($('#sholat-lat').value);
+  const lon = parseFloat($('#sholat-lon').value);
+  const zona = parseFloat($('#sholat-zona').value);
+  const tgl = $('#sholat-tanggal').value;
+  const presetKey = $('#sholat-preset-sudut').value;
+  const angles = SUDUT_PRESETS[presetKey] || { fajar: -20.0, isya: -18.0 };
+  const mazhab = $('#sholat-mazhab').value;
+  const elevasi = parseFloat($('#sholat-elevasi').value) || 0;
+  const ihtiyat = parseFloat($('#sholat-ihtiyat').value) || 2;
+
+  const mode = $('#select-mode').value;
+  if(isNaN(lat) || isNaN(lon) || isNaN(zona)){
+    setStatus(status, 'Isi koordinat Lintang, Bujur, dan Zona Waktu dengan angka valid.', true);
+    return;
+  }
+
+  setStatus(status, `Menghitung waktu sholat (${mode === 'ringan' ? 'Mode Ringan' : 'JPL DE421'}) & kiblat…`, false, true);
+
+  try{
+    const data = await fetchCached('/api/sholat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tanggal: tgl, lat, lon, zona, elevasi,
+        sudut_fajar: angles.fajar, sudut_isya: angles.isya,
+        ihtiyat, imsak_offset: 10, mazhab, mode
+      })
+    });
+    if(!data.ok) throw new Error(data.error || 'Gagal menghitung sholat.');
+
+    currentSholatResult = data;
+
+    // Render Grid Cards
+    const grid = $('#grid-waktu-sholat');
+    const order = [
+      { key: 'imsak', nama: 'Imsak' },
+      { key: 'subuh', nama: 'Subuh' },
+      { key: 'terbit', nama: 'Terbit' },
+      { key: 'dhuha', nama: 'Dhuha' },
+      { key: 'dzuhur', nama: 'Dzuhur' },
+      { key: 'ashar', nama: 'Ashar' },
+      { key: 'maghrib', nama: 'Maghrib' },
+      { key: 'isya', nama: 'Isya' }
+    ];
+
+    grid.innerHTML = order.map(item => `
+      <div class="kartu-waktu" data-key="${item.key}">
+        <div class="nama-sholat">${item.nama}</div>
+        <div class="jam-sholat">${data.waktu[item.key] || '—'}</div>
+      </div>
+    `).join('');
+
+    // Info Kiblat
+    const kb = data.kiblat;
+    const ko = data.koordinat;
+    $('#info-kiblat-detail').innerHTML =
+      `Tanggal: <strong>${data.tanggal_formatted}</strong><br>` +
+      `Koordinat: <strong>${ko.lat_dms}, ${ko.lon_dms}</strong> (UTC+${ko.zona})<br>` +
+      `Arah Kiblat (Vincenty): <strong>${kb.arah_teks}</strong><br>` +
+      `Jarak ke Ka'bah: <strong>${kb.jarak_km.toLocaleString()} km</strong><br>` +
+      `Rashdul Kiblat (Bayangan Kiblat): <strong>${kb.kiblat_v_jam || '—'}</strong>`;
+
+    // Rotate Compass
+    const needle = $('#needle-group');
+    const labelDeg = $('#kompas-degree-label');
+    if(needle) needle.setAttribute('transform', `rotate(${kb.az_vincenty}, 100, 100)`);
+    if(labelDeg) labelDeg.textContent = `${kb.az_vincenty}° Azimuth (NW)`;
+
+    $('#kartu-hasil-sholat').style.display = 'block';
+    setStatus(status, 'Selesai.');
+
+    if(intervalCountdown) clearInterval(intervalCountdown);
+    updateCountdownSholat();
+    intervalCountdown = setInterval(updateCountdownSholat, 1000);
+
+    $('#kartu-hasil-sholat').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }catch(err){
+    setStatus(status, err.message, true);
+  }
+});
+
+// ---------------------------------------------------------------------
+// Hitung Jadwal 1 Bulan Penuh
+// ---------------------------------------------------------------------
+let lastJadwalBulanData = null;
+
+$('#btn-hitung-sholat-bulan').addEventListener('click', async () => {
+  const status = $('#status-sholat');
+  const lat = parseFloat($('#sholat-lat').value);
+  const lon = parseFloat($('#sholat-lon').value);
+  const zona = parseFloat($('#sholat-zona').value);
+  const tglVal = $('#sholat-tanggal').value;
+  const d = tglVal ? new Date(tglVal) : new Date();
+  const tahun = d.getFullYear();
+  const bulan = d.getMonth() + 1;
+
+  const presetKey = $('#sholat-preset-sudut').value;
+  const angles = SUDUT_PRESETS[presetKey] || { fajar: -20.0, isya: -18.0 };
+  const mazhab = $('#sholat-mazhab').value;
+  const elevasi = parseFloat($('#sholat-elevasi').value) || 0;
+  const ihtiyat = parseFloat($('#sholat-ihtiyat').value) || 2;
+
+  const mode = $('#select-mode').value;
+  if(isNaN(lat) || isNaN(lon) || isNaN(zona)){
+    setStatus(status, 'Isi koordinat Lintang, Bujur, dan Zona Waktu dengan angka valid.', true);
+    return;
+  }
+
+  setStatus(status, `Menghitung jadwal sholat sebulan (${bulan}/${tahun}, ${mode === 'ringan' ? 'Mode Ringan' : 'JPL DE421'})…`, false, true);
+
+  try{
+    const data = await fetchCached('/api/sholat_bulan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tahun, bulan, lat, lon, zona, elevasi,
+        sudut_fajar: angles.fajar, sudut_isya: angles.isya,
+        ihtiyat, imsak_offset: 10, mazhab, mode
+      })
+    });
+    if(!data.ok) throw new Error(data.error || 'Gagal menghitung jadwal bulan.');
+
+    lastJadwalBulanData = data;
+    $('#judul-jadwal-bulan').textContent = `Jadwal Sholat Bulan ${data.bulan_nama} ${data.tahun}`;
+
+    const tbody = $('#tbody-jadwal-bulan');
+    const todayIso = new Date().toISOString().split('T')[0];
+
+    tbody.innerHTML = data.jadwal.map(item => {
+      const isToday = item.iso === todayIso ? ' class="hari-ini"' : '';
+      return `<tr${isToday}>
+        <td>${item.tgl}</td>
+        <td>${item.hari_nama}</td>
+        <td>${item.imsak}</td>
+        <td>${item.subuh}</td>
+        <td>${item.terbit}</td>
+        <td>${item.dhuha}</td>
+        <td>${item.dzuhur}</td>
+        <td>${item.ashar}</td>
+        <td>${item.maghrib}</td>
+        <td>${item.isya}</td>
+        <td>${item.kiblat_v}</td>
+      </tr>`;
+    }).join('');
+
+    $('#kartu-jadwal-bulan').style.display = 'block';
+    setStatus(status, 'Selesai.');
+    $('#kartu-jadwal-bulan').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }catch(err){
+    setStatus(status, err.message, true);
+  }
+});
+
+// Unduh CSV
+$('#btn-export-csv').addEventListener('click', () => {
+  if(!lastJadwalBulanData || !lastJadwalBulanData.jadwal) return;
+  let csv = 'Tanggal,Hari,Imsak,Subuh,Terbit,Dhuha,Dzuhur,Ashar,Maghrib,Isya,Rashdul Kiblat\n';
+  lastJadwalBulanData.jadwal.forEach(d => {
+    csv += `"${d.tanggal_formatted}","${d.hari_nama}","${d.imsak}","${d.subuh}","${d.terbit}","${d.dhuha}","${d.dzuhur}","${d.ashar}","${d.maghrib}","${d.isya}","${d.kiblat_v}"\n`;
+  });
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `Jadwal_Sholat_${lastJadwalBulanData.bulan_nama}_${lastJadwalBulanData.tahun}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+});
 </script>
 </body>
 </html>
