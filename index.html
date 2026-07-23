@@ -768,10 +768,18 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
   bounds: [[-90, -180], [90, 180]]
 }).addTo(peta);
 
-// Batas dunia yg dipakai fitBounds() - dipangkas dikit dari ±90° (bukan
-// ±90 persis) karena proyeksi Mercator "meledak" tak-hingga di kutub;
-// ±85° sudah lebih dari cukup utk menampilkan seluruh benua & lautan.
-const BATAS_DUNIA = [[-85, -180], [85, 180]];
+// Batas dunia yg dipakai fitBounds(). PENTING: proyeksi Web Mercator itu
+// BUJURSANGKAR (1:1) kalau dipangkas di ±85° seperti sebelumnya - lebar
+// dunia (360° bujur) == tinggi dunia dlm piksel. Makanya waktu kontainer
+// dipaksa landscape tetap (aspect-ratio: 2/1 di CSS), peta malah muncul
+// sebagai KOTAK (persegi) di tengah dgn spasi kosong kiri-kanan, bukan
+// mengisi penuh kotak landscape-nya.
+// FIX: garis lintang dipangkas ke ±66.5° (persis Lingkar Arktik/Antarktik)
+// -- pada ±66.5°, lebar:tinggi dunia dlm Web Mercator persis 2:1, SAMA
+// dgn rasio kontainernya. Jadi peta ngisi penuh kotak landscape tanpa
+// spasi kosong maupun distorsi. Wilayah yg kepotong cuma Arktik/Antarktika,
+// yang memang tidak relevan utk visibilitas hilal maupun gerhana.
+const BATAS_DUNIA = [[-66.5, -180], [66.5, 180]];
 
 // ---------------------------------------------------------------------
 // FIX peta "kecrop" di mobile (akar masalahnya, bukan cuma invalidateSize):
