@@ -228,10 +228,30 @@
   .peta-bungkus.layar-penuh .peta-toolbar {
     border-radius: 0; padding: 10px 18px; background: rgba(7, 12, 23, 0.98); color: #ffffff;
   }
-  .peta-bungkus.layar-penuh #peta {
+  .peta-bungkus.layar-penuh #peta,
+  .peta-bungkus.layar-penuh #peta-gerhana,
+  .peta-bungkus.layar-penuh #peta-gerhana-globe {
     flex: 1; height: calc(100vh - 44px) !important; border-radius: 0 !important;
   }
-  #peta{ width:100%; height: clamp(560px, 75vh, 880px); }
+  #peta, #peta-gerhana{ width:100%; height: clamp(560px, 75vh, 880px); }
+  #peta-gerhana-globe{
+    width:100%; height: clamp(560px, 75vh, 880px); position:relative;
+    background:#0a1120; cursor: grab;
+  }
+  #peta-gerhana-globe:active{ cursor: grabbing; }
+  #peta-gerhana-globe svg{ display:block; width:100%; height:100%; }
+  .mode-peta-toggle{
+    display:flex; border:1px solid var(--portal-border); border-radius:4px;
+    overflow:hidden; margin-right:8px;
+  }
+  .mode-peta-toggle button{
+    font-family: var(--font-heading); font-size:0.78rem; padding:5px 12px; border:none;
+    background:#ffffff; color: var(--teks-utama); cursor:pointer; transition: all 0.15s ease;
+  }
+  .mode-peta-toggle button:not(:last-child){ border-right:1px solid var(--portal-border); }
+  .mode-peta-toggle button.aktif{ background: var(--aksen-desktop); color:#ffffff; font-weight:700; }
+  .mode-peta-toggle button:hover:not(.aktif){ background:#f0f0f0; }
+  .legenda-globe{ position:absolute; top:10px; right:10px; z-index:5; }
   .legenda{
     background: rgba(255,255,255,0.95); border:1px solid var(--portal-border); border-radius:4px;
     padding:8px 12px; font-family: var(--font-mono); font-size:.74rem;
@@ -633,11 +653,16 @@
         <div class="peta-toolbar">
           <div class="peta-toolbar-info" id="peta-gerhana-toolbar-info"><img src="logo.png" style="height:16px;vertical-align:-3px;margin-right:6px;"> Peta Gerhana</div>
           <div class="peta-toolbar-aksi">
+            <div class="mode-peta-toggle">
+              <button id="btn-mode-datar-gerhana" class="aktif" title="Peta Datar (proyeksi persegi panjang)">🗺️ Datar</button>
+              <button id="btn-mode-globe-gerhana" title="Peta Globe (proyeksi bola, bisa diputar)">🌐 Globe</button>
+            </div>
             <button id="btn-reset-view-gerhana" title="Reset Tampilan Peta"><span class="material-symbols-outlined">center_focus_strong</span> Reset View</button>
             <button id="btn-fullscreen-gerhana" title="Tampilkan Layar Penuh"><span class="material-symbols-outlined">fullscreen</span> Layar Penuh</button>
           </div>
         </div>
         <div id="peta-gerhana"></div>
+        <div id="peta-gerhana-globe" style="display:none;"></div>
       </div>
       <div class="catatan" id="catatan-gerhana"></div>
     </section>
@@ -647,6 +672,11 @@
 <footer><img src="logo.png" style="height:18px;vertical-align:-3px;"> HisabWin — Peta Visibilitas Hilal · Leaflet Interaktif</footer>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<!-- d3 + topojson-client: dipakai KHUSUS utk mode "Globe" (proyeksi Orthographic)
+     pada peta Gerhana, meniru mode 'globe' di versi desktop (cartopy). Leaflet
+     sendiri tidak bisa render proyeksi bola/globe, makanya dipisah pakai SVG. -->
+<script src="https://unpkg.com/d3@7"></script>
+<script src="https://unpkg.com/topojson-client@3"></script>
 <script>
 const $ = (sel) => document.querySelector(sel);
 
@@ -700,6 +730,13 @@ function setStatus(el, teks, error=false, loading=false){
 // Peta Leaflet Canvas Mode & Strict World Bounds:
 // Canvas renderer memastikan kontur & poligon TIDAK HILANG saat zoom / drag.
 // maxBounds & noWrap mengunci peta agar kontur tetap stabil & presisi.
+//
+// CATATAN minZoom: SEBELUMNYA dikunci ke 2. Itu penyebab peta "kecrop"
+// (sisi timur/barat dunia kepotong) di layar sempit/mobile -- di zoom 2,
+// lebar dunia (360° bujur) makin gampang lebih lebar dari kontainer kalau
+// kontainernya sempit, tapi Leaflet DILARANG zoom keluar lebih jauh dari
+// situ. Diturunkan ke 1 supaya di layar sempit peta tetap bisa zoom out
+// secukupnya utk menampilkan seluruh dunia (lihat tampilkanSeluruhDunia()).
 // ---------------------------------------------------------------------
 const canvasRenderer = L.canvas({ padding: 0.5 });
 const peta = L.map('peta', {
@@ -708,24 +745,36 @@ const peta = L.map('peta', {
   worldCopyJump: false,
   maxBounds: [[-89.9, -180], [89.9, 180]],
   maxBoundsViscosity: 0.8,
-  minZoom: 2,
+  minZoom: 1,
   maxZoom: 10,
-  zoomSnap: 0.5
-}).setView([10, 20], 2);
+  zoomSnap: 0.25
+});
 
 L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
   attribution: '&copy; OpenStreetMap &copy; CARTO',
-  subdomains: 'abcd', maxZoom: 10, minZoom: 2,
+  subdomains: 'abcd', maxZoom: 10, minZoom: 1,
   noWrap: true,
   bounds: [[-90, -180], [90, 180]]
 }).addTo(peta);
+
+// Batas dunia yg dipakai fitBounds() - dipangkas dikit dari ±90° (bukan
+// ±90 persis) karena proyeksi Mercator "meledak" tak-hingga di kutub;
+// ±85° sudah lebih dari cukup utk menampilkan seluruh benua & lautan.
+const BATAS_DUNIA = [[-85, -180], [85, 180]];
+// fitBounds() MENGHITUNG ULANG zoom yg pas berdasarkan ukuran kontainer
+// SAAT INI -- ini kuncinya supaya "seluruh dunia" beneran tampil penuh
+// baik di layar lebar (desktop) maupun sempit (mobile/DevTools), beda
+// dgn setView(..., zoomTetap) yg dulu dipakai & bikin kecrop di layar sempit.
+function tampilkanSeluruhDunia(petaTarget){
+  petaTarget.fitBounds(BATAS_DUNIA, { animate: false });
+}
+tampilkanSeluruhDunia(peta);
 
 const layerMabims = L.layerGroup().addTo(peta);
 const layerMuhammadiyah = L.layerGroup();
 const layerIndonesiaTinggi = L.layerGroup();
 const layerIndonesiaElongasi = L.layerGroup();
 const SEMUA_LAYER = [layerMabims, layerMuhammadiyah, layerIndonesiaTinggi, layerIndonesiaElongasi];
-const VIEW_DUNIA = { center:[10, 20], zoom:2 };
 
 // Fullscreen & Invalidation Handler
   function toggleLayarPenuh(){
@@ -749,12 +798,22 @@ btnResetView.addEventListener('click', () => {
       peta.fitBounds([[b.lat_min, b.lon_min], [b.lat_max, b.lon_max]]);
     }
   } else {
-    peta.setView(VIEW_DUNIA.center, VIEW_DUNIA.zoom);
+    tampilkanSeluruhDunia(peta);
   }
   peta.invalidateSize();
 });
 
 window.addEventListener('resize', () => peta.invalidateSize());
+
+// window 'resize' SAJA tidak cukup: perubahan ukuran kontainer #peta yang
+// BUKAN karena resize jendela (mis. DevTools "Responsive/Device Toolbar"
+// mengubah dimensi viewport, font web yang telat termuat mengubah layout,
+// sidebar/orientasi berubah) tidak selalu memicu event 'resize' di window,
+// sehingga Leaflet tetap memakai ukuran LAMA yang ke-cache & peta jadi
+// "kecrop" (tile cuma kegambar di sebagian kotak, sisanya kosong/gelap).
+// ResizeObserver memantau LANGSUNG elemen kontainernya, jadi selalu akurat
+// apa pun penyebab perubahan ukurannya.
+new ResizeObserver(() => peta.invalidateSize()).observe($('#peta'));
 
 let legendaCtrl = null;
 function pasangLegenda(baris){
@@ -857,7 +916,7 @@ function tampilkanTab(nama){
     petaToolbarInfo.innerHTML = logoPrefix + 'Peta Visibilitas Hilal — Kriteria MABIMS';
     tabMabims.classList.add('aktif');
     layerMabims.addTo(peta);
-    peta.setView(VIEW_DUNIA.center, VIEW_DUNIA.zoom);
+    tampilkanSeluruhDunia(peta);
     pasangLegenda([
       {tipe:'garis', warna:'#4d8fe0', label:'Tinggi hilal = 3°'},
       {tipe:'garis', warna:'#e05a4d', label:'Elongasi = 6.4°'},
@@ -869,7 +928,7 @@ function tampilkanTab(nama){
     petaToolbarInfo.innerHTML = logoPrefix + 'Peta Visibilitas Hilal — Kriteria Muhammadiyah';
     tabMuhammadiyah.classList.add('aktif');
     layerMuhammadiyah.addTo(peta);
-    peta.setView(VIEW_DUNIA.center, VIEW_DUNIA.zoom);
+    tampilkanSeluruhDunia(peta);
     const mu = hasilTerakhir.muhammadiyah;
     pasangLegenda([
       {tipe:'garis', warna:'#4d8fe0', label:'Tinggi hilal geosentris = 5°'},
@@ -1371,16 +1430,29 @@ const petaGerhana = L.map('peta-gerhana', {
   worldCopyJump: true,
   minZoom: 1,
   maxZoom: 10,
-}).setView([20, 0], 2);
+});
 
 L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
   attribution: '&copy; OpenStreetMap &copy; CARTO',
   subdomains: 'abcd', maxZoom: 10, minZoom: 1,
 }).addTo(petaGerhana);
+tampilkanSeluruhDunia(petaGerhana);
 
 const layerGerhana = L.layerGroup().addTo(petaGerhana);
+
+// Sama seperti #peta (lihat catatan ResizeObserver di dekat window resize
+// listener peta Hilal) - #peta-gerhana perlu dipantau langsung, bukan cuma
+// window.resize, supaya tidak "kecrop" saat kontainernya berubah ukuran
+// tanpa lewat resize jendela (mis. mode responsive/device toolbar, dst).
+new ResizeObserver(() => { if(modePetaGerhana === 'datar') petaGerhana.invalidateSize(); }).observe($('#peta-gerhana'));
 let legendaGerhanaCtrl = null;
-let viewAwalGerhana = { center: [20, 0], zoom: 2 };
+// mode 'dunia': tampilkan seluruh dunia (fitBounds, ikut ukuran kontainer).
+// mode 'titik': zoom ke satu titik tertentu (lat/lon/zoom tetap).
+let viewAwalGerhana = { mode: 'dunia' };
+function terapkanViewAwalGerhana(){
+  if(viewAwalGerhana.mode === 'dunia') tampilkanSeluruhDunia(petaGerhana);
+  else petaGerhana.setView([viewAwalGerhana.lat, viewAwalGerhana.lon], viewAwalGerhana.zoom);
+}
 
 function pasangLegendaGerhana(baris){
   if(legendaGerhanaCtrl) petaGerhana.removeControl(legendaGerhanaCtrl);
@@ -1397,6 +1469,8 @@ function pasangLegendaGerhana(baris){
     return div;
   };
   legendaGerhanaCtrl.addTo(petaGerhana);
+  // Sinkronkan juga ke legenda mode Globe (kontainer terpisah dari Leaflet)
+  pasangLegendaGlobe(baris);
 }
 
 function toggleLayarPenuhGerhana(){
@@ -1404,7 +1478,14 @@ function toggleLayarPenuhGerhana(){
   btnFullscreenGerhana.innerHTML = isFull
     ? '<span class="material-symbols-outlined">fullscreen_exit</span> Keluar Layar Penuh'
     : '<span class="material-symbols-outlined">fullscreen</span> Layar Penuh';
-  setTimeout(() => petaGerhana.invalidateSize(), 60);
+  setTimeout(() => {
+    if(modePetaGerhana === 'datar'){
+      petaGerhana.invalidateSize();
+    } else {
+      aturDimensiSvgGlobe();
+      gambarUlangGlobe();
+    }
+  }, 60);
 }
 btnFullscreenGerhana.addEventListener('click', toggleLayarPenuhGerhana);
 document.addEventListener('keydown', (e) => {
@@ -1413,8 +1494,217 @@ document.addEventListener('keydown', (e) => {
   }
 });
 btnResetViewGerhana.addEventListener('click', () => {
-  petaGerhana.setView(viewAwalGerhana.center, viewAwalGerhana.zoom);
+  if(modePetaGerhana === 'datar'){
+    terapkanViewAwalGerhana();
+  } else {
+    pusatkanGlobe(viewAwalGlobeGerhana.lon, viewAwalGlobeGerhana.lat);
+    gambarUlangGlobe();
+  }
 });
+
+// =======================================================================
+// MODE GLOBE (proyeksi Orthographic ala d3, meniru mode "🌐 Globe" versi
+// desktop yang pakai cartopy). Leaflet murni 2D & tidak mendukung proyeksi
+// bola, jadi mode ini digambar terpisah pakai SVG + d3-geo, memakai data
+// GeoJSON MENTAH YANG SAMA dari /api/gerhana_matahari & /api/gerhana_bulan
+// (tidak fetch ulang - cukup gambar ulang dari cache saat pindah mode).
+// =======================================================================
+const OPASITAS_PENUMBRA = 0.03; // opasitas isian tiap lingkaran bayangan sebagian
+const petaGerhanaGlobeEl = $('#peta-gerhana-globe');
+let modePetaGerhana = 'datar'; // 'datar' | 'globe'
+let dataGerhanaSaatIni = null;   // cache respons API gerhana terakhir yg dimuat
+let jenisGerhanaSaatIni = null;  // 'matahari' | 'bulan'
+let viewAwalGlobeGerhana = { lon: 0, lat: 0 };
+let svgGlobe = null, gGlobe = null, proyeksiGlobe = null, pathGlobe = null;
+let worldLandGeo = null, worldLandPromise = null;
+
+// Basemap daratan dunia (resolusi rendah, ~100kb) - dimuat SEKALI & di-cache,
+// dipakai persis seperti cfeature.LAND di versi desktop.
+function ambilWorldLand(){
+  if(worldLandPromise) return worldLandPromise;
+  worldLandPromise = fetch('https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/land-110m.json')
+    .then(r => r.json())
+    .then(topo => { worldLandGeo = topojson.feature(topo, topo.objects.land); return worldLandGeo; })
+    .catch(err => { console.error('Gagal memuat basemap globe:', err); return null; });
+  return worldLandPromise;
+}
+
+function pastikanSvgGlobe(){
+  if(svgGlobe) return;
+  svgGlobe = d3.select(petaGerhanaGlobeEl).append('svg');
+  gGlobe = svgGlobe.append('g');
+  proyeksiGlobe = d3.geoOrthographic().clipAngle(90);
+  pathGlobe = d3.geoPath(proyeksiGlobe);
+  aturDimensiSvgGlobe();
+
+  // Geser (drag) utk memutar globe secara manual, terpisah dari rotasi
+  // otomatis saat pusatkanGlobe() dipanggil (ganti gerhana / reset view).
+  let awalDrag = null;
+  svgGlobe.call(d3.drag()
+    .on('start', (ev) => { awalDrag = { x: ev.x, y: ev.y, rotasi: proyeksiGlobe.rotate() }; })
+    .on('drag', (ev) => {
+      if(!awalDrag) return;
+      const skalaPixel = 250 / proyeksiGlobe.scale(); // makin di-zoom out, makin cepat putar
+      proyeksiGlobe.rotate([
+        awalDrag.rotasi[0] + (ev.x - awalDrag.x) * skalaPixel,
+        awalDrag.rotasi[1] - (ev.y - awalDrag.y) * skalaPixel,
+      ]);
+      gambarUlangGlobe();
+    })
+    .on('end', () => { awalDrag = null; })
+  );
+
+  // Pantau ukuran kontainer globe langsung (sama alasannya dgn #peta &
+  // #peta-gerhana) supaya SVG-nya selalu ikut menyesuaikan, bukan cuma
+  // saat pindah mode/layar-penuh secara eksplisit.
+  new ResizeObserver(() => {
+    if(modePetaGerhana === 'globe'){ aturDimensiSvgGlobe(); gambarUlangGlobe(); }
+  }).observe(petaGerhanaGlobeEl);
+}
+
+// Sesuaikan ukuran SVG & skala proyeksi mengikuti ukuran kontainer saat ini
+// (dipanggil saat pertama kali dibuat, pindah mode, resize layar penuh, dst)
+// - SENGAJA tidak mengubah rotasi yg sedang aktif (beda dgn pusatkanGlobe()).
+function aturDimensiSvgGlobe(){
+  if(!svgGlobe) return;
+  const rect = petaGerhanaGlobeEl.getBoundingClientRect();
+  const lebar = Math.max(rect.width, 200), tinggi = Math.max(rect.height, 200);
+  svgGlobe.attr('viewBox', `0 0 ${lebar} ${tinggi}`).attr('width', lebar).attr('height', tinggi);
+  proyeksiGlobe.translate([lebar / 2, tinggi / 2]).scale(Math.min(lebar, tinggi) * 0.47);
+}
+
+function pusatkanGlobe(lon, lat){
+  if(!proyeksiGlobe) return;
+  proyeksiGlobe.rotate([-lon, -lat]);
+}
+
+// Titik greatest eclipse / bulan-di-zenith: hanya digambar kalau sedang
+// menghadap ke arah pengamat (belahan globe yg kelihatan), sama seperti
+// marker fisik di permukaan bola sungguhan.
+function gambarMarkerGlobe(lon, lat, label, warna){
+  const rotasi = proyeksiGlobe.rotate();
+  const pusatSaatIni = [-rotasi[0], -rotasi[1]];
+  if(d3.geoDistance([lon, lat], pusatSaatIni) > Math.PI / 2) return;
+  const koordinat = proyeksiGlobe([lon, lat]);
+  if(!koordinat) return;
+  gGlobe.append('circle')
+    .attr('cx', koordinat[0]).attr('cy', koordinat[1]).attr('r', 4)
+    .attr('fill', warna).attr('stroke', '#1a1003').attr('stroke-width', 1);
+  gGlobe.append('text')
+    .attr('x', koordinat[0] + 8).attr('y', koordinat[1] - 8)
+    .attr('fill', warna).attr('font-weight', 900).attr('font-size', 12)
+    .attr('font-family', 'var(--font-heading)').attr('paint-order', 'stroke')
+    .attr('stroke', '#0a1120').attr('stroke-width', 3)
+    .text(label);
+}
+
+function gambarLapisanGlobeMatahari(data){
+  const generatorLingkaran = d3.geoCircle();
+  data.bayangan_penumbra.forEach(p => {
+    const radiusDerajat = (p.radius_km / 6371) * (180 / Math.PI);
+    gGlobe.append('path')
+      .datum(generatorLingkaran.center([p.lon, p.lat]).radius(radiusDerajat)())
+      .attr('d', pathGlobe)
+      .attr('fill', '#f5c542').attr('fill-opacity', OPASITAS_PENUMBRA).attr('stroke', 'none');
+  });
+  if(data.lintasan_totalitas){
+    gGlobe.append('path')
+      .datum(data.lintasan_totalitas).attr('d', pathGlobe)
+      .attr('fill', 'none')
+      .attr('stroke', data.jenis === 'cincin' ? '#e8b565' : '#e05a4d')
+      .attr('stroke-width', 2.5);
+  }
+  if(data.titik_greatest) gambarMarkerGlobe(data.titik_greatest.lon, data.titik_greatest.lat, '★ Greatest Eclipse', '#e8b565');
+}
+
+function gambarLapisanGlobeBulan(data){
+  if(data.visibilitas.lingkaran_p1){
+    gGlobe.append('path').datum(data.visibilitas.lingkaran_p1).attr('d', pathGlobe)
+      .attr('fill', 'none').attr('stroke', '#e8b565').attr('stroke-width', 1.5).attr('stroke-dasharray', '6 5');
+  }
+  if(data.visibilitas.lingkaran_p4){
+    gGlobe.append('path').datum(data.visibilitas.lingkaran_p4).attr('d', pathGlobe)
+      .attr('fill', 'none').attr('stroke', '#e8b565').attr('stroke-width', 1.5).attr('stroke-dasharray', '6 5');
+  }
+  if(data.visibilitas.lingkaran_greatest){
+    gGlobe.append('path').datum(data.visibilitas.lingkaran_greatest).attr('d', pathGlobe)
+      .attr('fill', '#4d6fe0').attr('fill-opacity', 0.22).attr('stroke', '#4d6fe0').attr('stroke-width', 1.5);
+  }
+  if(data.titik_greatest) gambarMarkerGlobe(data.titik_greatest.lon, data.titik_greatest.lat, '★ Bulan di zenith', '#e8b565');
+}
+
+function pasangLegendaGlobe(baris){
+  petaGerhanaGlobeEl.querySelectorAll('.legenda-globe').forEach(el => el.remove());
+  const div = document.createElement('div');
+  div.className = 'legenda legenda-globe';
+  div.innerHTML = baris.map(b => {
+    if(b.tipe === 'area'){
+      return `<div class="baris-l"><span class="swatch" style="background:${b.warna};opacity:${b.opasitas || 1}"></span>${b.label}</div>`;
+    }
+    const putus = b.putus ? ' putus' : '';
+    return `<div class="baris-l"><span class="garis${putus}" style="border-top-color:${b.warna}"></span>${b.label}</div>`;
+  }).join('');
+  petaGerhanaGlobeEl.appendChild(div);
+}
+
+function gambarUlangGlobe(){
+  if(!gGlobe) return;
+  gGlobe.selectAll('*').remove();
+
+  // Lautan / bola dunia
+  gGlobe.append('path').datum({ type: 'Sphere' }).attr('d', pathGlobe)
+    .attr('fill', '#0a1120').attr('stroke', '#3b4f70').attr('stroke-width', 1);
+
+  // Graticule - garis bantu lintang/bujur tiap 10°, meniru gridlines cartopy
+  gGlobe.append('path').datum(d3.geoGraticule10()).attr('d', pathGlobe)
+    .attr('fill', 'none').attr('stroke', '#1c2b45').attr('stroke-width', 0.5);
+
+  // Daratan (basemap) - kalau belum selesai dimuat, globe tetap tergambar
+  // (lautan + graticule + lapisan gerhana), daratan menyusul saat fetch selesai
+  if(worldLandGeo){
+    gGlobe.append('path').datum(worldLandGeo).attr('d', pathGlobe)
+      .attr('fill', '#233047').attr('stroke', '#3b4f70').attr('stroke-width', 0.6);
+  }
+
+  if(dataGerhanaSaatIni){
+    if(jenisGerhanaSaatIni === 'matahari') gambarLapisanGlobeMatahari(dataGerhanaSaatIni);
+    else if(jenisGerhanaSaatIni === 'bulan') gambarLapisanGlobeBulan(dataGerhanaSaatIni);
+  }
+}
+
+// Dipanggil setiap kali data gerhana baru selesai dimuat (dari
+// muatGerhanaMatahari/muatGerhanaBulan) SUPAYA globe ikut ter-update kalau
+// mode globe sedang aktif saat itu, tanpa perlu fetch ulang ke server.
+function perbaruiGlobeSetelahMuatData(){
+  viewAwalGlobeGerhana = dataGerhanaSaatIni && dataGerhanaSaatIni.titik_greatest
+    ? { lon: dataGerhanaSaatIni.titik_greatest.lon, lat: dataGerhanaSaatIni.titik_greatest.lat }
+    : { lon: 0, lat: 0 };
+  if(modePetaGerhana !== 'globe') return;
+  pastikanSvgGlobe();
+  pusatkanGlobe(viewAwalGlobeGerhana.lon, viewAwalGlobeGerhana.lat);
+  ambilWorldLand().finally(gambarUlangGlobe);
+}
+
+function aturModePetaGerhana(mode){
+  if(modePetaGerhana === mode) return;
+  modePetaGerhana = mode;
+  $('#btn-mode-datar-gerhana').classList.toggle('aktif', mode === 'datar');
+  $('#btn-mode-globe-gerhana').classList.toggle('aktif', mode === 'globe');
+  if(mode === 'datar'){
+    petaGerhanaGlobeEl.style.display = 'none';
+    $('#peta-gerhana').style.display = 'block';
+    setTimeout(() => petaGerhana.invalidateSize(), 30);
+  } else {
+    $('#peta-gerhana').style.display = 'none';
+    petaGerhanaGlobeEl.style.display = 'block';
+    pastikanSvgGlobe();
+    pusatkanGlobe(viewAwalGlobeGerhana.lon, viewAwalGlobeGerhana.lat);
+    aturDimensiSvgGlobe();
+    ambilWorldLand().finally(gambarUlangGlobe);
+  }
+}
+$('#btn-mode-datar-gerhana').addEventListener('click', () => aturModePetaGerhana('datar'));
+$('#btn-mode-globe-gerhana').addEventListener('click', () => aturModePetaGerhana('globe'));
 
 // ---- Cari daftar gerhana per tahun ----
 btnCariGerhana.addEventListener('click', async () => {
@@ -1510,7 +1800,7 @@ async function muatGerhanaMatahari(iso, jenisAwal){
     data.bayangan_penumbra.forEach(p => {
       L.circle([p.lat, p.lon], {
         renderer: canvasRendererGerhana, radius: p.radius_km * 1000,
-        color: 'none', fillColor: '#f5c542', fillOpacity: 0.045, interactive: false
+        stroke: false, fillColor: '#f5c542', fillOpacity: OPASITAS_PENUMBRA, interactive: false
       }).addTo(layerGerhana);
     });
 
@@ -1527,7 +1817,7 @@ async function muatGerhanaMatahari(iso, jenisAwal){
         icon: L.divIcon({ className: 'label-kontur', html: '<span style="color:#e8b565;font-weight:900;">★ Greatest Eclipse</span>', iconSize: null })
       }).addTo(layerGerhana);
       petaGerhana.setView([data.titik_greatest.lat, data.titik_greatest.lon], 3);
-      viewAwalGerhana = { center: [data.titik_greatest.lat, data.titik_greatest.lon], zoom: 3 };
+      viewAwalGerhana = { mode: 'titik', lat: data.titik_greatest.lat, lon: data.titik_greatest.lon, zoom: 3 };
     }
 
     pasangLegendaGerhana([
@@ -1539,6 +1829,10 @@ async function muatGerhanaMatahari(iso, jenisAwal){
     catatanGerhana.textContent = data.lintasan_totalitas
       ? 'Garis tengah = lokasi terbaik untuk melihat totalitas/cincin. Wilayah berbayang kuning = tempat-tempat yang berpotensi melihat gerhana sebagian di beberapa titik waktu P1–P4.'
       : 'Gerhana ini TIDAK menghasilkan lintasan total/cincin di mana pun (umbra/antumbra tidak menyentuh Bumi) - hanya terlihat sebagai gerhana sebagian dari wilayah yang diarsir.';
+
+    dataGerhanaSaatIni = data;
+    jenisGerhanaSaatIni = 'matahari';
+    perbaruiGlobeSetelahMuatData();
   }catch(err){
     setStatus(ringkasanGerhana, err.message, true);
   }
@@ -1599,8 +1893,8 @@ async function muatGerhanaBulan(iso){
       }).addTo(layerGerhana);
     }
 
-    petaGerhana.setView([0, 0], 2);
-    viewAwalGerhana = { center: [0, 0], zoom: 2 };
+    tampilkanSeluruhDunia(petaGerhana);
+    viewAwalGerhana = { mode: 'dunia' };
 
     pasangLegendaGerhana([
       { tipe: 'area', warna: '#4d6fe0', opasitas: .35, label: 'Wilayah Bulan di atas horizon SAAT greatest eclipse (lokasi terbaik)' },
@@ -1608,6 +1902,10 @@ async function muatGerhanaBulan(iso){
     ]);
 
     catatanGerhana.textContent = 'Gerhana Bulan terlihat SERENTAK dari seluruh wilayah yang sedang malam & Bulannya di atas horizon - beda dari gerhana Matahari yang jalurnya sempit. Wilayah biru = lokasi terbaik (Bulan di atas horizon pas puncak gerhana).';
+
+    dataGerhanaSaatIni = data;
+    jenisGerhanaSaatIni = 'bulan';
+    perbaruiGlobeSetelahMuatData();
   }catch(err){
     setStatus(ringkasanGerhana, err.message, true);
   }
