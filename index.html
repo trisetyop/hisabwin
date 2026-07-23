@@ -233,11 +233,22 @@
   .peta-bungkus.layar-penuh #peta-gerhana-globe {
     flex: 1; height: calc(100vh - 44px) !important; border-radius: 0 !important;
   }
-  #peta, #peta-gerhana{ width:100%; height: clamp(560px, 75vh, 880px); }
-  #peta-gerhana-globe{
-    width:100%; height: clamp(560px, 75vh, 880px); position:relative;
-    background:#0a1120; cursor: grab;
+  /* SEBELUMNYA: height: clamp(560px, 75vh, 880px) -- tinggi dihitung dari
+     tinggi VIEWPORT (vh), sama sekali tidak terkait lebar kontainer. Di
+     layar sempit/portrait (mobile), itu bikin kotak peta jadi TINGGI &
+     SEMPIT (portrait), padahal peta dunia (Mercator) itu bentuknya
+     landscape. Akibatnya fitBounds() terpaksa zoom out jauh biar 360°
+     bujur muat di lebar yg sempit itu, nyisain banyak spasi kosong di atas
+     & bawah peta (letterboxed).
+     SEKARANG: pakai `aspect-ratio` supaya bentuk kotaknya SELALU landscape
+     (rasio ~2:1, mendekati proporsi dunia Web Mercator ±85°) mengikuti
+     LEBAR kontainer, bukan tinggi layar. Jadi di layar sempit, tingginya
+     ikut mengecil proporsional -> peta tetap landscape & dunia tampil
+     penuh tanpa spasi kosong berlebih. */
+  #peta, #peta-gerhana, #peta-gerhana-globe{
+    width:100%; aspect-ratio: 2 / 1; min-height: 320px; max-height: 800px;
   }
+  #peta-gerhana-globe{ position:relative; background:#0a1120; cursor: grab; }
   #peta-gerhana-globe:active{ cursor: grabbing; }
   #peta-gerhana-globe svg{ display:block; width:100%; height:100%; }
   .mode-peta-toggle{
