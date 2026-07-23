@@ -301,6 +301,50 @@ def _zona_geojson(ax, lon_mesh, lat_mesh, mask_bool):
     return {"type": "MultiPolygon", "coordinates": polys}
 
 
+def _lingkaran_geodesic_geojson(lat0, lon0, radius_derajat=89.9, n=120):
+    """Lingkaran geodesic (radius SUDUT dari titik pusat, di permukaan bola)
+    -> GeoJSON Polygon. Replikasi manual dari cartopy.geodesic.Geodesic()
+    .circle() yang dipakai versi GUI (buat_figure_visibilitas_gerhana_bulan)
+    - dipakai utk lingkaran horizon 90 derajat (radius 89.9 spy sedikit di
+    dalam, sama seperti alasan RADIUS_HORIZON_M di hisabwin.py: menghindari
+    titik genap 90 derajat yang bisa bikin geometri degenerate). TIDAK
+    butuh cartopy sama sekali (lihat catatan cartopy opsional sebelumnya).
+
+    np.unwrap() dipakai (BUKAN _split_antimeridian_seg seperti garis kontur
+    biasa) supaya bujurnya tetap kontinu melewati antimeridian tanpa
+    loncatan - penting krn ini POLIGON tertutup (lingkaran), bukan garis
+    yang boleh dipotong jadi beberapa segmen terpisah. Leaflet (dengan
+    worldCopyJump yang sudah dipakai index.html) merender koordinat di
+    luar rentang -180..180 dengan benar."""
+    lat0_r, lon0_r = np.radians(lat0), np.radians(lon0)
+    d = np.radians(radius_derajat)
+    bearing = np.linspace(0, 2 * np.pi, n)
+    lat = np.arcsin(np.sin(lat0_r) * np.cos(d) + np.cos(lat0_r) * np.sin(d) * np.cos(bearing))
+    lon = lon0_r + np.arctan2(
+        np.sin(bearing) * np.sin(d) * np.cos(lat0_r), np.cos(d) - np.sin(lat0_r) * np.sin(lat)
+    )
+    lon_deg = np.degrees(np.unwrap(lon))
+    lat_deg = np.degrees(lat)
+    coords = list(zip(np.round(lon_deg, 3).tolist(), np.round(lat_deg, 3).tolist()))
+    coords.append(coords[0])
+    return {"type": "Polygon", "coordinates": [coords]}
+
+
+def _lintasan_gerhana_matahari_geojson(lintasan):
+    """list of {'waktu','lat','lon','gamma'} (dari hitung_lintasan_gerhana_
+    matahari) -> MultiLineString, antimeridian-safe (pakai _split_
+    antimeridian_seg yang sama dgn kontur tinggi hilal/elongasi)."""
+    if not lintasan:
+        return None
+    seg = [[p["lon"], p["lat"]] for p in lintasan]
+    coords = _split_antimeridian_seg(seg)
+    return {"type": "MultiLineString", "coordinates": coords} if coords else None
+
+
+def _kontak_ke_iso(kontak):
+    return {k: (v.isoformat() if v is not None else None) for k, v in kontak.items()}
+
+
 # ---------------------------------------------------------------------------
 # In-Memory Python Cache & Vercel Edge CDN Cache-Control Manager
 # ---------------------------------------------------------------------------
@@ -765,6 +809,216 @@ def api_sholat_bulan():
 
 
 from flask import make_response
+
+# ---------------------------------------------------------------------------
+# Endpoint: daftar gerhana matahari & bulan sepanjang tahun tertentu.
+# Memakai cari_gerhana_matahari_kandidat_ringan/cari_gerhana_bulan_kandidat_
+# ringan - SUDAH DIVERIFIKASI murni numpy/skyfield (tanpa cartopy) & hasil
+# perhitungannya dicek manual cocok dgn gerhana asli 2026 (cincin 17 Feb,
+# total 12 Agu utk matahari; total 3 Mar, sebagian 28 Agu utk bulan).
+# ---------------------------------------------------------------------------
+@app.route("/api/gerhana")
+def api_gerhana():
+    tahun_str = request.args.get("tahun", "").strip()
+    mode = request.args.get("mode", "jpl").strip().lower()
+    if mode not in ("jpl", "ringan"):
+        mode = "jpl"
+    if not (tahun_str.isdigit() and len(tahun_str) == 4):
+        return _error_response("Masukkan tahun 4 digit, misalnya 2026.")
+    tahun = int(tahun_str)
+
+    def _hitung():
+        with _state_lock:
+            if mode == "jpl":
+                _pastikan_ephemeris()
+                ts_arg, eph_arg = _ts, _eph
+            else:
+                ts_arg, eph_arg = None, None
+
+            kandidat_m = hw.cari_gerhana_matahari_kandidat_ringan(tahun, mode=mode, ts=ts_arg, eph=eph_arg)
+            kandidat_b = hw.cari_gerhana_bulan_kandidat_ringan(tahun, mode=mode, ts=ts_arg, eph=eph_arg)
+
+            matahari = []
+            for k in kandidat_m:
+                wg = k["waktu_greatest_eclipse"]
+                if wg is None:
+                    continue  # bukan kandidat sungguhan (beta terlalu besar)
+                if k["kena_bumi"]:
+                    _, r_umbra_km, _ = hw._radius_bayangan_km(wg, mode=mode, ts=ts_arg, eph=eph_arg)
+                    jenis = "total" if r_umbra_km > 0 else "cincin"
+                else:
+                    jenis = "sebagian"
+                judul = {"total": "Total", "cincin": "Cincin", "sebagian": "Sebagian"}[jenis]
+                matahari.append({
+                    "iso": wg.isoformat(),
+                    "jenis": jenis,
+                    "lat": round(k["lat_perkiraan"], 3) if k["lat_perkiraan"] is not None else None,
+                    "lon": round(k["lon_perkiraan"], 3) if k["lon_perkiraan"] is not None else None,
+                    "label": f"{hw.format_waktu_ijtimak(wg)} — Gerhana Matahari {judul}",
+                })
+
+            bulan = []
+            for k in kandidat_b:
+                if k["jenis"] == "tidak ada gerhana":
+                    continue
+                wg = k["waktu_greatest_eclipse"]
+                judul = {"total": "Total", "sebagian": "Sebagian", "penumbral": "Penumbral"}[k["jenis"]]
+                bulan.append({
+                    "iso": wg.isoformat(),
+                    "jenis": k["jenis"],
+                    "magnitudo_umbral": round(k["magnitudo_umbral"], 3),
+                    "magnitudo_penumbral": round(k["magnitudo_penumbral"], 3),
+                    "label": f"{hw.format_waktu_ijtimak(wg)} — Gerhana Bulan {judul}",
+                })
+
+        return {"ok": True, "tahun": tahun, "mode": mode, "matahari": matahari, "bulan": bulan}
+
+    try:
+        return _make_cached_response("/api/gerhana", {"tahun": tahun, "mode": mode}, _hitung, s_maxage=31536000, immutable=True)
+    except Exception as e:
+        traceback.print_exc()
+        return _error_response(f"Gagal mencari gerhana: {e}", 500)
+
+
+# ---------------------------------------------------------------------------
+# Endpoint: detail + peta satu gerhana MATAHARI (lintasan totalitas/cincin,
+# jejak bayangan penumbra, 6 waktu kontak) - stateless, "iso" dikirim balik
+# dari hasil /api/gerhana (waktu_greatest_eclipse), sama pola dgn /api/peta.
+# ---------------------------------------------------------------------------
+@app.route("/api/gerhana_matahari", methods=["POST"])
+def api_gerhana_matahari():
+    data = request.get_json(force=True, silent=True) or {}
+    iso = data.get("iso")
+    mode = str(data.get("mode", "jpl")).strip().lower()
+    if mode not in ("jpl", "ringan"):
+        mode = "jpl"
+    if not iso:
+        return _error_response("Parameter 'iso' (waktu greatest eclipse dari hasil /api/gerhana) wajib diisi.")
+    try:
+        waktu_greatest = datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return _error_response("Parameter 'iso' tidak valid.")
+
+    def _hitung():
+        with _state_lock:
+            if mode == "jpl":
+                _pastikan_ephemeris()
+                ts_arg, eph_arg = _ts, _eph
+            else:
+                ts_arg, eph_arg = None, None
+
+            _, r_umbra_km, _ = hw._radius_bayangan_km(waktu_greatest, mode=mode, ts=ts_arg, eph=eph_arg)
+            jenis = "total" if r_umbra_km > 0 else "cincin"
+
+            lintasan = hw.hitung_lintasan_gerhana_matahari(waktu_greatest, mode=mode, ts=ts_arg, eph=eph_arg)
+            penumbra = hw.hitung_bayangan_penumbra_gerhana_matahari(waktu_greatest, mode=mode, ts=ts_arg, eph=eph_arg)
+            kontak = hw.cari_kontak_gerhana_matahari(waktu_greatest, mode=mode, ts=ts_arg, eph=eph_arg)
+
+        titik_greatest = None
+        if lintasan:
+            tengah = min(lintasan, key=lambda p: abs((p["waktu"] - waktu_greatest).total_seconds()))
+            titik_greatest = {"lat": round(tengah["lat"], 3), "lon": round(tengah["lon"], 3)}
+
+        return {
+            "ok": True,
+            "mode": mode,
+            "jenis": jenis,
+            "waktu_greatest_eclipse": hw.format_waktu_ijtimak(waktu_greatest),
+            "titik_greatest": titik_greatest,
+            "lintasan_totalitas": _lintasan_gerhana_matahari_geojson(lintasan) if jenis != "sebagian" else None,
+            # Jejak bayangan penumbra dikirim sbg titik pusat + radius (km),
+            # BUKAN poligon jadi - lebih ringan & digambar via L.circle() di
+            # Leaflet (radiusnya jauh lebih kecil dari lingkaran horizon
+            # gerhana Bulan, jadi aproksimasi "lingkaran kecil" Leaflet
+            # cukup akurat utk lapis arsiran ini - beda dgn lingkaran
+            # horizon 90 derajat gerhana Bulan yang WAJIB poligon geodesic
+            # presisi, lihat _lingkaran_geodesic_geojson).
+            "bayangan_penumbra": [
+                {"lat": round(p["lat"], 3), "lon": round(p["lon"], 3), "radius_km": round(p["r_penumbra_km"], 1)}
+                for p in penumbra
+            ],
+            "kontak": _kontak_ke_iso(kontak),
+        }
+
+    try:
+        return _make_cached_response("/api/gerhana_matahari", {"iso": iso, "mode": mode}, _hitung, s_maxage=31536000, immutable=True)
+    except Exception as e:
+        traceback.print_exc()
+        return _error_response(f"Gagal menghitung peta gerhana matahari: {e}", 500)
+
+
+# ---------------------------------------------------------------------------
+# Endpoint: detail + peta satu gerhana BULAN (lingkaran visibilitas P1/P4 &
+# greatest eclipse, 7 waktu kontak) - stateless sama seperti di atas.
+# ---------------------------------------------------------------------------
+@app.route("/api/gerhana_bulan", methods=["POST"])
+def api_gerhana_bulan():
+    data = request.get_json(force=True, silent=True) or {}
+    iso = data.get("iso")
+    mode = str(data.get("mode", "jpl")).strip().lower()
+    if mode not in ("jpl", "ringan"):
+        mode = "jpl"
+    if not iso:
+        return _error_response("Parameter 'iso' (waktu greatest eclipse dari hasil /api/gerhana) wajib diisi.")
+    try:
+        waktu_greatest = datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return _error_response("Parameter 'iso' tidak valid.")
+
+    def _hitung():
+        with _state_lock:
+            if mode == "jpl":
+                _pastikan_ephemeris()
+                ts_arg, eph_arg = _ts, _eph
+            else:
+                ts_arg, eph_arg = None, None
+
+            P_sun, P_moon, _, _ = hw._vektor_matahari_bulan_gast_batch(
+                waktu_greatest, np.array([0.0]), mode, ts_arg, eph_arg)
+            jarak, r_umbra, r_penumbra = hw._jarak_bulan_ke_sumbu_bayangan_bumi_km_batch(P_sun, P_moon)
+            jarak, r_umbra, r_penumbra = float(jarak[0]), float(r_umbra[0]), float(r_penumbra[0])
+            mag_umbral = (r_umbra + hw.R_BULAN_KM - jarak) / (2 * hw.R_BULAN_KM)
+            mag_penumbral = (r_penumbra + hw.R_BULAN_KM - jarak) / (2 * hw.R_BULAN_KM)
+            if mag_umbral >= 1.0:
+                jenis = "total"
+            elif mag_umbral > 0.0:
+                jenis = "sebagian"
+            else:
+                jenis = "penumbral"
+
+            kontak = hw.cari_kontak_gerhana_bulan(waktu_greatest, mode=mode, ts=ts_arg, eph=eph_arg)
+            lat_g, lon_g = hw._subtitik_bulan(waktu_greatest, mode=mode, ts=ts_arg, eph=eph_arg)
+
+            lingkaran_p1 = lingkaran_p4 = None
+            if kontak.get("P1") is not None:
+                lat_p1, lon_p1 = hw._subtitik_bulan(kontak["P1"], mode=mode, ts=ts_arg, eph=eph_arg)
+                lingkaran_p1 = _lingkaran_geodesic_geojson(lat_p1, lon_p1)
+            if kontak.get("P4") is not None:
+                lat_p4, lon_p4 = hw._subtitik_bulan(kontak["P4"], mode=mode, ts=ts_arg, eph=eph_arg)
+                lingkaran_p4 = _lingkaran_geodesic_geojson(lat_p4, lon_p4)
+
+        return {
+            "ok": True,
+            "mode": mode,
+            "jenis": jenis,
+            "waktu_greatest_eclipse": hw.format_waktu_ijtimak(waktu_greatest),
+            "magnitudo_umbral": round(mag_umbral, 3),
+            "magnitudo_penumbral": round(mag_penumbral, 3),
+            "titik_greatest": {"lat": round(lat_g, 3), "lon": round(lon_g, 3)},
+            "visibilitas": {
+                "lingkaran_greatest": _lingkaran_geodesic_geojson(lat_g, lon_g),
+                "lingkaran_p1": lingkaran_p1,
+                "lingkaran_p4": lingkaran_p4,
+            },
+            "kontak": _kontak_ke_iso(kontak),
+        }
+
+    try:
+        return _make_cached_response("/api/gerhana_bulan", {"iso": iso, "mode": mode}, _hitung, s_maxage=31536000, immutable=True)
+    except Exception as e:
+        traceback.print_exc()
+        return _error_response(f"Gagal menghitung peta gerhana bulan: {e}", 500)
+
 
 @app.route("/")
 def index():

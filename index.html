@@ -383,6 +383,7 @@
 <nav class="nav-fitur-utama">
   <button id="nav-hilal" class="nav-btn aktif"><span class="material-symbols-outlined">nights_stay</span> Visibilitas Hilal &amp; Peta</button>
   <button id="nav-sholat" class="nav-btn"><span class="material-symbols-outlined">mosque</span> Waktu Sholat &amp; Kiblat</button>
+  <button id="nav-gerhana" class="nav-btn"><span class="material-symbols-outlined">brightness_3</span> Gerhana</button>
 </nav>
 
 <main>
@@ -600,6 +601,45 @@
           <tbody id="tbody-jadwal-bulan"></tbody>
         </table>
       </div>
+    </section>
+  </div>
+
+  <!-- VIEW 3: GERHANA -->
+  <div id="view-gerhana" style="display:none;">
+    <section class="kartu">
+      <div class="langkah"><span class="no">1</span><h2>Cari Gerhana</h2></div>
+      <div class="baris">
+        <div>
+          <label for="input-tahun-gerhana">Tahun</label>
+          <input type="text" id="input-tahun-gerhana" placeholder="mis. 2026" maxlength="4" inputmode="numeric">
+        </div>
+        <div style="flex:none;"><button id="btn-cari-gerhana">Cari Gerhana</button></div>
+      </div>
+      <div id="status-cari-gerhana" class="status"></div>
+      <div id="daftar-gerhana" style="display:none; margin-top:14px;">
+        <h3 style="margin:0 0 6px; font-family:var(--font-heading); font-size:.95rem;">☀️ Gerhana Matahari</h3>
+        <div id="daftar-gerhana-matahari" class="daftar-ijtimak"></div>
+        <h3 style="margin:16px 0 6px; font-family:var(--font-heading); font-size:.95rem;">🌕 Gerhana Bulan</h3>
+        <div id="daftar-gerhana-bulan" class="daftar-ijtimak"></div>
+      </div>
+    </section>
+
+    <section class="kartu hasil" id="kartu-hasil-gerhana" style="display:none;">
+      <div class="langkah"><span class="no"><span class="material-symbols-outlined" style="font-size:1.1rem;color:#1a1003;">check</span></span><h2 id="judul-hasil-gerhana">Detail Gerhana</h2></div>
+      <div class="catatan" id="ringkasan-gerhana"></div>
+      <div class="ringkas" id="ringkas-kontak-gerhana"></div>
+
+      <div class="peta-bungkus" id="peta-gerhana-bungkus">
+        <div class="peta-toolbar">
+          <div class="peta-toolbar-info" id="peta-gerhana-toolbar-info"><img src="logo.png" style="height:16px;vertical-align:-3px;margin-right:6px;"> Peta Gerhana</div>
+          <div class="peta-toolbar-aksi">
+            <button id="btn-reset-view-gerhana" title="Reset Tampilan Peta"><span class="material-symbols-outlined">center_focus_strong</span> Reset View</button>
+            <button id="btn-fullscreen-gerhana" title="Tampilkan Layar Penuh"><span class="material-symbols-outlined">fullscreen</span> Layar Penuh</button>
+          </div>
+        </div>
+        <div id="peta-gerhana"></div>
+      </div>
+      <div class="catatan" id="catatan-gerhana"></div>
     </section>
   </div>
 </main>
@@ -982,27 +1022,40 @@ btnProses.addEventListener('click', async () => {
 inputTahun.addEventListener('keydown', (e) => { if(e.key === 'Enter') btnCari.click(); });
 
 // ---------------------------------------------------------------------
-// Navigation Utama: Hilal vs Sholat & Kiblat
+// Navigation Utama: Hilal vs Sholat & Kiblat vs Gerhana
 // ---------------------------------------------------------------------
 const navHilal = $('#nav-hilal');
 const navSholat = $('#nav-sholat');
+const navGerhana = $('#nav-gerhana');
 const viewHilal = $('#view-hilal');
 const viewSholat = $('#view-sholat');
+const viewGerhana = $('#view-gerhana');
 
-navHilal.addEventListener('click', () => {
-  navHilal.classList.add('aktif');
-  navSholat.classList.remove('aktif');
-  viewHilal.style.display = 'block';
-  viewSholat.style.display = 'none';
-  setTimeout(() => peta.invalidateSize(), 50);
-});
+const SEMUA_NAV = [
+  { btn: navHilal, view: viewHilal },
+  { btn: navSholat, view: viewSholat },
+  { btn: navGerhana, view: viewGerhana },
+];
 
-navSholat.addEventListener('click', () => {
-  navSholat.classList.add('aktif');
-  navHilal.classList.remove('aktif');
-  viewSholat.style.display = 'block';
-  viewHilal.style.display = 'none';
-});
+function pindahNav(navAktif){
+  SEMUA_NAV.forEach(({ btn, view }) => {
+    const aktif = btn === navAktif.btn;
+    btn.classList.toggle('aktif', aktif);
+    view.style.display = aktif ? 'block' : 'none';
+  });
+  // Leaflet butuh invalidateSize() setiap kali kontainernya baru saja
+  // berpindah dari display:none ke block (lihat catatan ResizeObserver
+  // di bawah - ini pemicu tambahan utk kasus pindah TAB, bukan cuma
+  // resize kontainer).
+  if(navAktif.btn === navHilal) setTimeout(() => peta.invalidateSize(), 50);
+  if(navAktif.btn === navGerhana && typeof petaGerhana !== 'undefined'){
+    setTimeout(() => petaGerhana.invalidateSize(), 50);
+  }
+}
+
+navHilal.addEventListener('click', () => pindahNav(SEMUA_NAV[0]));
+navSholat.addEventListener('click', () => pindahNav(SEMUA_NAV[1]));
+navGerhana.addEventListener('click', () => pindahNav(SEMUA_NAV[2]));
 
 // Preset Tanggal Hari Ini
 const sholatTanggalInput = $('#sholat-tanggal');
@@ -1285,6 +1338,292 @@ $('#btn-export-csv').addEventListener('click', () => {
   a.click();
   URL.revokeObjectURL(url);
 });
+
+// =======================================================================
+// GERHANA
+// =======================================================================
+const btnCariGerhana = $('#btn-cari-gerhana');
+const inputTahunGerhana = $('#input-tahun-gerhana');
+const statusCariGerhana = $('#status-cari-gerhana');
+const daftarGerhana = $('#daftar-gerhana');
+const daftarGerhanaMatahari = $('#daftar-gerhana-matahari');
+const daftarGerhanaBulan = $('#daftar-gerhana-bulan');
+const kartuHasilGerhana = $('#kartu-hasil-gerhana');
+const judulHasilGerhana = $('#judul-hasil-gerhana');
+const ringkasanGerhana = $('#ringkasan-gerhana');
+const ringkasKontakGerhana = $('#ringkas-kontak-gerhana');
+const catatanGerhana = $('#catatan-gerhana');
+const petaGerhanaBungkus = $('#peta-gerhana-bungkus');
+const petaGerhanaToolbarInfo = $('#peta-gerhana-toolbar-info');
+const btnFullscreenGerhana = $('#btn-fullscreen-gerhana');
+const btnResetViewGerhana = $('#btn-reset-view-gerhana');
+
+// Peta TERPISAH dari peta hilal (#peta) - SENGAJA worldCopyJump:true & tanpa
+// maxBounds terkunci (beda dgn #peta yg dikunci demi stabilitas peta dunia
+// statis): lingkaran visibilitas gerhana Bulan radiusnya ~90 derajat (nyaris
+// separuh Bumi) & lintasan gerhana Matahari bisa saja melintasi antimeridian
+// - worldCopyJump memastikan itu semua tetap tergambar mulus & bisa
+// digeser bebas ke sisi peta manapun, bukan malah "dipotong" di tepi peta.
+const canvasRendererGerhana = L.canvas({ padding: 0.5 });
+const petaGerhana = L.map('peta-gerhana', {
+  preferCanvas: true,
+  renderer: canvasRendererGerhana,
+  worldCopyJump: true,
+  minZoom: 1,
+  maxZoom: 10,
+}).setView([20, 0], 2);
+
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+  attribution: '&copy; OpenStreetMap &copy; CARTO',
+  subdomains: 'abcd', maxZoom: 10, minZoom: 1,
+}).addTo(petaGerhana);
+
+const layerGerhana = L.layerGroup().addTo(petaGerhana);
+let legendaGerhanaCtrl = null;
+let viewAwalGerhana = { center: [20, 0], zoom: 2 };
+
+function pasangLegendaGerhana(baris){
+  if(legendaGerhanaCtrl) petaGerhana.removeControl(legendaGerhanaCtrl);
+  legendaGerhanaCtrl = L.control({ position: 'topright' });
+  legendaGerhanaCtrl.onAdd = () => {
+    const div = L.DomUtil.create('div', 'legenda');
+    div.innerHTML = baris.map(b => {
+      if(b.tipe === 'area'){
+        return `<div class="baris-l"><span class="swatch" style="background:${b.warna};opacity:${b.opasitas||1}"></span>${b.label}</div>`;
+      }
+      const putus = b.putus ? ' putus' : '';
+      return `<div class="baris-l"><span class="garis${putus}" style="border-top-color:${b.warna}"></span>${b.label}</div>`;
+    }).join('');
+    return div;
+  };
+  legendaGerhanaCtrl.addTo(petaGerhana);
+}
+
+function toggleLayarPenuhGerhana(){
+  const isFull = petaGerhanaBungkus.classList.toggle('layar-penuh');
+  btnFullscreenGerhana.innerHTML = isFull
+    ? '<span class="material-symbols-outlined">fullscreen_exit</span> Keluar Layar Penuh'
+    : '<span class="material-symbols-outlined">fullscreen</span> Layar Penuh';
+  setTimeout(() => petaGerhana.invalidateSize(), 60);
+}
+btnFullscreenGerhana.addEventListener('click', toggleLayarPenuhGerhana);
+document.addEventListener('keydown', (e) => {
+  if(e.key === 'Escape' && petaGerhanaBungkus.classList.contains('layar-penuh')){
+    toggleLayarPenuhGerhana();
+  }
+});
+btnResetViewGerhana.addEventListener('click', () => {
+  petaGerhana.setView(viewAwalGerhana.center, viewAwalGerhana.zoom);
+});
+
+// ---- Cari daftar gerhana per tahun ----
+btnCariGerhana.addEventListener('click', async () => {
+  const tahun = inputTahunGerhana.value.trim();
+  if(!/^\d{4}$/.test(tahun)){
+    setStatus(statusCariGerhana, 'Masukkan tahun 4 digit, misalnya 2026.', true);
+    return;
+  }
+  daftarGerhana.style.display = 'none';
+  kartuHasilGerhana.style.display = 'none';
+  setStatus(statusCariGerhana, 'Mencari gerhana sepanjang tahun ini…', false, true);
+  try{
+    const data = await fetchCached(`/api/gerhana?tahun=${encodeURIComponent(tahun)}`);
+    if(!data.ok) throw new Error(data.error || 'Gagal mencari gerhana.');
+
+    daftarGerhanaMatahari.innerHTML = data.matahari.length
+      ? '' : '<div class="item-ijtimak" style="cursor:default;">Tidak ada gerhana matahari tahun ini.</div>';
+    data.matahari.forEach(item => {
+      const div = document.createElement('div');
+      div.className = 'item-ijtimak';
+      div.textContent = item.label;
+      div.addEventListener('click', () => {
+        [...daftarGerhanaMatahari.children, ...daftarGerhanaBulan.children].forEach(c => c.classList.remove('aktif'));
+        div.classList.add('aktif');
+        muatGerhanaMatahari(item.iso, item.jenis);
+      });
+      daftarGerhanaMatahari.appendChild(div);
+    });
+
+    daftarGerhanaBulan.innerHTML = data.bulan.length
+      ? '' : '<div class="item-ijtimak" style="cursor:default;">Tidak ada gerhana bulan tahun ini.</div>';
+    data.bulan.forEach(item => {
+      const div = document.createElement('div');
+      div.className = 'item-ijtimak';
+      div.textContent = item.label;
+      div.addEventListener('click', () => {
+        [...daftarGerhanaMatahari.children, ...daftarGerhanaBulan.children].forEach(c => c.classList.remove('aktif'));
+        div.classList.add('aktif');
+        muatGerhanaBulan(item.iso, item.jenis);
+      });
+      daftarGerhanaBulan.appendChild(div);
+    });
+
+    daftarGerhana.style.display = 'block';
+    setStatus(statusCariGerhana, `Ditemukan ${data.matahari.length} gerhana matahari & ${data.bulan.length} gerhana bulan di tahun ${tahun}.`);
+  }catch(err){
+    setStatus(statusCariGerhana, err.message, true);
+  }
+});
+inputTahunGerhana.addEventListener('keydown', (e) => { if(e.key === 'Enter') btnCariGerhana.click(); });
+
+function formatJamKontak(iso){
+  if(!iso) return '—';
+  return new Date(iso).toISOString().slice(11, 16) + ' UTC';
+}
+
+// ---- Gerhana Matahari: detail + peta ----
+async function muatGerhanaMatahari(iso, jenisAwal){
+  kartuHasilGerhana.style.display = 'block';
+  judulHasilGerhana.textContent = 'Detail Gerhana Matahari';
+  ringkasanGerhana.textContent = '';
+  ringkasKontakGerhana.innerHTML = '';
+  catatanGerhana.textContent = '';
+  setStatus(ringkasanGerhana, 'Menghitung lintasan gerhana…', false, true);
+  kartuHasilGerhana.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  try{
+    const res = await fetch('/api/gerhana_matahari', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ iso })
+    });
+    const data = await res.json();
+    if(!data.ok) throw new Error(data.error || 'Gagal menghitung peta gerhana matahari.');
+
+    const judulJenis = { total: 'Total', cincin: 'Cincin', sebagian: 'Sebagian' }[data.jenis] || data.jenis;
+    petaGerhanaToolbarInfo.innerHTML = `<img src="logo.png" style="height:16px;vertical-align:-3px;margin-right:6px;"> Gerhana Matahari ${judulJenis} — ${data.waktu_greatest_eclipse}`;
+    ringkasanGerhana.innerHTML = `Gerhana Matahari <b>${judulJenis}</b> · Greatest eclipse: ${data.waktu_greatest_eclipse}`;
+
+    const k = data.kontak;
+    const baris = [];
+    if(k.P1) baris.push(`<span class="pil">P1 (mulai sebagian): ${formatJamKontak(k.P1)}</span>`);
+    if(k.U1) baris.push(`<span class="pil">U1 (mulai total/cincin): ${formatJamKontak(k.U1)}</span>`);
+    if(k.U2) baris.push(`<span class="pil ya">U2 (awal lintasan): ${formatJamKontak(k.U2)}</span>`);
+    if(k.U3) baris.push(`<span class="pil ya">U3 (akhir lintasan): ${formatJamKontak(k.U3)}</span>`);
+    if(k.U4) baris.push(`<span class="pil">U4 (akhir total/cincin): ${formatJamKontak(k.U4)}</span>`);
+    if(k.P4) baris.push(`<span class="pil">P4 (akhir sebagian): ${formatJamKontak(k.P4)}</span>`);
+    ringkasKontakGerhana.innerHTML = baris.join('');
+
+    layerGerhana.clearLayers();
+
+    // Bayangan penumbra: banyak lingkaran translucent bertumpuk (makin
+    // gelap makin banyak tumpang-tindih, meniru fraksi Matahari tertutup)
+    data.bayangan_penumbra.forEach(p => {
+      L.circle([p.lat, p.lon], {
+        renderer: canvasRendererGerhana, radius: p.radius_km * 1000,
+        color: 'none', fillColor: '#f5c542', fillOpacity: 0.045, interactive: false
+      }).addTo(layerGerhana);
+    });
+
+    // Lintasan totalitas/cincin (kalau ada - null utk gerhana sebagian-saja)
+    if(data.lintasan_totalitas){
+      L.geoJSON(data.lintasan_totalitas, {
+        renderer: canvasRendererGerhana,
+        style: { color: data.jenis === 'cincin' ? '#e8b565' : '#e05a4d', weight: 3 }
+      }).addTo(layerGerhana);
+    }
+
+    if(data.titik_greatest){
+      L.marker([data.titik_greatest.lat, data.titik_greatest.lon], {
+        icon: L.divIcon({ className: 'label-kontur', html: '<span style="color:#e8b565;font-weight:900;">★ Greatest Eclipse</span>', iconSize: null })
+      }).addTo(layerGerhana);
+      petaGerhana.setView([data.titik_greatest.lat, data.titik_greatest.lon], 3);
+      viewAwalGerhana = { center: [data.titik_greatest.lat, data.titik_greatest.lon], zoom: 3 };
+    }
+
+    pasangLegendaGerhana([
+      { tipe: 'garis', warna: data.jenis === 'cincin' ? '#e8b565' : '#e05a4d',
+        label: data.lintasan_totalitas ? `Lintasan gerhana ${judulJenis} (garis tengah)` : 'Gerhana sebagian saja (tidak ada lintasan total/cincin)' },
+      { tipe: 'area', warna: '#f5c542', opasitas: .3, label: 'Wilayah berpotensi melihat gerhana sebagian' },
+    ]);
+
+    catatanGerhana.textContent = data.lintasan_totalitas
+      ? 'Garis tengah = lokasi terbaik untuk melihat totalitas/cincin. Wilayah berbayang kuning = tempat-tempat yang berpotensi melihat gerhana sebagian di beberapa titik waktu P1–P4.'
+      : 'Gerhana ini TIDAK menghasilkan lintasan total/cincin di mana pun (umbra/antumbra tidak menyentuh Bumi) - hanya terlihat sebagai gerhana sebagian dari wilayah yang diarsir.';
+  }catch(err){
+    setStatus(ringkasanGerhana, err.message, true);
+  }
+}
+
+// ---- Gerhana Bulan: detail + peta ----
+async function muatGerhanaBulan(iso){
+  kartuHasilGerhana.style.display = 'block';
+  judulHasilGerhana.textContent = 'Detail Gerhana Bulan';
+  ringkasanGerhana.textContent = '';
+  ringkasKontakGerhana.innerHTML = '';
+  catatanGerhana.textContent = '';
+  setStatus(ringkasanGerhana, 'Menghitung visibilitas gerhana…', false, true);
+  kartuHasilGerhana.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  try{
+    const res = await fetch('/api/gerhana_bulan', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ iso })
+    });
+    const data = await res.json();
+    if(!data.ok) throw new Error(data.error || 'Gagal menghitung peta gerhana bulan.');
+
+    const judulJenis = { total: 'Total', sebagian: 'Sebagian', penumbral: 'Penumbral' }[data.jenis] || data.jenis;
+    petaGerhanaToolbarInfo.innerHTML = `<img src="logo.png" style="height:16px;vertical-align:-3px;margin-right:6px;"> Gerhana Bulan ${judulJenis} — ${data.waktu_greatest_eclipse}`;
+    ringkasanGerhana.innerHTML = `Gerhana Bulan <b>${judulJenis}</b> · Greatest eclipse: ${data.waktu_greatest_eclipse} ·
+      Magnitudo umbral: ${data.magnitudo_umbral} · Magnitudo penumbral: ${data.magnitudo_penumbral}`;
+
+    const k = data.kontak;
+    const baris = [];
+    if(k.P1) baris.push(`<span class="pil">P1 (mulai penumbral): ${formatJamKontak(k.P1)}</span>`);
+    if(k.U1) baris.push(`<span class="pil">U1 (mulai sebagian): ${formatJamKontak(k.U1)}</span>`);
+    if(k.U2) baris.push(`<span class="pil ya">U2 (mulai total): ${formatJamKontak(k.U2)}</span>`);
+    baris.push(`<span class="pil ya">Greatest: ${formatJamKontak(k.Greatest)}</span>`);
+    if(k.U3) baris.push(`<span class="pil ya">U3 (akhir total): ${formatJamKontak(k.U3)}</span>`);
+    if(k.U4) baris.push(`<span class="pil">U4 (akhir sebagian): ${formatJamKontak(k.U4)}</span>`);
+    if(k.P4) baris.push(`<span class="pil">P4 (akhir penumbral): ${formatJamKontak(k.P4)}</span>`);
+    ringkasKontakGerhana.innerHTML = baris.join('');
+
+    layerGerhana.clearLayers();
+
+    if(data.visibilitas.lingkaran_p1){
+      gambarGarisPeta(petaGerhana, layerGerhana, data.visibilitas.lingkaran_p1, '#e8b565', true, canvasRendererGerhana);
+    }
+    if(data.visibilitas.lingkaran_p4){
+      gambarGarisPeta(petaGerhana, layerGerhana, data.visibilitas.lingkaran_p4, '#e8b565', true, canvasRendererGerhana);
+    }
+    if(data.visibilitas.lingkaran_greatest){
+      L.geoJSON(data.visibilitas.lingkaran_greatest, {
+        renderer: canvasRendererGerhana,
+        style: { color: '#4d6fe0', weight: 1.5, fillColor: '#4d6fe0', fillOpacity: 0.22 }
+      }).addTo(layerGerhana);
+    }
+
+    if(data.titik_greatest){
+      L.marker([data.titik_greatest.lat, data.titik_greatest.lon], {
+        icon: L.divIcon({ className: 'label-kontur', html: '<span style="color:#e8b565;font-weight:900;">★ Bulan di zenith</span>', iconSize: null })
+      }).addTo(layerGerhana);
+    }
+
+    petaGerhana.setView([0, 0], 2);
+    viewAwalGerhana = { center: [0, 0], zoom: 2 };
+
+    pasangLegendaGerhana([
+      { tipe: 'area', warna: '#4d6fe0', opasitas: .35, label: 'Wilayah Bulan di atas horizon SAAT greatest eclipse (lokasi terbaik)' },
+      { tipe: 'garis', warna: '#e8b565', putus: true, label: 'Batas horizon terluas (gabungan P1 & P4) — berpotensi melihat awal/akhir gerhana saja' },
+    ]);
+
+    catatanGerhana.textContent = 'Gerhana Bulan terlihat SERENTAK dari seluruh wilayah yang sedang malam & Bulannya di atas horizon - beda dari gerhana Matahari yang jalurnya sempit. Wilayah biru = lokasi terbaik (Bulan di atas horizon pas puncak gerhana).';
+  }catch(err){
+    setStatus(ringkasanGerhana, err.message, true);
+  }
+}
+
+// Versi gambarGaris yang bisa dipakai di peta MANAPUN (bukan cuma #peta
+// global) - dipakai khusus di sini krn peta gerhana adalah instance
+// Leaflet terpisah dari peta hilal.
+function gambarGarisPeta(mapInstance, layerGroup, geojson, warna, putus, renderer){
+  if(!geojson) return;
+  L.geoJSON(geojson, {
+    renderer: renderer,
+    style: { color: warna, weight: 2, dashArray: putus ? '6 5' : null }
+  }).addTo(layerGroup);
+}
+
 </script>
 </body>
 </html>
