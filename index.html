@@ -772,11 +772,34 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
 // ±90 persis) karena proyeksi Mercator "meledak" tak-hingga di kutub;
 // ±85° sudah lebih dari cukup utk menampilkan seluruh benua & lautan.
 const BATAS_DUNIA = [[-85, -180], [85, 180]];
+
+// ---------------------------------------------------------------------
+// FIX peta "kecrop" di mobile (akar masalahnya, bukan cuma invalidateSize):
+// Proyeksi Web Mercator itu BUJURSANGKAR -- lebar dunia == tinggi dunia
+// dlm piksel di zoom berapa pun (di zoom 1 = 512x512px). minZoom SEBELUMNYA
+// dikunci statis ke 1, jadi kalau lebar kontainer di HP < 512px, Leaflet
+// DILARANG zoom keluar lebih jauh dari 1 (dibatasi minZoom) padahal untuk
+// menampilkan 360° bujur penuh di kontainer sesempit itu butuh zoom < 1.
+// Hasilnya: sisi timur/barat peta kepotong di layar sempit.
+//
+// Solusinya: minZoom dihitung ULANG dari ukuran kontainer SAAT INI pakai
+// getBoundsZoom() -- bukan angka statis -- supaya zoom minimum SELALU
+// pas menampilkan BATAS_DUNIA secara utuh (tanpa crop) di ukuran layar
+// berapa pun. Dipanggil ulang tiap kali kontainer resize.
+// ---------------------------------------------------------------------
+function sesuaikanMinZoom(petaTarget, bounds){
+  const ukuran = petaTarget.getSize();
+  if(ukuran.x === 0 || ukuran.y === 0) return; // kontainer belum kelihatan (mis. display:none)
+  const zoomPas = petaTarget.getBoundsZoom(bounds, false);
+  petaTarget.setMinZoom(zoomPas);
+}
+
 // fitBounds() MENGHITUNG ULANG zoom yg pas berdasarkan ukuran kontainer
 // SAAT INI -- ini kuncinya supaya "seluruh dunia" beneran tampil penuh
 // baik di layar lebar (desktop) maupun sempit (mobile/DevTools), beda
 // dgn setView(..., zoomTetap) yg dulu dipakai & bikin kecrop di layar sempit.
 function tampilkanSeluruhDunia(petaTarget){
+  sesuaikanMinZoom(petaTarget, BATAS_DUNIA);
   petaTarget.fitBounds(BATAS_DUNIA, { animate: false });
 }
 tampilkanSeluruhDunia(peta);
@@ -814,7 +837,15 @@ btnResetView.addEventListener('click', () => {
   peta.invalidateSize();
 });
 
-window.addEventListener('resize', () => peta.invalidateSize());
+function segarkanUkuranPeta(petaTarget){
+  petaTarget.invalidateSize();
+  // minZoom juga wajib dihitung ULANG di sini (bukan cuma sekali saat load):
+  // rotasi layar / resize jendela / buka-tutup DevTools semuanya mengubah
+  // rasio kontainer, jadi zoom minimum yg "pas tanpa crop" ikut berubah.
+  sesuaikanMinZoom(petaTarget, BATAS_DUNIA);
+}
+
+window.addEventListener('resize', () => segarkanUkuranPeta(peta));
 
 // window 'resize' SAJA tidak cukup: perubahan ukuran kontainer #peta yang
 // BUKAN karena resize jendela (mis. DevTools "Responsive/Device Toolbar"
@@ -824,7 +855,7 @@ window.addEventListener('resize', () => peta.invalidateSize());
 // "kecrop" (tile cuma kegambar di sebagian kotak, sisanya kosong/gelap).
 // ResizeObserver memantau LANGSUNG elemen kontainernya, jadi selalu akurat
 // apa pun penyebab perubahan ukurannya.
-new ResizeObserver(() => peta.invalidateSize()).observe($('#peta'));
+new ResizeObserver(() => segarkanUkuranPeta(peta)).observe($('#peta'));
 
 let legendaCtrl = null;
 function pasangLegenda(baris){
@@ -1455,7 +1486,14 @@ const layerGerhana = L.layerGroup().addTo(petaGerhana);
 // listener peta Hilal) - #peta-gerhana perlu dipantau langsung, bukan cuma
 // window.resize, supaya tidak "kecrop" saat kontainernya berubah ukuran
 // tanpa lewat resize jendela (mis. mode responsive/device toolbar, dst).
-new ResizeObserver(() => { if(modePetaGerhana === 'datar') petaGerhana.invalidateSize(); }).observe($('#peta-gerhana'));
+// minZoom juga ikut disegarkan (lihat sesuaikanMinZoom) - fix crop yg sama
+// berlaku di sini krn petaGerhana juga tadinya pakai minZoom statis.
+new ResizeObserver(() => {
+  if(modePetaGerhana === 'datar'){
+    petaGerhana.invalidateSize();
+    sesuaikanMinZoom(petaGerhana, BATAS_DUNIA);
+  }
+}).observe($('#peta-gerhana'));
 let legendaGerhanaCtrl = null;
 // mode 'dunia': tampilkan seluruh dunia (fitBounds, ikut ukuran kontainer).
 // mode 'titik': zoom ke satu titik tertentu (lat/lon/zoom tetap).
@@ -1936,3 +1974,4 @@ function gambarGarisPeta(mapInstance, layerGroup, geojson, warna, putus, rendere
 </script>
 </body>
 </html>
+
