@@ -143,9 +143,18 @@ try:
     # sedang tampil. Splash custom di bawah ini SENGAJA di-skip supaya
     # tidak dobel (dua jendela splash bertumpuk). pyi_splash TETAP akan
     # ditutup nanti lewat pyi_splash.close() di HisabWinApp.__init__.
+    #
+    # CATATAN Linux: build Linux SENGAJA tidak pakai flag --splash (lihat
+    # build.yml), tapi modul pyi_splash tetap ikut ter-bundle PyInstaller
+    # & tetap BISA di-import -- cuma kode di dalamnya lempar KeyError
+    # ('_PYI_SPLASH_IPC') saat dieksekusi krn env var itu memang sengaja
+    # tidak di-set (bukan build Windows). Makanya except-nya HARUS
+    # menangkap KeyError juga, bukan cuma ImportError -- kalau tidak,
+    # splash custom di bawah ikut ke-skip & muncul traceback (non-fatal,
+    # app tetap jalan) di log/terminal setiap kali dijalankan di Linux.
     import pyi_splash  # noqa: F401
     _splash_native_aktif = True
-except ImportError:
+except (ImportError, KeyError):
     _splash_native_aktif = False
 
 if not _splash_native_aktif:
@@ -6670,10 +6679,13 @@ class HisabWinApp(tk.Tk):
         # sudah selesai dibangun & siap ditampilkan. Kalau app dijalankan
         # langsung dari python (bukan hasil build exe), modul pyi_splash
         # tidak akan ada -> import gagal, tapi itu normal, jadi diabaikan saja.
+        # Di Linux, import-nya BISA "berhasil" tapi lempar KeyError saat
+        # dieksekusi (lihat catatan di dekat awal file) -- ditangkap jg di
+        # sini supaya tidak muncul traceback non-fatal yg bikin bingung.
         try:
             import pyi_splash
             pyi_splash.close()
-        except ImportError:
+        except (ImportError, KeyError):
             pass
 
         # Tutup juga splash custom (_tampilkan_splash_awal() di dekat awal

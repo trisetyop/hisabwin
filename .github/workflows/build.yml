@@ -99,7 +99,14 @@ jobs:
 
   build-linux:
     name: Build Linux Portable Tarball
-    runs-on: ubuntu-20.04  # <-- BAGIAN YANG DIPERBAIKI (sebelumnya ubuntu-latest)
+    runs-on: ubuntu-22.04  # ubuntu-20.04 sudah PENSIUN PENUH sejak 15 Apr 2025
+                           # (github.blog/changelog/2025-01-15-...) -- itu yg
+                           # bikin job ini SELALU gagal (runner-nya sendiri
+                           # sudah tidak ada, bukan soal isi build). 22.04
+                           # dipilih (bukan ubuntu-latest/24.04) supaya tetap
+                           # deket sama versi lama yg (mungkin) jadi alasan
+                           # awal downgrade dari ubuntu-latest -- ganti ke
+                           # ubuntu-latest kalau memang tidak ada alasan itu.
 
     steps:
     - name: Checkout Repository
