@@ -2310,6 +2310,7 @@ TITIK_KHUSUS_AMERIKA = [
     ("Morzhovoi, AK", 54.9069, -163.3189),
     ("Pulau Unimak, AK", 54.747230156022155, -164.22056254285286),
     ("Laguna San Ignacio", 26.79510918359005, -113.30096109041156),
+    ("vancouver island", 48.857229954698724, -124.20502352092183)
 ]
 # Radius toleransi (derajat, dibandingkan langsung lat/lon, bukan haversine)
 # -- cukup lebar untuk menangkap titik grid terdekat baik pada grid kasar
