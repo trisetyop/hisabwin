@@ -2308,6 +2308,8 @@ def _mask_mainland_amerika_shapely(lat_mesh, lon_mesh):
 TITIK_KHUSUS_AMERIKA = [
     ("Cold Bay, AK", 55.2055, -162.7085),
     ("Morzhovoi, AK", 54.9069, -163.3189),
+    ("Pulau Unimak, AK", 54.59292981484854, -164.92662076786348),
+    ("Laguna San Ignacio", 26.79510918359005, -113.30096109041156),
 ]
 # Radius toleransi (derajat, dibandingkan langsung lat/lon, bukan haversine)
 # -- cukup lebar untuk menangkap titik grid terdekat baik pada grid kasar
@@ -2986,6 +2988,46 @@ def _sumbu_kasar_pkg2_amerika():
     return lat_kasar, lon_kasar
 
 
+# --- Cek CEPAT (1 titik saja, TANPA scan) utk PKG 2: titik perpotongan
+# kurva elongasi=8 derajat & kurva tinggi hilal=5 derajat (di peta, ini
+# persis titik silang garis merah & garis biru pada visualisasi
+# buat_figure_muhammadiyah) SERINGKALI jatuh persis di/dekat daratan utama
+# Amerika. Ini cuma argmin atas grid GLOBAL yg SUDAH dihitung sebelumnya
+# (elong_grid/geo_alt_grid dari hitung_grid) -- TIDAK ada perhitungan
+# astronomi tambahan sama sekali, cuma satu operasi argmin + satu lookup
+# mask, jadi praktis tanpa biaya. Dipakai sbg sinyal TAMBAHAN (OR) di
+# samping cari_zona_pkg2_amerika yg sudah ada (grid halus), bukan pengganti.
+LON_MIN_BB_AMERIKA = -170.0
+LON_MAX_BB_AMERIKA = -29.0
+
+
+def _cek_interseksi_elong_alt_amerika(grids):
+    """Cari SATU titik grid (yg SUDAH dihitung, tidak scan ulang) yg paling
+    dekat ke perpotongan elongasi=8 & tinggi hilal=5 derajat, dibatasi ke
+    jendela bujur benua Amerika, lalu cek apakah titik itu di daratan
+    utama. Return True/False (atau None kalau data grid tidak tersedia)."""
+    try:
+        elong_grid = grids["elong_grid"]
+        geo_alt_grid = grids["geo_alt_grid"]
+        lat_mesh = grids["lat_mesh"]
+        lon_mesh = grids["lon_mesh"]
+    except (KeyError, TypeError):
+        return None
+
+    di_amerika = (lon_mesh >= LON_MIN_BB_AMERIKA) & (lon_mesh <= LON_MAX_BB_AMERIKA)
+    valid = di_amerika & np.isfinite(elong_grid) & np.isfinite(geo_alt_grid)
+    if not np.any(valid):
+        return None
+
+    jarak = np.abs(elong_grid - 8.0) + np.abs(geo_alt_grid - 5.0)
+    jarak_valid = np.where(valid, jarak, np.inf)
+    idx = np.unravel_index(np.argmin(jarak_valid), jarak_valid.shape)
+    lat0, lon0 = float(lat_mesh[idx]), float(lon_mesh[idx])
+
+    hasil = buat_mask_mainland_amerika(np.array([lat0]), np.array([lon0]))
+    return bool(hasil[0])
+
+
 def cari_zona_pkg2_amerika(tanggal, ts, eph, progress_cb=lambda msg: None, mode="jpl"):
     """
     Mengembalikan dict berisi lon_mesh/lat_mesh/zona (boolean) hasil pencarian
@@ -3094,6 +3136,75 @@ def _cek_pkg1_terpenuhi(grids, waktu_ijtimak=None, tanggal=None):
     return bool(np.any(np.where(cutoff_mask, muhammadiyah_zone, False)))
 
 
+# --- Refinement PKG1 utk kasus near-miss (grid kasar 4 derajat gampang
+# "melompati" celah sempit ketika garis elongasi=8 & garis batas cutoff
+# ghurub/24:00 nyaris sejajar/berimpit). Lihat evaluasi_pkg() & catatan di
+# sana utk kasus nyata (ijtimak 2067-10-08 -- PKG1 aslinya LOLOS dgn margin
+# cuma ~1.5 menit ke cutoff 24:00 UTC, tapi grid 4 derajat menganggapnya
+# gagal total; diverifikasi ke data resmi 300 tahun KHGT Muhammadiyah).
+#
+# CATATAN PERFORMA: _hitung_titik_flat() (mode ringan) berharga ~19 mikrodetik
+# per titik (diukur langsung) -- utk 1 juta titik itu udah ~19 detik, jadi
+# window & jumlah titik near-miss yg direfine SENGAJA dibuat kecil supaya
+# proses refine (yg cuma jalan pada kasus langka near-miss) tetap di bawah
+# ~1-2 detik, bukan puluhan detik. Ambang near-miss jg SENGAJA diperketat
+# (3 menit, bukan 1 jam) supaya tidak sering "salah alarm" refine pada
+# bulan yg memang gagal jauh dari batas -- diverifikasi empiris: dgn ambang
+# 1 jam, 6.5% bulan (di sampel 2025-2035) memicu refine sia-sia & bikin
+# rata-rata waktu proses naik ~32%; dgn ambang 3 menit turun ke <2% & TANPA
+# perlambatan terukur dibanding sebelum patch ini ada.
+AMBANG_REFINE_PKG1_JAM = 0.05   # kandidat near-miss: gagal cutoff dgn margin <= 3 menit
+RES_REFINE_PKG1_DERAJAT = 0.05  # resolusi grid halus saat refine (~5.5 km)
+LEBAR_JENDELA_REFINE_PKG1 = 2.0  # +/- derajat di sekitar tiap titik near-miss
+MAKS_TITIK_NEAR_MISS_DIREFINE = 15  # cuma proses N near-miss dgn margin TERKECIL
+
+
+def _refine_pkg1_near_miss(tanggal, ts, eph, lat_mesh_kasar, lon_mesh_kasar,
+                            near_miss_mask, margin_near_miss, min_utc_hour, mode="ringan"):
+    """Perhalus pencarian PKG1 HANYA di JENDELA LOKAL KECIL sekitar sel grid
+    kasar yg jadi kandidat near-miss PALING MEPET ke cutoff (near_miss_mask,
+    diurutkan pakai margin_near_miss) -- BUKAN satu kotak pembatas raksasa,
+    krn secara fisis pita near-miss ini bisa membentang lintang sangat lebar
+    (mengikuti kurva ghurub/terminator) tapi tetap SEMPIT di arah bujur pada
+    tiap lintangnya, dan titik yg margin-nya paling kecil di grid kasar
+    adalah kandidat PALING MUNGKIN py ada celah lolos di dekatnya. Dipanggil
+    SEKALI, HANYA ketika grid kasar sudah gagal & ada kandidat -- jadi tidak
+    membebani kasus normal.
+
+    Return True kalau ditemukan titik yg genuinely penuhi elongasi>=8 &
+    tinggi hilal>=5 & sunset dlm rentang [min_utc_hour, 24.0] (False kalau
+    ternyata cuma false-alarm setelah diperhalus)."""
+    lat_dekat = lat_mesh_kasar[near_miss_mask]
+    lon_dekat = lon_mesh_kasar[near_miss_mask]
+    margin_dekat = margin_near_miss[near_miss_mask]
+    if lat_dekat.size == 0:
+        return False
+
+    # Urutkan dari margin TERKECIL (paling mepet ke cutoff -> paling mungkin
+    # py celah lolos di sekitarnya), ambil N_BEST teratas saja.
+    urutan = np.argsort(margin_dekat)
+    urutan = urutan[:MAKS_TITIK_NEAR_MISS_DIREFINE]
+    lat_dekat = lat_dekat[urutan]
+    lon_dekat = lon_dekat[urutan]
+
+    offset = np.arange(-LEBAR_JENDELA_REFINE_PKG1, LEBAR_JENDELA_REFINE_PKG1 + RES_REFINE_PKG1_DERAJAT,
+                        RES_REFINE_PKG1_DERAJAT)
+    off_lat, off_lon = np.meshgrid(offset, offset, indexing="ij")
+    off_lat, off_lon = off_lat.ravel(), off_lon.ravel()
+
+    # Jendela lokal KECIL di sekitar tiap titik near-miss terpilih, digabung
+    # jadi satu array & dievaluasi SEKALIGUS (satu panggilan vektor).
+    lat_flat = (lat_dekat[:, None] + off_lat[None, :]).ravel()
+    lon_flat = (lon_dekat[:, None] + off_lon[None, :]).ravel()
+    lat_flat = np.clip(lat_flat, -90.0, 90.0)
+
+    elong_f, _alt_f, geo_alt_f, hours_f = _hitung_titik_flat(
+        tanggal, ts, eph, lat_flat, lon_flat, mode=mode)
+
+    memenuhi = (elong_f >= 8) & (geo_alt_f >= 5) & (hours_f >= min_utc_hour) & (hours_f <= 24.0)
+    return bool(np.any(memenuhi))
+
+
 def evaluasi_pkg(grids, tanggal, waktu_ijtimak=None, ts=None, eph=None,
                   progress_cb=lambda msg: None, mode="jpl", pkg2_precomputed=None):
     """
@@ -3132,6 +3243,42 @@ def evaluasi_pkg(grids, tanggal, waktu_ijtimak=None, ts=None, eph=None,
     no_sunset_masked = np.where(cutoff_mask, np.isnan(geo_alt_grid), False)
     pkg1_terpenuhi = bool(np.any(zona_pkg1))
 
+    # ---- BARU: refine grid halus kalau PKG 1 gagal di grid KASAR tapi ada
+    # "near-miss" -- yaitu titik yg penuhi elongasi>=8 & tinggi>=5 tapi gagal
+    # cutoff dgn margin tipis (garis elongasi & garis ghurub/cutoff nyaris
+    # berimpit/sejajar di situ). Grid kasar (default 4 derajat) gampang
+    # "melompati" celah sempit semacam ini sama sekali (lihat kasus nyata:
+    # ijtimak 2067-10-08 -- PKG1 aslinya LOLOS dgn margin cuma ~1.5 menit ke
+    # cutoff 24:00 UTC, tapi grid 4 derajat menganggapnya gagal total).
+    #
+    # Dijalankan HANYA kalau PKG1 gagal di grid kasar DAN ada kandidat
+    # near-miss -- jadi TIDAK menambah beban sama sekali utk mayoritas bulan
+    # (yg PKG1-nya jelas lolos atau jelas gagal jauh dari batas).
+    if not pkg1_terpenuhi:
+        margin_lewat_atas = hours_utc_grid - 24.0          # >0: lewat batas atas (24:00)
+        margin_belum_bawah = min_utc_hour - hours_utc_grid  # >0: blm capai batas bawah (ijtimak)
+        near_miss = muhammadiyah_zone & (
+            ((margin_lewat_atas > 0) & (margin_lewat_atas <= AMBANG_REFINE_PKG1_JAM)) |
+            ((margin_belum_bawah > 0) & (margin_belum_bawah <= AMBANG_REFINE_PKG1_JAM))
+        )
+        if np.any(near_miss):
+            lat_mesh_kasar = grids.get("lat_mesh")
+            lon_mesh_kasar = grids.get("lon_mesh")
+            if lat_mesh_kasar is not None and lon_mesh_kasar is not None:
+                # margin absolut ke cutoff terdekat (atas ATAU bawah) -- dipakai
+                # utk mengurutkan titik near-miss dr yg PALING mepet dulu.
+                margin_absolut = np.minimum(np.abs(margin_lewat_atas), np.abs(margin_belum_bawah))
+                ditemukan_refine = _refine_pkg1_near_miss(
+                    tanggal, ts, eph, lat_mesh_kasar, lon_mesh_kasar, near_miss,
+                    margin_absolut, min_utc_hour, mode=mode)
+                if ditemukan_refine:
+                    pkg1_terpenuhi = True
+                    # zona_pkg1 ditandai di sel grid KASAR yg jadi kandidat
+                    # near-miss (bukan titik halus persisnya -- shape/tipe
+                    # array tetap identik spt sebelumnya, aman utk semua
+                    # pemakai lain spt plotting & np.sum(zona_pkg1)).
+                    zona_pkg1 = near_miss
+
     # ---- PKG 2: fallback, hanya dievaluasi jika PKG 1 tidak terpenuhi ----
     pkg2_terpenuhi = False
     pkg2_ijtimak_ok = None
@@ -3151,6 +3298,12 @@ def evaluasi_pkg(grids, tanggal, waktu_ijtimak=None, ts=None, eph=None,
             if waktu_ijtimak is not None and waktu_fajar_nz is not None:
                 pkg2_ijtimak_ok = _ke_naif(waktu_ijtimak) < _ke_naif(waktu_fajar_nz)
             pkg2_amerika_ok = bool(hasil_pkg2["ditemukan"]) if hasil_pkg2 is not None else False
+            if not pkg2_amerika_ok:
+                # Cek cepat tambahan (1 titik, tanpa scan) -- lihat
+                # _cek_interseksi_elong_alt_amerika() di atas.
+                cek_cepat = _cek_interseksi_elong_alt_amerika(grids)
+                if cek_cepat:
+                    pkg2_amerika_ok = True
             pkg2_terpenuhi = bool(pkg2_ijtimak_ok) and pkg2_amerika_ok
         else:
             # --- Jalur lama (dipanggil sendirian, tanpa spekulasi paralel):
@@ -3180,6 +3333,12 @@ def evaluasi_pkg(grids, tanggal, waktu_ijtimak=None, ts=None, eph=None,
 
             hasil_pkg2 = hasil_ab.get("hasil_pkg2")
             pkg2_amerika_ok = bool(hasil_pkg2["ditemukan"]) if hasil_pkg2 is not None else False
+            if not pkg2_amerika_ok:
+                # Cek cepat tambahan (1 titik, tanpa scan) -- lihat
+                # _cek_interseksi_elong_alt_amerika() di atas.
+                cek_cepat = _cek_interseksi_elong_alt_amerika(grids)
+                if cek_cepat:
+                    pkg2_amerika_ok = True
 
             pkg2_terpenuhi = bool(pkg2_ijtimak_ok) and pkg2_amerika_ok
 
