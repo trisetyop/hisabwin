@@ -2308,7 +2308,7 @@ def _mask_mainland_amerika_shapely(lat_mesh, lon_mesh):
 TITIK_KHUSUS_AMERIKA = [
     ("Cold Bay, AK", 55.2055, -162.7085),
     ("Morzhovoi, AK", 54.9069, -163.3189),
-    ("Pulau Unimak, AK", 54.59292981484854, -164.92662076786348),
+    ("Pulau Unimak, AK", 54.747230156022155, -164.22056254285286),
     ("Laguna San Ignacio", 26.79510918359005, -113.30096109041156),
 ]
 # Radius toleransi (derajat, dibandingkan langsung lat/lon, bukan haversine)
