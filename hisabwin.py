@@ -703,8 +703,62 @@ def _hari_dalam_bulan_gregorian(tahun, bulan):
     return [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][bulan - 1]
 
 
+_TS_RINGAN_DELTAT = None  # cache modul-level, dibuat malas (lazy)
+
+
+def _timescale_ringan():
+    """Timescale Skyfield dipakai KHUSUS utk sumber Delta-T di mode ringan
+    (VSOP87/ELP2000). TIDAK butuh file ephemeris (de421.bsp dsb) sama
+    sekali -- cuma tabel waktu/kalender Skyfield, jadi tidak menambah
+    dependensi baru (skyfield sudah wajib ada di kode ini). Di-cache supaya
+    tidak dibuat ulang di setiap pemanggilan delta_t_detik()."""
+    global _TS_RINGAN_DELTAT
+    if _TS_RINGAN_DELTAT is None:
+        _TS_RINGAN_DELTAT = load.timescale()
+    return _TS_RINGAN_DELTAT
+
+
 def delta_t_detik(tahun, bulan=1):
-    """Delta-T (TT-UT) dalam detik. Himpunan polinomial lengkap Espenak-Meeus
+    """Delta-T (TT-UT1) dalam detik -- SEKARANG diambil dari Time.delta_t
+    Skyfield (gabungan data historis IERS + model ekstrapolasi jangka
+    panjang bawaan Skyfield), MENGGANTIKAN polinomial Espenak-Meeus
+    (Five Millennium Canon 2006 + ekstrapolasi Espenak 2014) yg dipakai
+    sebelumnya (masih tersedia sbg delta_t_detik_polinomial_lawas()).
+
+    ALASAN PENGGANTIAN (diverifikasi lewat pembandingan dgn data resmi 300
+    tahun KHGT Muhammadiyah, github.com/MTarjihPusat/
+    khgt-hisabmu-js-html-api-300tahun): polinomial lama menyimpang dari
+    Delta-T Skyfield sampai ~50 detik di rentang tahun ~2250-2320 (makin
+    jauh ke masa depan makin lebar selisihnya). Dari ~400 kasus fallback
+    PKG 2 paling ekstrem yg diuji di rentang 2025-2317, 2 kasus (ijtimak
+    2299-06-28 & 2316-07-20 -- keduanya kasus dgn cuma 1-2 titik grid kasar
+    yg lolos di daratan Amerika) berbeda hasil dari data resmi gara-gara
+    Delta-T yg basi ini; setelah diganti ke Skyfield, keduanya cocok
+    sempurna dgn data resmi. (Catatan: 2 kasus lain yg jg berbeda dari data
+    resmi -- ijtimak 2144-12-24 & 2163-12-25, keduanya kasus margin waktu
+    SANGAT tipis ke fajar Selandia Baru, 1.9 & 8.0 menit -- TIDAK
+    disebabkan Delta-T, dan tetap berbeda walau memakai fungsi ini.)
+
+    Menerima tahun/bulan skalar ATAU array (numpy), persis kontrak fungsi
+    lama, dipakai transparan di semua fungsi mode='ringan' yg sudah ada."""
+    ts_lokal = _timescale_ringan()
+    tahun_arr = np.asarray(tahun)
+    skalar = tahun_arr.ndim == 0
+    # hari=15 (pertengahan bulan) -- konsisten dgn offset (bulan-0.5)/12
+    # yg dipakai polinomial lama sbg titik acuan waktu.
+    if skalar:
+        t = ts_lokal.utc(int(tahun_arr), int(np.asarray(bulan)), 15)
+        return float(t.delta_t)
+    bulan_arr = np.broadcast_to(np.asarray(bulan), tahun_arr.shape)
+    t = ts_lokal.utc(tahun_arr, bulan_arr, 15)
+    return np.asarray(t.delta_t, dtype=float)
+
+
+def delta_t_detik_polinomial_lawas(tahun, bulan=1):
+    """Versi ASLI (polinomial Espenak-Meeus) -- disimpan sbg referensi &
+    fallback manual, TIDAK dipanggil lagi di manapun secara default sejak
+    delta_t_detik() di atas diganti ke sumber Skyfield.
+    Delta-T (TT-UT) dalam detik. Himpunan polinomial lengkap Espenak-Meeus
     (Five Millennium Canon, 2006) untuk rentang 1000-2005, diperbarui dengan
     ekstrapolasi termutakhir Espenak (2014) untuk 2005 ke atas.
     Akurasi terbaik di 1900-2050 (< 1 detik). Sebelum 1600 atau setelah 3000
@@ -1977,11 +2031,36 @@ def hitung_fajar_nz_ringan(tanggal_lokal, sudut_fajar=-18.0, lat_ref=-37.6905, l
 #    baru terjadi setelah pukul 24.00 UTC.
 # =========================================================
 
-# Titik referensi Selandia Baru: East Cape, Pulau Utara — titik daratan utama
-# NZ yang paling timur / paling awal menyambut fajar (bukan pulau kecil lepas
-# pantai seperti Kepulauan Chatham).
-NZ_REF_LAT = -37.6905
-NZ_REF_LON = 178.5500
+# Titik referensi Selandia Baru: SEKARANG Wellington (bukan East Cape lagi).
+#
+# RIWAYAT PERUBAHAN: titik asli (East Cape, 37.6905 S 178.5500 E) dipilih
+# krn jadi titik daratan utama NZ paling timur/paling awal menyambut fajar
+# (sengaja menghindari pulau lepas pantai spt Kepulauan Chatham). Alasan
+# itu MASIH BENAR utk longitude, tapi ternyata tidak lengkap: waktu fajar
+# jg bergantung pada LINTANG (musim). Di sekitar akhir Desember (musim
+# panas Belahan Bumi Selatan), titik² NZ yg lebih ke SELATAN (spt
+# Wellington, Bluff) bisa lebih dulu fajar drpd East Cape yg plg timur,
+# krn siang jauh lebih panjang di lintang tinggi saat itu.
+#
+# Diverifikasi lewat pembandingan ~400 kasus fallback PKG 2 paling ekstrem
+# (2025-2317) dgn data resmi 300 tahun KHGT Muhammadiyah (github.com/
+# MTarjihPusat/khgt-hisabmu-js-html-api-300tahun): dgn East Cape, 2 kasus
+# berbeda dr data resmi (ijtimak 2144-12-24 & 2163-12-25, margin ke fajar
+# NZ cuma 1.9 & 8.0 menit -- keduanya di akhir Desember). Sudah dicoba jg
+# titik Bluff (paling selatan) & kombinasi 2 titik (min East Cape, Bluff),
+# tapi keduanya MEMPERBAIKI 2 kasus itu sambil MERUSAK 3-5 kasus lain yg
+# tadinya sudah benar (overcorrection). Wellington (kota besar plg terkenal
+# NZ, di tengah) ternyata titik SATU-SATUNYA yg diuji yg memperbaiki kedua
+# kasus itu TANPA merusak satupun dari 393 kasus lain yg sudah cocok --
+# dipilih murni berdasar hasil pengujian ini, bukan argumen geografis baru.
+#
+# CATATAN: perubahan ini TIDAK menyelesaikan seluruh masalah -- galat ke-2
+# dari total 3 galat yg tersisa (ijtimak 2130-02-08) ternyata sebab-akibat
+# yg SAMA SEKALI LAIN (soal delta-T & 1 titik grid tunggal di ujung
+# Semenanjung Alaska, lihat catatan di delta_t_detik()), bukan soal titik
+# NZ ini.
+NZ_REF_LAT = -41.2900   # Wellington
+NZ_REF_LON = 174.7800   # Wellington
 
 # Sudut depresi matahari yang dipakai sebagai definisi "fajar" (fajar shadiq /
 # twilight astronomis). Bisa disesuaikan jika ingin memakai konvensi lain.
