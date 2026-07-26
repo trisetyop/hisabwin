@@ -26,13 +26,15 @@ import csv
 import os
 import queue
 import re
+import shutil
+import subprocess
 import sys
 import threading
 import tkinter as tk
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import matplotlib
 
@@ -460,6 +462,7 @@ WARNA_AKSEN_HOVER = "#0B5747"
 WARNA_TEKS = "#1F2937"        # abu-abu hampir hitam
 WARNA_TEKS_MUTED = "#6B7280"  # abu-abu redup (subjudul, catatan)
 WARNA_BORDER = "#E1E5EA"
+WARNA_PERINGATAN = "#B45309"  # amber/oranye tua -- catatan "butuh internet" dsb
 FONT_UTAMA = ("Segoe UI", 10)
 FONT_UTAMA_BOLD = ("Segoe UI", 10, "bold")
 FONT_JUDUL = ("Segoe UI", 18, "bold")
@@ -6576,6 +6579,705 @@ class ClosableNotebook(ttk.Notebook):
 
 
 # =========================================================
+#  PROFIL CAKRAWALA — elevasi horizon 360 derajat dari titik pengamat
+#  (adaptasi dari skrip "Panorama Horizon Viewer" ala heywhatsthat.com)
+#
+#  Sumber data (KEDUANYA butuh INTERNET, tidak ada fallback offline):
+#    - Elevasi medan  : AWS Terrain Tiles (elevation-tiles-prod, format
+#      Terrarium PNG) -- gratis, tanpa API key.
+#    - Nama puncak    : Overpass API (OpenStreetMap) -- dicoba beberapa
+#      mirror/endpoint berurutan, berhenti begitu satu berhasil.
+#
+#  SENGAJA tidak pakai scipy.signal.find_peaks (deteksi puncak) krn scipy
+#  di-exclude dari build PyInstaller (lihat --exclude-module scipy di
+#  .github/workflows/build.yml, buat ukuran exe lebih kecil) -- deteksi
+#  puncak di sini ditulis ulang pakai numpy polos saja (lihat
+#  _deteksi_puncak_horizon_numpy).
+#
+#  Hasil akhirnya bisa disimpan ke .txt (lihat simpan_profil_cakrawala_txt
+#  / muat_profil_cakrawala_txt) -- format ini yg RENCANANYA jadi input WAJIB
+#  utk fitur "Simulasi Hilal" (belum dibuat, menyusul).
+# =========================================================
+
+R_BUMI_CAKRAWALA = 6371000.0        # jari-jari Bumi (meter), utk koreksi kelengkungan
+REFRAKSI_CAKRAWALA = 0.13           # koefisien refraksi atmosfer standar
+_CAKRAWALA_TILE_ZOOM = 12           # detail DEM: 11=kasar/cepat, 13=detail/lambat
+_CAKRAWALA_URL_TILE = ("https://s3.amazonaws.com/elevation-tiles-prod/"
+                        "terrarium/{z}/{x}/{y}.png")
+_CAKRAWALA_OVERPASS_ENDPOINTS = [
+    #"https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://z.overpass-api.de/api/interpreter",
+    "https://lz4.overpass-api.de/api/interpreter",
+    "https://overpass-api.de/api/interpreter",
+]
+
+
+def _folder_data_profil_cakrawala():
+    """Folder tempat profil cakrawala (.txt) yang dikelola lewat "Manajer
+    Profil Tersimpan" disimpan -- folder DATA per-user yang PERSISTEN
+    (mis. %APPDATA%\\HisabWin\\ProfilCakrawala di Windows), BEDA dari
+    folder CACHE kernel JPL (_folder_cache_kernel_jpl) krn ini data hasil
+    kerja user yang sengaja disimpan, bukan sekadar cache unduhan yang
+    boleh dihapus sewaktu-waktu. Dibuat otomatis kalau belum ada. User
+    tetap bebas menyimpan .txt ke lokasi lain manapun lewat tombol
+    "Simpan sebagai .txt" (asksaveasfilename) -- folder ini KHUSUS utk
+    profil yang mau tampil di Manajer Profil Tersimpan (list/lihat/ganti
+    nama/hapus tanpa perlu cari-cari file manual)."""
+    if sys.platform.startswith("win"):
+        base = os.environ.get("APPDATA") or os.path.expanduser("~\\AppData\\Roaming")
+    elif sys.platform == "darwin":
+        base = os.path.expanduser("~/Library/Application Support")
+    else:
+        base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    folder = os.path.join(base, "HisabWin", "ProfilCakrawala")
+    os.makedirs(folder, exist_ok=True)
+    return folder
+
+
+def _nama_file_profil_cakrawala_baru(lat, lon):
+    """Nama file .txt otomatis & unik utk profil baru di folder terkelola,
+    format: profil_{lat}_{lon}_{timestamp}.txt -- timestamp menjamin tidak
+    ada tabrakan nama walau lokasi yang sama dihitung berkali-kali."""
+    cap = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"profil_{lat:.4f}_{lon:.4f}_{cap}.txt"
+
+
+def _baca_meta_profil_cakrawala_txt(path):
+    """Baca CEPAT hanya bagian metadata (baris '#key=value' di awal file)
+    dari sebuah .txt profil cakrawala, tanpa memuat seluruh data
+    azimuth/sudut (bisa ribuan baris) -- dipakai Manajer Profil Tersimpan
+    utk menampilkan daftar file tanpa menunggu lama. Berhenti membaca
+    begitu ketemu baris data pertama (bukan komentar). Return dict metadata
+    (string mentah, key sesuai yang ditulis simpan_profil_cakrawala_txt)
+    atau None kalau file tidak bisa dibaca sama sekali."""
+    meta = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for baris in f:
+                baris = baris.strip()
+                if not baris:
+                    continue
+                if baris.startswith("#PUNCAK,"):
+                    continue
+                if baris.startswith("#"):
+                    if "=" in baris:
+                        k, v = baris[1:].split("=", 1)
+                        meta[k.strip()] = v.strip()
+                    continue
+                break  # baris data pertama -- metadata selalu di header, cukup sampai sini
+    except OSError:
+        return None
+    return meta
+
+
+def _cakrawala_latlon_ke_tile_piksel(lat, lon, zoom):
+    lat_rad = math.radians(lat)
+    n = 2.0 ** zoom
+    x = (lon + 180.0) / 360.0 * n
+    y = (1.0 - math.log(math.tan(lat_rad) + 1 / math.cos(lat_rad)) / math.pi) / 2.0 * n
+    xtile, ytile = int(x), int(y)
+    px, py = int((x - xtile) * 256), int((y - ytile) * 256)
+    return xtile, ytile, min(px, 255), min(py, 255)
+
+
+def _cakrawala_ambil_tile(xtile, ytile, zoom, cache, sesi):
+    """Unduh 1 tile PNG Terrarium (256x256, tiap pixel = elevasi terkode
+    RGB), dgn cache in-memory (dict `cache`, dipakai bersama sepanjang satu
+    pemanggilan hitung_profil_cakrawala) supaya tile yg sama tidak diunduh
+    ulang berkali-kali (satu tile mencakup banyak titik sampel sekaligus)."""
+    key = (zoom, xtile, ytile)
+    if key in cache:
+        return cache[key]
+    from io import BytesIO
+    from PIL import Image
+    url = _CAKRAWALA_URL_TILE.format(z=zoom, x=xtile, y=ytile)
+    try:
+        resp = sesi.get(url, timeout=15)
+        resp.raise_for_status()
+        arr = np.array(Image.open(BytesIO(resp.content)).convert("RGB"))
+    except Exception:
+        arr = None  # tile gagal/tidak ada data (mis. di atas laut lepas -- masih valid, elevasi 0)
+    cache[key] = arr
+    return arr
+
+
+def _cakrawala_ambil_elevasi(titik_latlon, cache, sesi, progress_cb=lambda msg: None):
+    """titik_latlon: list [(lat, lon), ...] -> list elevasi (meter, 0 kalau
+    tile gagal diunduh/di luar cakupan data)."""
+    hasil = []
+    total = len(titik_latlon)
+    for i, (lat, lon) in enumerate(titik_latlon):
+        xtile, ytile, px, py = _cakrawala_latlon_ke_tile_piksel(lat, lon, _CAKRAWALA_TILE_ZOOM)
+        arr = _cakrawala_ambil_tile(xtile, ytile, _CAKRAWALA_TILE_ZOOM, cache, sesi)
+        if arr is None:
+            hasil.append(0.0)
+        else:
+            r, g, b = arr[py, px]
+            hasil.append((int(r) * 256 + int(g) + int(b) / 256) - 32768)
+        if total >= 200 and i % max(1, total // 20) == 0:
+            progress_cb(f"  Elevasi: {i}/{total} titik ({len(cache)} tile diunduh)...")
+    return hasil
+
+
+def _cakrawala_titik_tujuan(lat, lon, bearing_deg, jarak_m):
+    brng = math.radians(bearing_deg)
+    lat1, lon1 = math.radians(lat), math.radians(lon)
+    d_r = jarak_m / R_BUMI_CAKRAWALA
+    lat2 = math.asin(math.sin(lat1) * math.cos(d_r) + math.cos(lat1) * math.sin(d_r) * math.cos(brng))
+    lon2 = lon1 + math.atan2(math.sin(brng) * math.sin(d_r) * math.cos(lat1),
+                              math.cos(d_r) - math.sin(lat1) * math.sin(lat2))
+    return math.degrees(lat2), math.degrees(lon2)
+
+
+def _cakrawala_haversine_km(lat1, lon1, lat2, lon2):
+    R = 6371.0
+    dlat, dlon = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+    a = (math.sin(dlat / 2) ** 2 +
+         math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2)
+    return 2 * R * math.asin(math.sqrt(a))
+
+
+def _deteksi_puncak_horizon_numpy(sudut, prominence_min=0.3):
+    """Deteksi indeks puncak lokal pada array `sudut` (melingkar -- azimuth
+    0 & 360 derajat disambung), dgn syarat "penonjolan" (prominence) minimal
+    `prominence_min` derajat. Versi numpy-polos dari scipy.signal.find_peaks
+    (prominence saja, tanpa parameter lain) -- scipy sengaja tidak dipakai
+    (lihat catatan di atas modul ini). Definisi prominence: utk tiap puncak
+    lokal, cari titik terendah di antara puncak itu dan puncak lain yg lebih
+    tinggi di kedua sisinya (atau ujung array kalau tidak ada); prominence =
+    tinggi puncak - MAX(titik terendah kiri, titik terendah kanan)."""
+    n = len(sudut)
+    if n < 3:
+        return []
+
+    # Puncak lokal murni: lebih tinggi dari kedua tetangganya (melingkar).
+    kiri = np.roll(sudut, 1)
+    kanan = np.roll(sudut, -1)
+    kandidat = np.where((sudut > kiri) & (sudut > kanan))[0]
+
+    hasil = []
+    for i in kandidat:
+        tinggi = sudut[i]
+
+        # Cari ke kiri (mundur, melingkar) sampai ketemu titik >= tinggi
+        # puncak ini (puncak lain yg lebih tinggi) -- titik TERENDAH yg
+        # dilewati sepanjang jalan itu jadi "lembah kiri".
+        lembah_kiri = tinggi
+        j = (i - 1) % n
+        langkah = 0
+        while langkah < n:
+            if sudut[j] >= tinggi:
+                break
+            lembah_kiri = min(lembah_kiri, sudut[j])
+            j = (j - 1) % n
+            langkah += 1
+
+        lembah_kanan = tinggi
+        j = (i + 1) % n
+        langkah = 0
+        while langkah < n:
+            if sudut[j] >= tinggi:
+                break
+            lembah_kanan = min(lembah_kanan, sudut[j])
+            j = (j + 1) % n
+            langkah += 1
+
+        prominence = tinggi - max(lembah_kiri, lembah_kanan)
+        if prominence >= prominence_min:
+            hasil.append(int(i))
+
+    return hasil
+
+
+def _cakrawala_ambil_nama_puncak_osm(lat, lon, radius_m, progress_cb=lambda msg: None):
+    """Query Overpass API (OpenStreetMap) utk node natural=peak/volcano di
+    sekitar (lat,lon) dlm radius_m meter. Return list (nama, lat, lon).
+    Mencoba beberapa endpoint/mirror berurutan, berhenti begitu satu
+    berhasil; kalau semua gagal, return list kosong (bukan error fatal --
+    profil cakrawala tetap valid tanpa label nama puncak)."""
+    import requests
+    query = f"""
+    [out:json][timeout:60];
+    (
+      node["natural"="peak"](around:{radius_m},{lat},{lon});
+      node["natural"="volcano"](around:{radius_m},{lat},{lon});
+    );
+    out body;
+    """
+    headers = {
+        "User-Agent": "HisabWin-ProfilCakrawala/1.0 (desktop app, personal use)",
+        "Accept": "application/json",
+    }
+    for endpoint in _CAKRAWALA_OVERPASS_ENDPOINTS:
+        try:
+            resp = requests.post(endpoint, data={"data": query}, headers=headers, timeout=60)
+            resp.raise_for_status()
+            hasil = []
+            for el in resp.json().get("elements", []):
+                nama = el.get("tags", {}).get("name")
+                if nama:
+                    hasil.append((nama, el["lat"], el["lon"]))
+            progress_cb(f"  Nama puncak: {len(hasil)} ditemukan lewat {endpoint}")
+            return hasil
+        except Exception as e:
+            progress_cb(f"  Endpoint nama puncak gagal ({endpoint}): {e}")
+    progress_cb("  Semua endpoint nama puncak gagal -- lanjut TANPA label nama (profil elevasi tetap valid).")
+    return []
+
+
+def hitung_profil_cakrawala(lat, lon, tinggi_mata=2.0, radius_km=30, n_azimuth=180,
+                             n_sample=40, prominence_min=0.3, jarak_maks_label_km=3.0,
+                             progress_cb=lambda msg: None):
+    """Fungsi utama: hitung profil elevasi horizon 360 derajat dari titik
+    (lat, lon). BUTUH KONEKSI INTERNET (AWS Terrain Tiles + Overpass API,
+    tidak ada mode offline). Return dict siap-pakai utk plot/simpan txt:
+        {
+          "lat", "lon", "tinggi_mata", "radius_km",
+          "azimuth": array (derajat, 0-360),
+          "sudut_horizon": array (derajat elevasi, boleh negatif),
+          "jarak_horizon_km": array,
+          "elevasi_titik_m": array,
+          "puncak_berlabel": [(azimuth, sudut, nama), ...],
+        }
+    """
+    import requests
+    sesi = requests.Session()
+    cache_tile = {}
+
+    progress_cb("Mengambil elevasi lokasi pengamat...")
+    elev_tanah = _cakrawala_ambil_elevasi([(lat, lon)], cache_tile, sesi, progress_cb)[0]
+    tinggi_pengamat = elev_tanah + tinggi_mata
+    progress_cb(f"Elevasi tanah: {elev_tanah:.1f} m, tinggi mata: {tinggi_pengamat:.1f} m")
+
+    azimuth = np.linspace(0, 360, n_azimuth, endpoint=False)
+    jarak_arr = np.linspace(radius_km * 1000 / n_sample, radius_km * 1000, n_sample)
+
+    progress_cb(f"Menyiapkan {n_azimuth * n_sample} titik sampel ({n_azimuth} arah x {n_sample} jarak)...")
+    semua_titik = []  # (az_idx, jarak_m, lat, lon)
+    for az_idx, az in enumerate(azimuth):
+        for d in jarak_arr:
+            plat, plon = _cakrawala_titik_tujuan(lat, lon, az, d)
+            semua_titik.append((az_idx, d, plat, plon))
+
+    koordinat = [(p[2], p[3]) for p in semua_titik]
+    elevasi = _cakrawala_ambil_elevasi(koordinat, cache_tile, sesi, progress_cb)
+    progress_cb(f"Selesai mengambil elevasi. Total tile diunduh: {len(cache_tile)}")
+
+    sudut_horizon = np.full(n_azimuth, -90.0)
+    jarak_horizon = np.zeros(n_azimuth)
+    elevasi_horizon = np.zeros(n_azimuth)
+    r_efektif = R_BUMI_CAKRAWALA / (1 - REFRAKSI_CAKRAWALA)
+
+    for idx, (az_idx, d, plat, plon) in enumerate(semua_titik):
+        elev_target = elevasi[idx]
+        penurunan_lengkung = (d ** 2) / (2 * r_efektif)
+        sudut = math.degrees(math.atan((elev_target - tinggi_pengamat - penurunan_lengkung) / d))
+        if sudut > sudut_horizon[az_idx]:
+            sudut_horizon[az_idx] = sudut
+            jarak_horizon[az_idx] = d
+            elevasi_horizon[az_idx] = elev_target
+
+    progress_cb("Mendeteksi puncak pada kurva horizon...")
+    idx_puncak = _deteksi_puncak_horizon_numpy(sudut_horizon, prominence_min=prominence_min)
+    progress_cb(f"Ditemukan {len(idx_puncak)} kandidat puncak.")
+
+    progress_cb("Mengambil nama gunung/puncak dari OpenStreetMap...")
+    puncak_osm = _cakrawala_ambil_nama_puncak_osm(lat, lon, radius_km * 1000, progress_cb)
+
+    puncak_berlabel = []
+    for i in idx_puncak:
+        if jarak_horizon[i] <= 0:
+            continue
+        plat, plon = _cakrawala_titik_tujuan(lat, lon, azimuth[i], jarak_horizon[i])
+        nama_terbaik, jarak_terbaik = None, jarak_maks_label_km
+        for nama, nlat, nlon in puncak_osm:
+            d = _cakrawala_haversine_km(plat, plon, nlat, nlon)
+            if d < jarak_terbaik:
+                jarak_terbaik, nama_terbaik = d, nama
+        if nama_terbaik:
+            puncak_berlabel.append((float(azimuth[i]), float(sudut_horizon[i]), nama_terbaik))
+
+    progress_cb(f"{len(puncak_berlabel)} dari {len(idx_puncak)} kandidat puncak berhasil diberi nama.")
+
+    return {
+        "lat": lat, "lon": lon, "tinggi_mata": tinggi_mata, "radius_km": radius_km,
+        "azimuth": azimuth, "sudut_horizon": sudut_horizon,
+        "jarak_horizon_km": jarak_horizon / 1000.0, "elevasi_titik_m": elevasi_horizon,
+        "puncak_berlabel": puncak_berlabel,
+    }
+
+
+def simpan_profil_cakrawala_txt(path, profil):
+    """Simpan hasil hitung_profil_cakrawala() ke file .txt sederhana &
+    mudah di-parse ulang (dipakai muat_profil_cakrawala_txt) -- format ini
+    RENCANANYA jadi input WAJIB fitur Simulasi Hilal (menyusul, belum
+    dibuat). Baris '#' = metadata/komentar, diabaikan pemroses lain kalau
+    tidak dikenali."""
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("# HisabWin - Profil Cakrawala\n")
+        f.write(f"# lat={profil['lat']:.6f}\n")
+        f.write(f"# lon={profil['lon']:.6f}\n")
+        f.write(f"# tinggi_mata_m={profil['tinggi_mata']:.2f}\n")
+        f.write(f"# radius_km={profil['radius_km']:.2f}\n")
+        f.write(f"# dibuat={datetime.now().isoformat(timespec='seconds')}\n")
+        f.write("# kolom: azimuth_deg,sudut_horizon_deg,jarak_horizon_km,elevasi_titik_m\n")
+        for az, sudut, jarak, elev in zip(profil["azimuth"], profil["sudut_horizon"],
+                                           profil["jarak_horizon_km"], profil["elevasi_titik_m"]):
+            f.write(f"{az:.2f},{sudut:.4f},{jarak:.3f},{elev:.1f}\n")
+        f.write("# puncak_berlabel: azimuth_deg,sudut_horizon_deg,nama\n")
+        for az, sudut, nama in profil["puncak_berlabel"]:
+            f.write(f"#PUNCAK,{az:.2f},{sudut:.4f},{nama}\n")
+
+
+def muat_profil_cakrawala_txt(path):
+    """Kebalikan simpan_profil_cakrawala_txt() -- baca file .txt profil
+    cakrawala kembali jadi dict SAMA PERSIS struktur return
+    hitung_profil_cakrawala(). Dipakai DialogManajerProfilCakrawala (tombol
+    "Lihat") utk menampilkan ulang profil tersimpan TANPA internet/hitung
+    ulang, dan disiapkan juga utk fitur Simulasi Hilal yg menyusul."""
+    meta = {}
+    azimuth, sudut_horizon, jarak_horizon_km, elevasi_titik_m = [], [], [], []
+    puncak_berlabel = []
+    with open(path, "r", encoding="utf-8") as f:
+        for baris in f:
+            baris = baris.strip()
+            if not baris:
+                continue
+            if baris.startswith("#PUNCAK,"):
+                _, az, sudut, nama = baris.split(",", 3)
+                puncak_berlabel.append((float(az), float(sudut), nama))
+            elif baris.startswith("#"):
+                if "=" in baris:
+                    k, v = baris[1:].split("=", 1)
+                    meta[k.strip()] = v.strip()
+            else:
+                az, sudut, jarak, elev = baris.split(",")
+                azimuth.append(float(az))
+                sudut_horizon.append(float(sudut))
+                jarak_horizon_km.append(float(jarak))
+                elevasi_titik_m.append(float(elev))
+    return {
+        "lat": float(meta.get("lat", 0.0)), "lon": float(meta.get("lon", 0.0)),
+        "tinggi_mata": float(meta.get("tinggi_mata_m", 2.0)),
+        "radius_km": float(meta.get("radius_km", 0.0)),
+        "azimuth": np.array(azimuth), "sudut_horizon": np.array(sudut_horizon),
+        "jarak_horizon_km": np.array(jarak_horizon_km),
+        "elevasi_titik_m": np.array(elevasi_titik_m),
+        "puncak_berlabel": puncak_berlabel,
+    }
+
+
+def buat_figure_profil_cakrawala(profil):
+    """Bikin figure matplotlib panorama horizon (garis + isian + label
+    puncak bernama), gaya sama seperti versi Colab-nya -- ditampilkan lewat
+    HisabWinApp._tampilkan_peta() spt peta2 lain di app ini."""
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import MultipleLocator
+
+    azimuth = profil["azimuth"]
+    sudut_horizon = profil["sudut_horizon"]
+    puncak_berlabel = profil["puncak_berlabel"]
+
+    y_min = np.floor(sudut_horizon.min()) - 1
+    y_max = np.ceil(sudut_horizon.max()) + 1 + (8 if puncak_berlabel else 0)
+
+    fig, ax = plt.subplots(figsize=(10, 4.5))
+    ax.plot(azimuth, sudut_horizon, color="dimgray", linewidth=1.0)
+    ax.fill_between(azimuth, sudut_horizon, y_min, color="#8B7355", alpha=0.6)
+
+    ax.set_xlim(0, 360)
+    ax.set_ylim(y_min, y_max)
+    ax.xaxis.set_major_locator(MultipleLocator(30))
+    ax.xaxis.set_minor_locator(MultipleLocator(10))
+    ax.yaxis.set_major_locator(MultipleLocator(5))
+    ax.grid(which="minor", linewidth=0.3, alpha=0.3)
+    ax.grid(which="major", linewidth=0.7, alpha=0.5)
+    ax.set_xticks(np.arange(0, 361, 30))
+    ax.set_xticklabels(["U", "30", "60", "T", "120", "150", "S", "210", "240", "B", "300", "330", "U"])
+    ax.set_xlabel("Azimuth (U=Utara, T=Timur, S=Selatan, B=Barat)")
+    ax.set_ylabel("Sudut elevasi (°)")
+    ax.set_title(f"Profil Cakrawala — ({profil['lat']:.4f}, {profil['lon']:.4f}) — "
+                 f"tinggi mata {profil['tinggi_mata']:.1f} m, radius {profil['radius_km']:.0f} km")
+    ax.axhline(0, color="blue", linestyle="--", linewidth=0.8, alpha=0.6, label="Garis datar (0°)")
+    ax.legend(loc="upper right", fontsize=8)
+
+    for az, sudut, nama in puncak_berlabel:
+        ax.plot([az, az], [sudut, sudut + 1.5], color="black", linewidth=0.6, alpha=0.7)
+        ax.text(az, sudut + 1.8, nama, rotation=75, ha="left", va="bottom", fontsize=7)
+
+    fig.tight_layout()
+    return fig
+
+
+# =========================================================
+#  DIALOG: Manajer Profil Cakrawala Tersimpan (Lihat/Ganti Nama/Hapus/Impor)
+# =========================================================
+
+class DialogManajerProfilCakrawala(tk.Toplevel):
+    """Popup non-modal (tidak pakai grab_set, sama seperti DialogKernelJPL)
+    utk mengelola profil cakrawala (.txt) yang tersimpan di folder data
+    HisabWin (_folder_data_profil_cakrawala()) -- CRUD sederhana atas file
+    hasil hitung_profil_cakrawala(), sepenuhnya OFFLINE (tidak butuh
+    internet krn cuma baca/tulis file lokal):
+      - Create : dilakukan di akordeon Profil Cakrawala lewat tombol
+                 "Simpan ke Profil Tersimpan" (juga bisa lewat "Impor..."
+                 di dialog ini utk file .txt yang sudah ada di tempat lain).
+      - Read   : tombol "Lihat" -- muat_profil_cakrawala_txt() lalu gambar
+                 ulang grafiknya lewat callback on_lihat, TANPA menghitung
+                 ulang / TANPA internet.
+      - Update : tombol "Ganti Nama" -- ganti nama file di disk.
+      - Delete : tombol "Hapus" -- hapus file dari disk (dgn konfirmasi).
+
+    on_lihat: callback(profil_dict, path) dipanggil saat user menekan
+    "Lihat" pada salah satu profil -- HisabWinApp yang tahu cara
+    menggambar figure & mengisi tab peta (dialog ini sendiri tidak
+    menyentuh notebook/canvas manapun)."""
+
+    def __init__(self, parent, on_lihat):
+        super().__init__(parent)
+        self.title("Manajer Profil Cakrawala Tersimpan")
+        self.geometry("640x540")
+        self.minsize(480, 340)
+        self.transient(parent)
+        self.configure(bg=WARNA_BG)
+
+        self._on_lihat = on_lihat
+        self._baris_widget = {}  # path -> dict widget per baris
+
+        ttk.Label(
+            self, text="Profil Cakrawala Tersimpan",
+            font=FONT_UTAMA_BOLD, foreground=WARNA_TEKS,
+        ).pack(anchor="w", padx=14, pady=(14, 2))
+        ttk.Label(
+            self,
+            text="Lihat kembali, ganti nama, hapus, atau impor profil "
+                 "cakrawala yang pernah disimpan -- tanpa perlu koneksi "
+                 "internet (data medan/nama puncak tidak diunduh ulang).",
+            foreground=WARNA_TEKS_MUTED, wraplength=600, justify="left",
+        ).pack(anchor="w", padx=14, pady=(0, 4))
+        self.label_folder = ttk.Label(self, text="", font=FONT_KECIL, foreground=WARNA_TEKS_MUTED)
+        self.label_folder.pack(anchor="w", padx=14, pady=(0, 10))
+
+        frame_list_luar = ttk.Frame(self)
+        frame_list_luar.pack(fill="both", expand=True, padx=14)
+
+        list_canvas = tk.Canvas(frame_list_luar, highlightthickness=0, bg=WARNA_BG)
+        list_scrollbar = ttk.Scrollbar(frame_list_luar, orient="vertical", command=list_canvas.yview)
+        list_canvas.configure(yscrollcommand=list_scrollbar.set)
+        list_canvas.pack(side="left", fill="both", expand=True)
+        list_scrollbar.pack(side="right", fill="y")
+
+        self._frame_list = ttk.Frame(list_canvas)
+        list_window = list_canvas.create_window((0, 0), window=self._frame_list, anchor="nw")
+
+        def _list_on_configure(event):
+            list_canvas.configure(scrollregion=list_canvas.bbox("all"))
+        self._frame_list.bind("<Configure>", _list_on_configure)
+
+        def _list_canvas_resize(event):
+            list_canvas.itemconfig(list_window, width=event.width)
+        list_canvas.bind("<Configure>", _list_canvas_resize)
+
+        def _list_mousewheel(event):
+            list_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        parent._pasang_scroll_mousewheel(list_canvas, _list_mousewheel)
+
+        frame_bawah = ttk.Frame(self)
+        frame_bawah.pack(fill="x", padx=14, pady=12)
+        ttk.Button(frame_bawah, text="📥 Impor .txt...", command=self._on_impor).pack(side="left")
+        ttk.Button(frame_bawah, text="📂 Buka Folder", command=self._on_buka_folder).pack(side="left", padx=(6, 0))
+        ttk.Button(frame_bawah, text="🔄 Segarkan", command=self._muat_ulang).pack(side="left", padx=(6, 0))
+        ttk.Button(frame_bawah, text="Tutup", command=self.destroy).pack(side="right")
+
+        self._muat_ulang()
+
+    # ---------------- daftar file ----------------
+
+    def _muat_ulang(self):
+        """Baca ulang isi folder data & gambar ulang seluruh baris daftar
+        dari nol -- dipanggil saat dialog dibuka & setiap kali ada
+        perubahan (hapus/ganti nama/impor/simpan profil baru)."""
+        for w in self._frame_list.winfo_children():
+            w.destroy()
+        self._baris_widget = {}
+
+        folder = _folder_data_profil_cakrawala()
+        self.label_folder.config(text=f"Folder: {folder}")
+
+        try:
+            nama_file = [n for n in os.listdir(folder) if n.lower().endswith(".txt")]
+        except OSError as e:
+            ttk.Label(self._frame_list, text=f"Tidak bisa membaca folder:\n{e}",
+                      foreground=WARNA_PERINGATAN, wraplength=560, justify="left"
+                      ).pack(anchor="w", pady=10)
+            return
+
+        if not nama_file:
+            ttk.Label(
+                self._frame_list,
+                text="Belum ada profil tersimpan.\n\nHitung Profil Cakrawala lalu tekan "
+                     "\"📥 Simpan ke Profil Tersimpan\", atau tekan \"Impor .txt...\" di "
+                     "bawah utk memasukkan file .txt profil cakrawala yang sudah ada.",
+                foreground=WARNA_TEKS_MUTED, wraplength=560, justify="left",
+            ).pack(anchor="w", pady=16, padx=4)
+            return
+
+        # Terbaru dulu, berdasarkan waktu modifikasi file di disk.
+        nama_file.sort(key=lambda n: os.path.getmtime(os.path.join(folder, n)), reverse=True)
+        for nama in nama_file:
+            self._buat_baris(os.path.join(folder, nama))
+
+    def _buat_baris(self, path):
+        nama_file = os.path.basename(path)
+        meta = _baca_meta_profil_cakrawala_txt(path) or {}
+        try:
+            lat, lon = float(meta.get("lat")), float(meta.get("lon"))
+            judul = f"🏔️ ({lat:.4f}, {lon:.4f})"
+        except (TypeError, ValueError):
+            judul = f"🏔️ {nama_file}"
+
+        try:
+            ukuran_str = f"{os.path.getsize(path) / 1024:.0f} KB"
+        except OSError:
+            ukuran_str = "-"
+
+        frame = ttk.LabelFrame(self._frame_list, text=judul)
+        frame.pack(fill="x", pady=6, padx=2)
+        frame.columnconfigure(0, weight=1)
+
+        ttk.Label(frame, text=f"File: {nama_file}", foreground=WARNA_TEKS_MUTED
+                  ).grid(row=0, column=0, sticky="w", padx=8, pady=(6, 0))
+        ttk.Label(
+            frame,
+            text=(f"Dibuat: {meta.get('dibuat', '-')}   |   "
+                  f"Radius: {meta.get('radius_km', '-')} km   |   "
+                  f"Tinggi mata: {meta.get('tinggi_mata_m', '-')} m   |   "
+                  f"Ukuran: {ukuran_str}"),
+            foreground=WARNA_TEKS_MUTED,
+        ).grid(row=1, column=0, sticky="w", padx=8, pady=(0, 6))
+
+        frame_tombol = ttk.Frame(frame)
+        frame_tombol.grid(row=2, column=0, sticky="e", padx=8, pady=(0, 8))
+        btn_lihat = ttk.Button(frame_tombol, text="👁️ Lihat", style="Aksen.TButton",
+                                command=lambda p=path: self._on_lihat_klik(p))
+        btn_ganti_nama = ttk.Button(frame_tombol, text="✏️ Ganti Nama",
+                                     command=lambda p=path: self._on_ganti_nama(p))
+        btn_hapus = ttk.Button(frame_tombol, text="🗑️ Hapus",
+                                command=lambda p=path: self._on_hapus(p))
+        btn_lihat.pack(side="left", padx=3)
+        btn_ganti_nama.pack(side="left", padx=3)
+        btn_hapus.pack(side="left", padx=3)
+
+        self._baris_widget[path] = {"frame": frame}
+
+    # ---------------- aksi CRUD ----------------
+
+    def _on_lihat_klik(self, path):
+        """READ: muat file .txt jadi dict profil (TANPA internet, TANPA
+        hitung ulang) lalu serahkan ke HisabWinApp utk digambar."""
+        try:
+            profil = muat_profil_cakrawala_txt(path)
+        except Exception as e:
+            messagebox.showerror(
+                "Gagal membaca file",
+                f"Tidak bisa membaca profil dari:\n{path}\n\n{e}", parent=self)
+            return
+        self._on_lihat(profil, path)
+
+    def _on_ganti_nama(self, path):
+        """UPDATE: ganti nama file .txt di folder data (tetap di folder
+        yang sama, cuma nama file yang berubah)."""
+        folder = os.path.dirname(path)
+        nama_lama = os.path.splitext(os.path.basename(path))[0]
+        nama_baru = simpledialog.askstring(
+            "Ganti Nama Profil", "Nama file baru (tanpa akhiran .txt):",
+            initialvalue=nama_lama, parent=self)
+        if not nama_baru or not nama_baru.strip():
+            return
+        nama_baru = re.sub(r'[\\/:*?"<>|]', "_", nama_baru.strip())
+        path_baru = os.path.join(folder, nama_baru + ".txt")
+        if os.path.abspath(path_baru) == os.path.abspath(path):
+            return
+        if os.path.exists(path_baru):
+            messagebox.showerror(
+                "Nama sudah dipakai",
+                f"Sudah ada profil bernama \"{nama_baru}.txt\" di folder ini. "
+                "Pilih nama lain.", parent=self)
+            return
+        try:
+            os.rename(path, path_baru)
+        except OSError as e:
+            messagebox.showerror("Gagal mengganti nama", str(e), parent=self)
+            return
+        self._muat_ulang()
+
+    def _on_hapus(self, path):
+        """DELETE: hapus file .txt dari disk, dgn konfirmasi dulu krn
+        tindakan ini tidak bisa dibatalkan."""
+        nama_file = os.path.basename(path)
+        if not messagebox.askyesno(
+                "Hapus Profil?",
+                f"Hapus file profil cakrawala berikut secara permanen?\n\n"
+                f"{nama_file}\n\nTindakan ini tidak bisa dibatalkan.", parent=self):
+            return
+        try:
+            os.remove(path)
+        except OSError as e:
+            messagebox.showerror("Gagal menghapus", str(e), parent=self)
+            return
+        self._muat_ulang()
+
+    def _on_impor(self):
+        """CREATE (varian impor): salin file .txt profil cakrawala dari
+        lokasi lain (mis. dikirim teman, atau hasil "Simpan sebagai .txt"
+        sebelumnya) ke folder data terkelola, supaya ikut muncul di
+        daftar ini. Divalidasi dulu lewat muat_profil_cakrawala_txt supaya
+        file yang formatnya salah tidak ikut disalin."""
+        paths = filedialog.askopenfilenames(
+            title="Impor Profil Cakrawala (.txt)",
+            filetypes=[("Text file", "*.txt"), ("Semua File", "*.*")], parent=self)
+        if not paths:
+            return
+        folder = _folder_data_profil_cakrawala()
+        berhasil, gagal = 0, []
+        for src in paths:
+            try:
+                muat_profil_cakrawala_txt(src)  # validasi format sebelum disalin
+            except Exception as e:
+                gagal.append(f"{os.path.basename(src)}: bukan file profil cakrawala yang valid ({e})")
+                continue
+            tujuan = os.path.join(folder, os.path.basename(src))
+            if os.path.exists(tujuan) and os.path.abspath(tujuan) != os.path.abspath(src):
+                akar, ext = os.path.splitext(tujuan)
+                tujuan = f"{akar}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}"
+            try:
+                shutil.copy2(src, tujuan)
+                berhasil += 1
+            except OSError as e:
+                gagal.append(f"{os.path.basename(src)}: {e}")
+        self._muat_ulang()
+        pesan = f"{berhasil} file berhasil diimpor."
+        if gagal:
+            pesan += "\n\nGagal:\n" + "\n".join(gagal)
+        messagebox.showinfo("Impor Selesai", pesan, parent=self)
+
+    def _on_buka_folder(self):
+        """Buka folder data profil cakrawala di file manager bawaan OS --
+        cross-platform (Windows/macOS/Linux)."""
+        folder = _folder_data_profil_cakrawala()
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(folder)
+            elif sys.platform == "darwin":
+                subprocess.run(["open", folder], check=False)
+            else:
+                subprocess.run(["xdg-open", folder], check=False)
+        except Exception as e:
+            messagebox.showerror("Gagal membuka folder", f"Tidak bisa membuka folder:\n{e}", parent=self)
+
+
+# =========================================================
 #  APLIKASI UTAMA — HisabWin
 #  (Peta kini ditampilkan sebagai TAB di jendela utama, bukan jendela
 #  popup terpisah — lihat method _tampilkan_peta / _tab_peta_frame.)
@@ -7301,9 +8003,8 @@ class HisabWinApp(tk.Tk):
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_sholat(), self._tutup_akordeon_gerhana(),
                                   self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter(),
-                                  self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit()))
-
-        # --- Langkah 0: mode perhitungan ---
+                                  self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit(),
+                                  self._tutup_akordeon_cakrawala()))
         frame0 = ttk.LabelFrame(body_hilal, text="0. Mode Perhitungan")
         frame0.pack(fill="x", **pad)
 
@@ -7405,7 +8106,8 @@ class HisabWinApp(tk.Tk):
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_gerhana(),
                                   self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter(),
-                                  self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit()))
+                                  self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit(),
+                                  self._tutup_akordeon_cakrawala()))
 
         # --- Tab tambahan: Waktu Sholat & Arah Kiblat (permanen, selalu ada) ---
         self._bangun_tab_sholat()
@@ -7421,7 +8123,8 @@ class HisabWinApp(tk.Tk):
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter(),
-                                  self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit()))
+                                  self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit(),
+                                  self._tutup_akordeon_cakrawala()))
         self._bangun_akordeon_gerhana(self._body_akordeon_gerhana, pad)
 
         # --- Bagian akordeon ke-4: Perbandingan Kalender MABIMS vs KHGT
@@ -7436,7 +8139,8 @@ class HisabWinApp(tk.Tk):
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_konverter(),
-                                  self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit()))
+                                  self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit(),
+                                  self._tutup_akordeon_cakrawala()))
         self._bangun_akordeon_kalbanding(self._body_akordeon_kalbanding, pad)
 
         # --- Tab hasil perbandingan (permanen, sama seperti tab Waktu
@@ -7460,7 +8164,8 @@ class HisabWinApp(tk.Tk):
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
-                                  self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit()))
+                                  self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit(),
+                                  self._tutup_akordeon_cakrawala()))
         self._bangun_akordeon_konverter(self._body_akordeon_konverter, pad)
 
         # --- Bagian akordeon ke-6: Tabel Efemeris (posisi Matahari & Bulan
@@ -7475,7 +8180,8 @@ class HisabWinApp(tk.Tk):
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
-                                  self._tutup_akordeon_konverter(), self._tutup_akordeon_peta_langit()))
+                                  self._tutup_akordeon_konverter(), self._tutup_akordeon_peta_langit(),
+                                  self._tutup_akordeon_cakrawala()))
         self._bangun_akordeon_efemeris(self._body_akordeon_efemeris, pad)
         self._bangun_tab_efemeris()
 
@@ -7494,8 +8200,28 @@ class HisabWinApp(tk.Tk):
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
-                                  self._tutup_akordeon_konverter(), self._tutup_akordeon_efemeris()))
+                                  self._tutup_akordeon_konverter(), self._tutup_akordeon_efemeris(),
+                                  self._tutup_akordeon_cakrawala()))
         self._bangun_akordeon_peta_langit(self._body_akordeon_peta_langit, pad)
+
+        # --- Bagian akordeon ke-8: Profil Cakrawala (elevasi horizon 360
+        #     derajat dari 1 titik pengamat, mirip heywhatsthat.com) --
+        #     BUTUH INTERNET (AWS Terrain Tiles + Overpass API OSM utk nama
+        #     puncak, lihat catatan di hitung_profil_cakrawala()). Hasilnya
+        #     bisa disimpan ke .txt lewat tombol "Simpan .txt" -- file ini
+        #     RENCANANYA jadi input WAJIB fitur "Simulasi Hilal" yang
+        #     menyusul (belum dibuat sekarang, cuma profil cakrawalanya
+        #     dulu sesuai permintaan). ---
+        self._body_akordeon_cakrawala, self._buka_akordeon_cakrawala, \
+            self._tutup_akordeon_cakrawala = \
+            self._buat_bagian_akordeon(
+                tab_kontrol, "🏔️ Profil Cakrawala",
+                buka_awal=False,
+                on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
+                                  self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
+                                  self._tutup_akordeon_konverter(), self._tutup_akordeon_efemeris(),
+                                  self._tutup_akordeon_peta_langit()))
+        self._bangun_akordeon_cakrawala(self._body_akordeon_cakrawala, pad)
 
     def _on_ganti_tab_notebook(self, event=None):
         """Dipanggil tiap kali tab notebook kanan (peta/Waktu Sholat)
@@ -7529,6 +8255,13 @@ class HisabWinApp(tk.Tk):
             self._tutup_akordeon_sholat()
             self._tutup_akordeon_gerhana()
             self._tutup_akordeon_kalbanding()
+        elif "Cakrawala" in tab_terpilih:
+            self._buka_akordeon_cakrawala()
+            self._tutup_akordeon_hilal()
+            self._tutup_akordeon_sholat()
+            self._tutup_akordeon_gerhana()
+            self._tutup_akordeon_kalbanding()
+            self._tutup_akordeon_efemeris()
         else:
             # Tab peta Hilal (MABIMS, Muhammadiyah, Indonesia, dll)
             self._buka_akordeon_hilal()
@@ -9312,6 +10045,253 @@ class HisabWinApp(tk.Tk):
         except Exception as e:
             self.antrian.put(("peta_langit_error", f"Gagal menghitung peta langit: {e}"))
 
+    # =====================================================
+    #  Akordeon ke-8: Profil Cakrawala
+    # =====================================================
+    def _bangun_akordeon_cakrawala(self, body, pad):
+        """Isi badan akordeon "🏔️ Profil Cakrawala": hitung elevasi horizon
+        360 derajat dari 1 titik pengamat (mirip heywhatsthat.com), lewat
+        hitung_profil_cakrawala() -- murni fungsi baru, TIDAK menyentuh
+        logika hisab hilal manapun. Hasilnya bisa disimpan ke .txt
+        (simpan_profil_cakrawala_txt) -- file ini RENCANANYA jadi input
+        WAJIB fitur "Simulasi Hilal" yang menyusul (belum dibuat)."""
+
+        ttk.Label(
+            body,
+            text="Hitung profil elevasi cakrawala (horizon) 360° dari satu "
+                 "titik pengamat, berdasarkan data medan sungguhan -- "
+                 "berguna utk memperkirakan apakah pandangan ke arah "
+                 "hilal terhalang bukit/gunung. Hasilnya bisa disimpan "
+                 "sebagai .txt.",
+            font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left",
+            wraplength=280,
+        ).pack(fill="x", padx=10, pady=(4, 4))
+
+        ttk.Label(
+            body,
+            text="⚠ PERLU KONEKSI INTERNET AKTIF — data elevasi medan "
+                 "(AWS Terrain Tiles) & nama gunung/puncak (OpenStreetMap) "
+                 "diambil langsung dari internet tiap kali dihitung, tidak "
+                 "ada mode offline.",
+            font=("Segoe UI", 8, "bold"),
+            foreground=WARNA_PERINGATAN, justify="left", wraplength=280,
+        ).pack(fill="x", padx=10, pady=(0, 6))
+
+        frame_tersimpan = ttk.LabelFrame(body, text="Profil Tersimpan di Perangkat")
+        frame_tersimpan.pack(fill="x", **pad)
+        ttk.Label(
+            frame_tersimpan,
+            text="Sudah pernah menghitung sebelumnya? Lihat, ganti nama, "
+                 "atau hapus profil yang tersimpan di perangkat ini -- "
+                 "TANPA perlu koneksi internet.",
+            font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left",
+            wraplength=280,
+        ).pack(fill="x", padx=10, pady=(6, 4))
+        self.btn_kelola_profil_cakrawala = ttk.Button(
+            frame_tersimpan, text="🗂️ Buka Manajer Profil Tersimpan...",
+            command=self._on_buka_manajer_profil_cakrawala)
+        self.btn_kelola_profil_cakrawala.pack(padx=10, pady=(0, 10), anchor="w")
+
+        frame_lokasi = ttk.LabelFrame(body, text="1. Lokasi Pengamat")
+        frame_lokasi.pack(fill="x", **pad)
+        frame_lokasi.columnconfigure(1, weight=1)
+
+        ttk.Label(frame_lokasi, text="Lintang:").grid(row=0, column=0, padx=6, pady=4, sticky="w")
+        self.entry_lat_cakrawala = ttk.Entry(frame_lokasi, width=12)
+        self.entry_lat_cakrawala.insert(0, "-6.2")
+        self.entry_lat_cakrawala.grid(row=0, column=1, padx=6, pady=4, sticky="w")
+
+        ttk.Label(frame_lokasi, text="Bujur:").grid(row=1, column=0, padx=6, pady=4, sticky="w")
+        self.entry_lon_cakrawala = ttk.Entry(frame_lokasi, width=12)
+        self.entry_lon_cakrawala.insert(0, "106.8")
+        self.entry_lon_cakrawala.grid(row=1, column=1, padx=6, pady=4, sticky="w")
+
+        ttk.Label(frame_lokasi, text="Tinggi mata (m):").grid(row=2, column=0, padx=6, pady=4, sticky="w")
+        self.entry_tinggi_mata_cakrawala = ttk.Entry(frame_lokasi, width=12)
+        self.entry_tinggi_mata_cakrawala.insert(0, "2.0")
+        self.entry_tinggi_mata_cakrawala.grid(row=2, column=1, padx=6, pady=4, sticky="w")
+
+        frame_param = ttk.LabelFrame(body, text="2. Parameter Perhitungan")
+        frame_param.pack(fill="x", **pad)
+        frame_param.columnconfigure(1, weight=1)
+
+        ttk.Label(frame_param, text="Radius maks. (km):").grid(row=0, column=0, padx=6, pady=4, sticky="w")
+        self.entry_radius_cakrawala = ttk.Entry(frame_param, width=12)
+        self.entry_radius_cakrawala.insert(0, "30")
+        self.entry_radius_cakrawala.grid(row=0, column=1, padx=6, pady=4, sticky="w")
+
+        ttk.Label(frame_param, text="Resolusi arah:").grid(row=1, column=0, padx=6, pady=4, sticky="w")
+        self.var_resolusi_cakrawala = tk.StringVar(value="180")
+        combo_resolusi = ttk.Combobox(
+            frame_param, textvariable=self.var_resolusi_cakrawala, state="readonly", width=10,
+            values=["90 (cepat, kasar)", "180 (sedang)", "360 (detail, lambat)"])
+        combo_resolusi.current(1)
+        combo_resolusi.grid(row=1, column=1, padx=6, pady=4, sticky="w")
+
+        ttk.Label(
+            frame_param,
+            text="Makin besar radius & resolusi, makin lama & makin banyak "
+                 "data diunduh. Mulai dari nilai kecil dulu utk uji coba.",
+            font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left",
+            wraplength=280,
+        ).grid(row=2, column=0, columnspan=2, padx=6, pady=(0, 4), sticky="w")
+
+        self.btn_hitung_cakrawala = ttk.Button(
+            body, text="Hitung Profil Cakrawala", command=self._on_hitung_cakrawala,
+            style="Aksen.TButton")
+        self.btn_hitung_cakrawala.pack(pady=6)
+
+        frame_hasil = ttk.LabelFrame(body, text="Hasil")
+        frame_hasil.pack(fill="x", **pad)
+        self.label_hasil_cakrawala = ttk.Label(
+            frame_hasil, text="Belum dihitung.", font=FONT_UTAMA_BOLD,
+            justify="left", wraplength=280)
+        self.label_hasil_cakrawala.pack(anchor="w", padx=10, pady=(10, 4))
+
+        frame_tombol_hasil = ttk.Frame(frame_hasil)
+        frame_tombol_hasil.pack(fill="x", padx=10, pady=(0, 10), anchor="w")
+
+        self.btn_simpan_txt_cakrawala = ttk.Button(
+            frame_tombol_hasil, text="💾 Simpan sebagai .txt...", command=self._on_simpan_txt_cakrawala,
+            state="disabled")
+        self.btn_simpan_txt_cakrawala.pack(side="left")
+
+        self.btn_simpan_profil_cakrawala = ttk.Button(
+            frame_tombol_hasil, text="📥 Simpan ke Profil Tersimpan",
+            command=self._on_simpan_ke_manajer_cakrawala, state="disabled")
+        self.btn_simpan_profil_cakrawala.pack(side="left", padx=(6, 0))
+
+        self._hasil_cakrawala_terakhir = None  # diisi dict hitung_profil_cakrawala() begitu selesai
+
+    def _on_hitung_cakrawala(self):
+        try:
+            try:
+                lat = float(self.entry_lat_cakrawala.get().strip().replace(",", "."))
+                lon = float(self.entry_lon_cakrawala.get().strip().replace(",", "."))
+            except ValueError:
+                raise ValueError("Koordinat tidak valid. Contoh format: -6.200000")
+            if not (-90 <= lat <= 90):
+                raise ValueError("Lintang harus di antara -90 dan 90 derajat.")
+            if not (-180 <= lon <= 180):
+                raise ValueError("Bujur harus di antara -180 dan 180 derajat.")
+            try:
+                tinggi_mata = float(self.entry_tinggi_mata_cakrawala.get().strip().replace(",", "."))
+            except ValueError:
+                raise ValueError("Tinggi mata pengamat tidak valid. Contoh: 2.0")
+            if tinggi_mata < 0:
+                raise ValueError("Tinggi mata pengamat tidak boleh negatif.")
+            try:
+                radius_km = float(self.entry_radius_cakrawala.get().strip().replace(",", "."))
+            except ValueError:
+                raise ValueError("Radius maksimum tidak valid. Contoh: 30")
+            if not (0.5 <= radius_km <= 300):
+                raise ValueError("Radius maksimum sebaiknya di antara 0.5 dan 300 km.")
+        except ValueError as e:
+            messagebox.showerror("Input tidak valid", str(e))
+            return
+
+        n_azimuth = int(self.var_resolusi_cakrawala.get().split()[0])
+
+        self.btn_hitung_cakrawala.config(state="disabled")
+        self.btn_simpan_txt_cakrawala.config(state="disabled")
+        self.btn_simpan_profil_cakrawala.config(state="disabled")
+        self.label_hasil_cakrawala.config(text="Menghitung... lihat log Status di atas untuk progres.")
+        self._log(f"\nMenghitung Profil Cakrawala di ({lat:.4f}, {lon:.4f}), "
+                   f"radius {radius_km:.0f} km, resolusi {n_azimuth} arah "
+                   f"(butuh internet)...")
+
+        threading.Thread(
+            target=self._cakrawala_thread,
+            args=(lat, lon, tinggi_mata, radius_km, n_azimuth),
+            daemon=True).start()
+
+    def _cakrawala_thread(self, lat, lon, tinggi_mata, radius_km, n_azimuth):
+        try:
+            progress_cb = lambda msg: self.antrian.put(("progress", msg))
+            profil = hitung_profil_cakrawala(
+                lat, lon, tinggi_mata=tinggi_mata, radius_km=radius_km,
+                n_azimuth=n_azimuth, progress_cb=progress_cb)
+            self.antrian.put(("cakrawala_ok", profil))
+        except Exception as e:
+            self.antrian.put(("cakrawala_error", f"Gagal menghitung profil cakrawala: {e}"))
+
+    def _on_simpan_txt_cakrawala(self):
+        if not self._hasil_cakrawala_terakhir:
+            messagebox.showwarning("Belum ada data", "Hitung Profil Cakrawala terlebih dahulu.")
+            return
+        profil = self._hasil_cakrawala_terakhir
+        nama_default = f"profil_cakrawala_{profil['lat']:.4f}_{profil['lon']:.4f}.txt"
+        path = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("Text file", "*.txt"), ("Semua File", "*.*")],
+            initialfile=nama_default,
+            title="Simpan Profil Cakrawala")
+        if not path:
+            return
+        try:
+            simpan_profil_cakrawala_txt(path, profil)
+            messagebox.showinfo("Tersimpan", f"Profil Cakrawala disimpan ke:\n{path}")
+            self._log(f"Profil Cakrawala disimpan ke: {path}")
+        except OSError as e:
+            messagebox.showerror("Gagal menyimpan", f"Tidak bisa menulis file .txt:\n{e}")
+
+    def _on_simpan_ke_manajer_cakrawala(self):
+        """CREATE: simpan hasil hitung yang sedang tampil ke folder data
+        terkelola (_folder_data_profil_cakrawala()) dgn nama file otomatis
+        -- BEDA dari "Simpan sebagai .txt..." yang minta user memilih
+        lokasi sendiri. File yang disimpan lewat sini otomatis muncul di
+        "🗂️ Buka Manajer Profil Tersimpan..."."""
+        if not self._hasil_cakrawala_terakhir:
+            messagebox.showwarning("Belum ada data", "Hitung Profil Cakrawala terlebih dahulu.")
+            return
+        profil = self._hasil_cakrawala_terakhir
+        folder = _folder_data_profil_cakrawala()
+        path = os.path.join(folder, _nama_file_profil_cakrawala_baru(profil["lat"], profil["lon"]))
+        try:
+            simpan_profil_cakrawala_txt(path, profil)
+            messagebox.showinfo(
+                "Tersimpan ke Profil Tersimpan",
+                f"Profil Cakrawala disimpan sebagai:\n{os.path.basename(path)}\n\n"
+                "Bisa dilihat lagi kapan saja lewat \"🗂️ Buka Manajer Profil "
+                "Tersimpan...\" -- tanpa perlu internet.")
+            self._log(f"Profil Cakrawala disimpan ke Profil Tersimpan: {path}")
+        except OSError as e:
+            messagebox.showerror("Gagal menyimpan", f"Tidak bisa menulis file .txt:\n{e}")
+
+    def _on_buka_manajer_profil_cakrawala(self):
+        """Buka DialogManajerProfilCakrawala (list/lihat/ganti nama/hapus/
+        impor) -- non-modal, jadi jendela utama tetap bisa dipakai
+        sementara dialog terbuka."""
+        DialogManajerProfilCakrawala(self, on_lihat=self._tampilkan_profil_cakrawala_tersimpan)
+
+    def _tampilkan_profil_cakrawala_tersimpan(self, profil, path):
+        """READ: tampilkan profil cakrawala yang DIMUAT dari file .txt
+        tersimpan (lewat tombol "Lihat" di Manajer Profil Tersimpan) --
+        TANPA menghitung ulang & TANPA internet, cukup baca file lalu
+        gambar ulang grafiknya. Alurnya disatukan dgn hasil hitung baru
+        (mengisi _hasil_cakrawala_terakhir yg sama) supaya tombol "Simpan
+        sebagai .txt.../Simpan ke Profil Tersimpan" tetap berfungsi, mis.
+        utk membuat salinan lain dari profil yang sama."""
+        self._hasil_cakrawala_terakhir = profil
+        n_puncak = len(profil["puncak_berlabel"])
+        teks = (f"Dimuat dari profil tersimpan: {os.path.basename(path)}\n"
+                f"Sudut horizon: {profil['sudut_horizon'].min():.2f}° s/d "
+                f"{profil['sudut_horizon'].max():.2f}°.\n"
+                f"{n_puncak} puncak bernama teridentifikasi.")
+        self.label_hasil_cakrawala.config(text=teks)
+        self._log(f"Profil Cakrawala dimuat dari file tersimpan: {path}")
+        self.btn_simpan_txt_cakrawala.config(state="normal")
+        self.btn_simpan_profil_cakrawala.config(state="normal")
+        try:
+            fig_cakrawala = buat_figure_profil_cakrawala(profil)
+            tgl_label = f"({profil['lat']:.3f}, {profil['lon']:.3f})"
+            frame_cakrawala = self._tampilkan_peta(
+                "cakrawala", f"🏔️ Cakrawala — {tgl_label}", fig_cakrawala)
+            self.notebook.select(frame_cakrawala)
+        except Exception as e:
+            self._log(f"(Grafik cakrawala gagal ditampilkan, tapi data tetap termuat: {e})")
+            messagebox.showerror("Gagal menampilkan grafik", str(e))
+
     def _on_buka_planetarium(self):
         # Validasi input sama persis dengan _on_tampilkan_peta_langit --
         # dua tombol ini berbagi field koordinat/tanggal/jam yang sama.
@@ -10439,6 +11419,43 @@ class HisabWinApp(tk.Tk):
                     self._log(f"ERROR: {payload}")
                     messagebox.showerror("Terjadi kesalahan", payload)
                     self.btn_tampilkan_peta_langit.config(state="normal")
+
+                elif jenis == "cakrawala_ok":
+                    profil = payload
+                    self._hasil_cakrawala_terakhir = profil
+                    n_puncak = len(profil["puncak_berlabel"])
+                    teks = (f"Selesai. Sudut horizon: {profil['sudut_horizon'].min():.2f}° s/d "
+                            f"{profil['sudut_horizon'].max():.2f}°.\n"
+                            f"{n_puncak} puncak bernama teridentifikasi.")
+                    self.label_hasil_cakrawala.config(text=teks)
+                    self._log(f"Profil Cakrawala selesai: {teks.replace(chr(10), ' ')}")
+                    self.btn_hitung_cakrawala.config(state="normal")
+                    self.btn_simpan_txt_cakrawala.config(state="normal")
+                    self.btn_simpan_profil_cakrawala.config(state="normal")
+                    try:
+                        fig_cakrawala = buat_figure_profil_cakrawala(profil)
+                        tgl_label = f"({profil['lat']:.3f}, {profil['lon']:.3f})"
+                        frame_cakrawala = self._tampilkan_peta(
+                            "cakrawala", f"🏔️ Cakrawala — {tgl_label}", fig_cakrawala)
+                        self.notebook.select(frame_cakrawala)
+                    except Exception as e:
+                        self._log(f"(Grafik cakrawala gagal ditampilkan, tapi data tetap bisa "
+                                   f"disimpan .txt: {e})")
+
+                elif jenis == "cakrawala_error":
+                    self._log(f"ERROR: {payload}")
+                    messagebox.showerror(
+                        "Terjadi kesalahan",
+                        f"{payload}\n\nPastikan koneksi internet aktif -- Profil Cakrawala "
+                        "butuh mengunduh data elevasi & nama puncak dari internet.")
+                    self.label_hasil_cakrawala.config(text="Gagal menghitung. Lihat pesan error.")
+                    self.btn_hitung_cakrawala.config(state="normal")
+                    if self._hasil_cakrawala_terakhir:
+                        # Perhitungan ULANG gagal, tapi data hasil sebelumnya (kalau ada)
+                        # masih valid & masih tampil di tab peta -- tombol simpan tetap
+                        # boleh dipakai utk data lama itu.
+                        self.btn_simpan_txt_cakrawala.config(state="normal")
+                        self.btn_simpan_profil_cakrawala.config(state="normal")
 
                 elif jenis == "planetarium_ok":
                     tanggal, jam_utc, lat, lon, mode, data = payload
