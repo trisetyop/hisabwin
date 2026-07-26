@@ -7011,8 +7011,223 @@ def buat_figure_profil_cakrawala(profil):
 
 
 # =========================================================
-#  DIALOG: Manajer Profil Cakrawala Tersimpan (Lihat/Ganti Nama/Hapus/Impor)
+#  SIMULASI HILAL — pakai Profil Cakrawala (WAJIB) sbg pembanding, bukan
+#  cakrawala datar 0 derajat spt kriteria hisab pada umumnya.
+#
+#  Astronomi (posisi Matahari/Bulan) SEPENUHNYA pakai fungsi yg SUDAH ADA
+#  (hitung_tabel_efemeris) -- modul ini cuma menambahkan lapisan pembanding
+#  ke profil cakrawala nyata di atasnya, TIDAK menghitung ulang posisi
+#  benda langit dgn cara lain.
 # =========================================================
+
+def _interpolasi_horizon_cakrawala(profil, azimuth_query):
+    """Interpolasi linear sudut_horizon (dari profil cakrawala) pada
+    azimuth_query derajat (skalar/array) -- MELINGKAR (0 derajat = 360
+    derajat), krn data profil azimuth aslinya 0..360 tanpa mengulang titik
+    360 di akhir. Titik "bungkus" di kedua sisi ditambahkan supaya
+    interpolasi tetap benar persis di sekitar 0/360 (mis. azimuth 359.5)."""
+    az = profil["azimuth"]
+    sudut = profil["sudut_horizon"]
+    az_ext = np.concatenate([az - 360.0, az, az + 360.0])
+    sudut_ext = np.concatenate([sudut, sudut, sudut])
+    return np.interp(np.asarray(azimuth_query) % 360.0 + 0.0, az_ext, sudut_ext)
+
+
+def _cari_potong_turun_petang(jam_lokal, nilai):
+    """Cari jam (interpolasi linear, jam desimal lokal) tempat `nilai`
+    menyeberang dari POSITIF ke NEGATIF (turun/terbenam), dicari MULAI DARI
+    TENGAH HARI (jam>=12) supaya yg ketemu peristiwa petang (ghurub/
+    terbenam), bukan pagi (terbit). Return None kalau tidak ada
+    penyeberangan turun di sisa hari itu (mis. lintang ekstrem/kutub)."""
+    mask = jam_lokal >= 12.0
+    j, v = jam_lokal[mask], nilai[mask]
+    for i in range(len(v) - 1):
+        if v[i] >= 0 and v[i + 1] < 0:
+            frac = v[i] / (v[i] - v[i + 1])
+            return float(j[i] + frac * (j[i + 1] - j[i]))
+    return None
+
+
+def simulasikan_hilal(profil, tanggal, zona_offset_jam, ts=None, eph=None,
+                       mode="ringan", interval_menit=2):
+    """Simulasikan posisi Matahari & Bulan sepanjang satu hari (tanggal,
+    waktu SETEMPAT di lokasi profil), dibandingkan dgn PROFIL CAKRAWALA
+    NYATA (bukan cakrawala datar 0 derajat) -- utk menjawab pertanyaan:
+    "kalau ada gunung/bukit di arah hilal, apakah hilal itu (dan
+    Matahari saat ghurub) masih di atas garis cakrawala yg BENAR-BENAR
+    terlihat, dan berapa lama?"
+
+    profil: dict hasil hitung_profil_cakrawala() / muat_profil_cakrawala_txt()
+            -- WAJIB, tanpa ini simulasi tidak bisa jalan sama sekali
+            (posisi pengamat & bentuk cakrawala nyatanya dari sini).
+    tanggal: datetime.date/datetime -- tanggal yg mau disimulasikan.
+    zona_offset_jam: offset zona waktu SETEMPAT thd UTC (jam), utk
+            menampilkan label jam lokal yg familiar bagi pengamat.
+
+    Return dict:
+      "jam_lokal", "az_matahari", "alt_matahari", "az_bulan", "alt_bulan",
+      "horizon_di_az_matahari", "horizon_di_az_bulan",
+      "tinggi_relatif_matahari", "tinggi_relatif_bulan"   (semua array,
+          "tinggi_relatif_*" = altitude - sudut cakrawala nyata di azimuth
+          benda itu; positif berarti masih di atas cakrawala yg terlihat)
+      "jam_ghurub_datar", "jam_ghurub_cakrawala"   (jam desimal / None)
+      "jam_terbenam_bulan_datar", "jam_terbenam_bulan_cakrawala"
+      "tinggi_hilal_atas_cakrawala_saat_ghurub_cakrawala"  (derajat / None)
+      "tinggi_hilal_atas_datar_saat_ghurub_datar"          (derajat / None)
+      "az_bulan_saat_ghurub_cakrawala", "elongasi_saat_ghurub_cakrawala"
+      "fraksi_iluminasi_saat_ghurub_cakrawala"
+      "lag_cakrawala_menit", "lag_datar_menit"  (durasi hilal masih di atas
+          cakrawala SETELAH matahari terbenam, versi nyata vs versi datar)
+    """
+    lat, lon = profil["lat"], profil["lon"]
+    tabel = hitung_tabel_efemeris(
+        tanggal, lat, lon, zona_offset_jam, mode=mode, ts=ts, eph=eph,
+        interval_menit=interval_menit, elevasi_m=0.0)
+
+    jam_lokal = np.array([b["jam_lokal"] for b in tabel])
+    az_sun = np.array([b["az_matahari"] for b in tabel])
+    alt_sun = np.array([b["alt_matahari"] for b in tabel])
+    az_moon = np.array([b["az_bulan"] for b in tabel])
+    alt_moon = np.array([b["alt_bulan"] for b in tabel])
+    elong = np.array([b["elongasi_deg"] for b in tabel])
+    frac_illum = np.array([b["fraksi_iluminasi_persen"] for b in tabel])
+
+    horizon_sun = _interpolasi_horizon_cakrawala(profil, az_sun)
+    horizon_moon = _interpolasi_horizon_cakrawala(profil, az_moon)
+    tinggi_relatif_sun = alt_sun - horizon_sun
+    tinggi_relatif_moon = alt_moon - horizon_moon
+
+    jam_ghurub_datar = _cari_potong_turun_petang(jam_lokal, alt_sun)
+    jam_ghurub_cakrawala = _cari_potong_turun_petang(jam_lokal, tinggi_relatif_sun)
+    jam_terbenam_bulan_datar = _cari_potong_turun_petang(jam_lokal, alt_moon)
+    jam_terbenam_bulan_cakrawala = _cari_potong_turun_petang(jam_lokal, tinggi_relatif_moon)
+
+    def _pada_jam(jam_target, arr):
+        return float(np.interp(jam_target, jam_lokal, arr)) if jam_target is not None else None
+
+    tinggi_hilal_cakrawala = None
+    if jam_ghurub_cakrawala is not None:
+        alt_m = _pada_jam(jam_ghurub_cakrawala, alt_moon)
+        hor_m = _pada_jam(jam_ghurub_cakrawala, horizon_moon)
+        tinggi_hilal_cakrawala = alt_m - hor_m
+
+    tinggi_hilal_datar = None
+    if jam_ghurub_datar is not None:
+        tinggi_hilal_datar = _pada_jam(jam_ghurub_datar, alt_moon)
+
+    lag_cakrawala_menit = None
+    if jam_ghurub_cakrawala is not None and jam_terbenam_bulan_cakrawala is not None:
+        lag_cakrawala_menit = (jam_terbenam_bulan_cakrawala - jam_ghurub_cakrawala) * 60.0
+
+    lag_datar_menit = None
+    if jam_ghurub_datar is not None and jam_terbenam_bulan_datar is not None:
+        lag_datar_menit = (jam_terbenam_bulan_datar - jam_ghurub_datar) * 60.0
+
+    return {
+        "lat": lat, "lon": lon, "tanggal": tanggal, "zona_offset_jam": zona_offset_jam,
+        "jam_lokal": jam_lokal, "az_matahari": az_sun, "alt_matahari": alt_sun,
+        "az_bulan": az_moon, "alt_bulan": alt_moon,
+        "horizon_di_az_matahari": horizon_sun, "horizon_di_az_bulan": horizon_moon,
+        "tinggi_relatif_matahari": tinggi_relatif_sun, "tinggi_relatif_bulan": tinggi_relatif_moon,
+        "elongasi": elong, "fraksi_iluminasi": frac_illum,
+        "jam_ghurub_datar": jam_ghurub_datar, "jam_ghurub_cakrawala": jam_ghurub_cakrawala,
+        "jam_terbenam_bulan_datar": jam_terbenam_bulan_datar,
+        "jam_terbenam_bulan_cakrawala": jam_terbenam_bulan_cakrawala,
+        "tinggi_hilal_atas_cakrawala_saat_ghurub_cakrawala": tinggi_hilal_cakrawala,
+        "tinggi_hilal_atas_datar_saat_ghurub_datar": tinggi_hilal_datar,
+        "az_bulan_saat_ghurub_cakrawala": _pada_jam(jam_ghurub_cakrawala, az_moon),
+        "elongasi_saat_ghurub_cakrawala": _pada_jam(jam_ghurub_cakrawala, elong),
+        "fraksi_iluminasi_saat_ghurub_cakrawala": _pada_jam(jam_ghurub_cakrawala, frac_illum),
+        "lag_cakrawala_menit": lag_cakrawala_menit, "lag_datar_menit": lag_datar_menit,
+    }
+
+
+def _label_jam_hhmm(jam_desimal):
+    if jam_desimal is None:
+        return "-- tidak terbenam hari ini --"
+    jam_desimal = jam_desimal % 24.0
+    h = int(jam_desimal)
+    m = int(round((jam_desimal - h) * 60))
+    if m == 60:
+        m = 0
+        h = (h + 1) % 24
+    return f"{h:02d}:{m:02d}"
+
+
+def buat_figure_simulasi_hilal(profil, hasil):
+    """Figure panorama cakrawala (spt buat_figure_profil_cakrawala) DI-ZOOM
+    ke sekitar azimuth terbenam Matahari & Bulan, dgn jejak lintasan &
+    penanda posisi Matahari/Bulan persis saat "ghurub cakrawala" (matahari
+    terbenam di balik garis cakrawala NYATA)."""
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import MultipleLocator
+
+    azimuth = profil["azimuth"]
+    sudut_horizon = profil["sudut_horizon"]
+    jam_ghurub = hasil["jam_ghurub_cakrawala"] if hasil["jam_ghurub_cakrawala"] is not None \
+        else hasil["jam_ghurub_datar"]
+
+    # Jendela waktu yg digambar: dari 30 menit sebelum ghurub datar s.d.
+    # 20 menit setelah bulan terbenam (cakrawala nyata ATAU datar, mana yg
+    # lebih lama) -- supaya seluruh peristiwa penting kelihatan.
+    j0 = (hasil["jam_ghurub_datar"] or jam_ghurub or 18.0) - 0.5
+    kandidat_akhir = [t for t in (hasil["jam_terbenam_bulan_cakrawala"],
+                                   hasil["jam_terbenam_bulan_datar"]) if t is not None]
+    j1 = (max(kandidat_akhir) if kandidat_akhir else (jam_ghurub or 18.0) + 1.0) + 0.33
+
+    mask_waktu = (hasil["jam_lokal"] >= j0) & (hasil["jam_lokal"] <= j1)
+    az_sun_w = hasil["az_matahari"][mask_waktu]
+    alt_sun_w = hasil["alt_matahari"][mask_waktu]
+    az_moon_w = hasil["az_bulan"][mask_waktu]
+    alt_moon_w = hasil["alt_bulan"][mask_waktu]
+
+    az_tengah = hasil["az_bulan_saat_ghurub_cakrawala"] or float(np.median(az_moon_w)) \
+        if len(az_moon_w) else 270.0
+    lebar_zoom = 20.0
+    az_min, az_max = az_tengah - lebar_zoom, az_tengah + lebar_zoom
+
+    y_min = np.floor(sudut_horizon.min()) - 1
+    y_max_kandidat = [sudut_horizon.max()]
+    if len(alt_moon_w):
+        y_max_kandidat.append(np.nanmax(alt_moon_w))
+    if len(alt_sun_w):
+        y_max_kandidat.append(np.nanmax(alt_sun_w))
+    y_max = np.ceil(max(y_max_kandidat)) + 2
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.plot(azimuth, sudut_horizon, color="dimgray", linewidth=1.2)
+    ax.fill_between(azimuth, sudut_horizon, y_min, color="#8B7355", alpha=0.6)
+    ax.axhline(0, color="blue", linestyle="--", linewidth=0.8, alpha=0.5, label="Cakrawala datar (0°)")
+
+    ax.plot(az_sun_w, alt_sun_w, color="#D97706", linewidth=1.6, label="Lintasan Matahari")
+    ax.plot(az_moon_w, alt_moon_w, color="#1D4ED8", linewidth=1.6, label="Lintasan Bulan (hilal)")
+
+    if hasil["jam_ghurub_cakrawala"] is not None:
+        az_g = float(np.interp(hasil["jam_ghurub_cakrawala"], hasil["jam_lokal"], hasil["az_matahari"]))
+        y_g = float(_interpolasi_horizon_cakrawala(profil, np.array([az_g]))[0])
+        ax.plot(az_g, y_g, "o", color="#D97706",
+                markersize=9, markeredgecolor="black", zorder=5,
+                label=f"Matahari saat ghurub cakrawala ({_label_jam_hhmm(hasil['jam_ghurub_cakrawala'])})")
+        az_m = hasil["az_bulan_saat_ghurub_cakrawala"]
+        alt_m = float(np.interp(hasil["jam_ghurub_cakrawala"], hasil["jam_lokal"], hasil["alt_bulan"]))
+        ax.plot(az_m, alt_m, "*", color="#FDE68A", markersize=16, markeredgecolor="black", zorder=6,
+                label=f"Hilal saat ghurub cakrawala (tinggi {hasil['tinggi_hilal_atas_cakrawala_saat_ghurub_cakrawala']:.2f}° "
+                      "di atas cakrawala nyata)")
+
+    ax.set_xlim(max(0, az_min), min(360, az_max))
+    ax.set_ylim(y_min, y_max)
+    ax.xaxis.set_major_locator(MultipleLocator(5))
+    ax.yaxis.set_major_locator(MultipleLocator(2))
+    ax.grid(which="major", linewidth=0.5, alpha=0.4)
+    ax.set_xlabel("Azimuth (°, dari Utara searah jarum jam)")
+    ax.set_ylabel("Sudut elevasi (°)")
+    tgl = hasil["tanggal"]
+    ax.set_title(f"Simulasi Hilal — {tgl.day:02d}-{tgl.month:02d}-{tgl.year} — "
+                 f"({profil['lat']:.4f}, {profil['lon']:.4f})")
+    ax.legend(loc="upper right", fontsize=7)
+    fig.tight_layout()
+    return fig
+
 
 class DialogManajerProfilCakrawala(tk.Toplevel):
     """Popup non-modal (tidak pakai grab_set, sama seperti DialogKernelJPL)
@@ -8004,7 +8219,7 @@ class HisabWinApp(tk.Tk):
                 on_open=lambda: (self._tutup_akordeon_sholat(), self._tutup_akordeon_gerhana(),
                                   self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter(),
                                   self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit(),
-                                  self._tutup_akordeon_cakrawala()))
+                                  self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal()))
         frame0 = ttk.LabelFrame(body_hilal, text="0. Mode Perhitungan")
         frame0.pack(fill="x", **pad)
 
@@ -8107,7 +8322,7 @@ class HisabWinApp(tk.Tk):
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_gerhana(),
                                   self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter(),
                                   self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit(),
-                                  self._tutup_akordeon_cakrawala()))
+                                  self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal()))
 
         # --- Tab tambahan: Waktu Sholat & Arah Kiblat (permanen, selalu ada) ---
         self._bangun_tab_sholat()
@@ -8124,7 +8339,7 @@ class HisabWinApp(tk.Tk):
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter(),
                                   self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit(),
-                                  self._tutup_akordeon_cakrawala()))
+                                  self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal()))
         self._bangun_akordeon_gerhana(self._body_akordeon_gerhana, pad)
 
         # --- Bagian akordeon ke-4: Perbandingan Kalender MABIMS vs KHGT
@@ -8140,7 +8355,7 @@ class HisabWinApp(tk.Tk):
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_konverter(),
                                   self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit(),
-                                  self._tutup_akordeon_cakrawala()))
+                                  self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal()))
         self._bangun_akordeon_kalbanding(self._body_akordeon_kalbanding, pad)
 
         # --- Tab hasil perbandingan (permanen, sama seperti tab Waktu
@@ -8165,7 +8380,7 @@ class HisabWinApp(tk.Tk):
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
                                   self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit(),
-                                  self._tutup_akordeon_cakrawala()))
+                                  self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal()))
         self._bangun_akordeon_konverter(self._body_akordeon_konverter, pad)
 
         # --- Bagian akordeon ke-6: Tabel Efemeris (posisi Matahari & Bulan
@@ -8181,7 +8396,7 @@ class HisabWinApp(tk.Tk):
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
                                   self._tutup_akordeon_konverter(), self._tutup_akordeon_peta_langit(),
-                                  self._tutup_akordeon_cakrawala()))
+                                  self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal()))
         self._bangun_akordeon_efemeris(self._body_akordeon_efemeris, pad)
         self._bangun_tab_efemeris()
 
@@ -8201,7 +8416,7 @@ class HisabWinApp(tk.Tk):
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
                                   self._tutup_akordeon_konverter(), self._tutup_akordeon_efemeris(),
-                                  self._tutup_akordeon_cakrawala()))
+                                  self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal()))
         self._bangun_akordeon_peta_langit(self._body_akordeon_peta_langit, pad)
 
         # --- Bagian akordeon ke-8: Profil Cakrawala (elevasi horizon 360
@@ -8220,8 +8435,25 @@ class HisabWinApp(tk.Tk):
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
                                   self._tutup_akordeon_konverter(), self._tutup_akordeon_efemeris(),
-                                  self._tutup_akordeon_peta_langit()))
+                                  self._tutup_akordeon_peta_langit(), self._tutup_akordeon_simulasi_hilal()))
         self._bangun_akordeon_cakrawala(self._body_akordeon_cakrawala, pad)
+
+        # --- Bagian akordeon ke-9: Simulasi Hilal -- membandingkan posisi
+        #     Matahari & Bulan (dari hitung_tabel_efemeris, TIDAK menghitung
+        #     ulang astronomi dgn cara lain) terhadap PROFIL CAKRAWALA NYATA
+        #     (bukan cakrawala datar 0 derajat spt kriteria hisab biasa).
+        #     WAJIB memuat 1 Profil Cakrawala (dari akordeon sebelumnya atau
+        #     Manajer Profil Tersimpan) sebelum simulasi bisa dijalankan. ---
+        self._body_akordeon_simulasi_hilal, self._buka_akordeon_simulasi_hilal, \
+            self._tutup_akordeon_simulasi_hilal = \
+            self._buat_bagian_akordeon(
+                tab_kontrol, "🔭 Simulasi Hilal",
+                buka_awal=False,
+                on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
+                                  self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
+                                  self._tutup_akordeon_konverter(), self._tutup_akordeon_efemeris(),
+                                  self._tutup_akordeon_peta_langit(), self._tutup_akordeon_cakrawala()))
+        self._bangun_akordeon_simulasi_hilal(self._body_akordeon_simulasi_hilal, pad)
 
     def _on_ganti_tab_notebook(self, event=None):
         """Dipanggil tiap kali tab notebook kanan (peta/Waktu Sholat)
@@ -10273,6 +10505,7 @@ class HisabWinApp(tk.Tk):
         sebagai .txt.../Simpan ke Profil Tersimpan" tetap berfungsi, mis.
         utk membuat salinan lain dari profil yang sama."""
         self._hasil_cakrawala_terakhir = profil
+        self._perbarui_status_profil_simulasi_hilal()
         n_puncak = len(profil["puncak_berlabel"])
         teks = (f"Dimuat dari profil tersimpan: {os.path.basename(path)}\n"
                 f"Sudut horizon: {profil['sudut_horizon'].min():.2f}° s/d "
@@ -10364,6 +10597,174 @@ class HisabWinApp(tk.Tk):
             self.antrian.put(("planetarium_ok", (tanggal, jam_utc, lat, lon, mode, data)))
         except Exception as e:
             self.antrian.put(("planetarium_error", f"Gagal membuka Mode Planetarium: {e}"))
+
+    # =====================================================
+    #  Akordeon ke-9: Simulasi Hilal
+    #  (simulasikan_hilal / buat_figure_simulasi_hilal, lihat definisinya
+    #  di atas -- astronomi Matahari/Bulan TIDAK dihitung ulang di sini,
+    #  cuma dipakai hitung_tabel_efemeris yang SUDAH ADA lalu dibandingkan
+    #  ke Profil Cakrawala NYATA. WAJIB ada 1 Profil Cakrawala aktif dulu,
+    #  yaitu self._hasil_cakrawala_terakhir -- state ini DIBAGI dgn
+    #  akordeon 🏔️ Profil Cakrawala: dihitung baru di sana, ATAU dimuat
+    #  dari Manajer Profil Tersimpan lewat tombol di akordeon ini sendiri,
+    #  keduanya sama-sama mengisi variabel yang sama.) ---
+    def _bangun_akordeon_simulasi_hilal(self, body, pad):
+        """Isi badan akordeon "🔭 Simulasi Hilal": bandingkan posisi
+        Matahari & Bulan sepanjang sore/malam hari tertentu terhadap
+        Profil Cakrawala NYATA (bukan cakrawala datar 0° spt kriteria
+        hisab pada umumnya) -- menjawab "kalau ada gunung/bukit di arah
+        hilal, apakah hilal & matahari saat ghurub masih di atas garis
+        cakrawala yg BENAR-BENAR terlihat, dan berapa lama?"."""
+
+        ttk.Label(
+            body,
+            text="Simulasikan posisi Matahari & Bulan sepanjang sore/malam "
+                 "hari tertentu, dibandingkan dgn Profil Cakrawala NYATA "
+                 "(bukan cakrawala datar 0°) -- utk melihat apakah hilal "
+                 "masih di atas horizon yang sungguhan terlihat, walau "
+                 "terhalang gunung/bukit sekalipun.",
+            font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left",
+            wraplength=280,
+        ).pack(fill="x", padx=10, pady=(4, 6))
+
+        frame_profil = ttk.LabelFrame(body, text="1. Profil Cakrawala Aktif")
+        frame_profil.pack(fill="x", **pad)
+        self.label_profil_simulasi_hilal = ttk.Label(
+            frame_profil, text="Belum ada profil dimuat.",
+            font=FONT_KECIL, foreground=WARNA_PERINGATAN, justify="left",
+            wraplength=280)
+        self.label_profil_simulasi_hilal.pack(anchor="w", padx=10, pady=(8, 4))
+        ttk.Label(
+            frame_profil,
+            text="Hitung dulu di bagian 🏔️ Profil Cakrawala di atas, atau "
+                 "muat salah satu profil yang sudah tersimpan.",
+            font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left",
+            wraplength=280,
+        ).pack(fill="x", padx=10, pady=(0, 4))
+        ttk.Button(
+            frame_profil, text="🗂️ Muat dari Profil Tersimpan...",
+            command=self._on_buka_manajer_profil_cakrawala
+        ).pack(padx=10, pady=(0, 10), anchor="w")
+
+        frame_tgl = ttk.LabelFrame(body, text="2. Tanggal & Zona Waktu")
+        frame_tgl.pack(fill="x", **pad)
+        waktu_ini_lokal = datetime.utcnow() + timedelta(hours=ZONA_WAKTU_PETA_LANGIT[0][1])
+        ttk.Label(frame_tgl, text="Tanggal:").grid(row=0, column=0, padx=4, pady=6)
+        self.entry_tgl_hari_simulasi_hilal = ttk.Entry(frame_tgl, width=4)
+        self.entry_tgl_hari_simulasi_hilal.insert(0, str(waktu_ini_lokal.day))
+        self.entry_tgl_hari_simulasi_hilal.grid(row=0, column=1, padx=2)
+        ttk.Label(frame_tgl, text="Bulan:").grid(row=0, column=2, padx=4)
+        self.entry_tgl_bulan_simulasi_hilal = ttk.Entry(frame_tgl, width=4)
+        self.entry_tgl_bulan_simulasi_hilal.insert(0, str(waktu_ini_lokal.month))
+        self.entry_tgl_bulan_simulasi_hilal.grid(row=0, column=3, padx=2)
+        ttk.Label(frame_tgl, text="Tahun:").grid(row=0, column=4, padx=4)
+        self.entry_tgl_tahun_simulasi_hilal = ttk.Entry(frame_tgl, width=6)
+        self.entry_tgl_tahun_simulasi_hilal.insert(0, str(waktu_ini_lokal.year))
+        self.entry_tgl_tahun_simulasi_hilal.grid(row=0, column=5, padx=2)
+
+        ttk.Label(frame_tgl, text="Zona:").grid(
+            row=1, column=0, sticky="w", padx=4, pady=(6, 2))
+        self.var_zona_simulasi_hilal = tk.StringVar(value=ZONA_WAKTU_PETA_LANGIT[0][0])
+        ttk.Combobox(
+            frame_tgl, textvariable=self.var_zona_simulasi_hilal, state="readonly",
+            values=[z[0] for z in ZONA_WAKTU_PETA_LANGIT], width=28,
+        ).grid(row=1, column=1, columnspan=5, padx=2, pady=(6, 2), sticky="w")
+
+        ttk.Label(
+            body,
+            text="Perhitungan posisi Matahari/Bulan memakai Mode Perhitungan "
+                 "yang sama dgn bagian 🌙 Visibilitas di atas (Ringan/Presisi).",
+            font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left",
+            wraplength=280,
+        ).pack(fill="x", padx=10, pady=(0, 6))
+
+        self.btn_jalankan_simulasi_hilal = ttk.Button(
+            body, text="🔭 Jalankan Simulasi Hilal", command=self._on_jalankan_simulasi_hilal,
+            style="Aksen.TButton")
+        self.btn_jalankan_simulasi_hilal.pack(fill="x", padx=10, pady=(4, 4))
+
+        frame_hasil = ttk.LabelFrame(body, text="Hasil")
+        frame_hasil.pack(fill="x", **pad)
+        self.label_hasil_simulasi_hilal = ttk.Label(
+            frame_hasil, text="Belum disimulasikan.", font=FONT_KECIL,
+            justify="left", wraplength=280)
+        self.label_hasil_simulasi_hilal.pack(anchor="w", padx=10, pady=10)
+
+        self._hasil_simulasi_hilal_terakhir = None
+        self._perbarui_status_profil_simulasi_hilal()
+
+    def _perbarui_status_profil_simulasi_hilal(self):
+        """Sinkronkan label status profil di akordeon Simulasi Hilal dgn
+        self._hasil_cakrawala_terakhir -- state yg DIBAGI BERSAMA dgn
+        akordeon Profil Cakrawala. Dipanggil tiap kali profil itu berubah
+        (baru selesai dihitung ATAU dimuat dari Profil Tersimpan) supaya
+        label ini selalu menunjukkan profil mana yg SEBENARNYA akan
+        dipakai kalau tombol "Jalankan Simulasi Hilal" ditekan. Aman
+        dipanggil kapan saja, termasuk sebelum akordeon ini selesai
+        dibangun (mis. dari akordeon Cakrawala yang dibangun duluan)."""
+        label = getattr(self, "label_profil_simulasi_hilal", None)
+        if label is None:
+            return
+        profil = self._hasil_cakrawala_terakhir
+        if not profil:
+            label.config(text="Belum ada profil dimuat.", foreground=WARNA_PERINGATAN)
+            return
+        n_puncak = len(profil.get("puncak_berlabel", []))
+        label.config(
+            text=f"✓ Aktif: ({profil['lat']:.4f}, {profil['lon']:.4f}) -- "
+                 f"{n_puncak} puncak bernama teridentifikasi.",
+            foreground=WARNA_TEKS)
+
+    def _on_jalankan_simulasi_hilal(self):
+        profil = self._hasil_cakrawala_terakhir
+        if not profil:
+            messagebox.showwarning(
+                "Profil Cakrawala belum ada",
+                "Hitung Profil Cakrawala dulu di bagian 🏔️ Profil Cakrawala "
+                "di atas, atau muat salah satu yang sudah tersimpan lewat "
+                "tombol \"🗂️ Muat dari Profil Tersimpan...\" di bagian ini.")
+            return
+        try:
+            try:
+                hari = int(self.entry_tgl_hari_simulasi_hilal.get())
+                bulan = int(self.entry_tgl_bulan_simulasi_hilal.get())
+                tahun = int(self.entry_tgl_tahun_simulasi_hilal.get())
+                tanggal = datetime(tahun, bulan, hari)
+            except ValueError:
+                raise ValueError("Tanggal tidak valid. Pastikan hari/bulan/tahun berupa angka & tanggal ada.")
+        except ValueError as e:
+            messagebox.showerror("Input tidak valid", str(e))
+            return
+
+        zona_label = self.var_zona_simulasi_hilal.get()
+        zona_offset = dict(ZONA_WAKTU_PETA_LANGIT).get(zona_label, 7.0)
+
+        mode = self.mode.get()
+        if mode == "jpl" and self.eph is None:
+            messagebox.showwarning(
+                "Ephemeris belum siap",
+                f"Mode Presisi ({label_kernel_jpl_aktif()}) dipilih, tapi ephemeris lokalnya belum "
+                "selesai dimuat. Tunggu sebentar, atau pilih Mode Perhitungan "
+                "'Ringan' dulu (lihat bagian 🌙 Visibilitas).")
+            return
+
+        self.btn_jalankan_simulasi_hilal.config(state="disabled")
+        self.label_hasil_simulasi_hilal.config(text="Menyimulasikan... lihat log Status di atas untuk progres.")
+        self._log(f"\nMenyimulasikan hilal {tanggal.strftime('%d %B %Y')} di "
+                   f"({profil['lat']:.4f}, {profil['lon']:.4f}) thd Profil Cakrawala aktif...")
+
+        threading.Thread(
+            target=self._simulasi_hilal_thread,
+            args=(profil, tanggal, zona_offset, mode),
+            daemon=True).start()
+
+    def _simulasi_hilal_thread(self, profil, tanggal, zona_offset, mode):
+        try:
+            hasil = simulasikan_hilal(
+                profil, tanggal, zona_offset, ts=self.ts, eph=self.eph, mode=mode)
+            self.antrian.put(("simulasi_hilal_ok", (profil, hasil)))
+        except Exception as e:
+            self.antrian.put(("simulasi_hilal_error", f"Gagal menyimulasikan hilal: {e}"))
 
     # ---------------- Tab Waktu Sholat & Arah Kiblat ----------------
 
@@ -11423,6 +11824,7 @@ class HisabWinApp(tk.Tk):
                 elif jenis == "cakrawala_ok":
                     profil = payload
                     self._hasil_cakrawala_terakhir = profil
+                    self._perbarui_status_profil_simulasi_hilal()
                     n_puncak = len(profil["puncak_berlabel"])
                     teks = (f"Selesai. Sudut horizon: {profil['sudut_horizon'].min():.2f}° s/d "
                             f"{profil['sudut_horizon'].max():.2f}°.\n"
@@ -11456,6 +11858,54 @@ class HisabWinApp(tk.Tk):
                         # boleh dipakai utk data lama itu.
                         self.btn_simpan_txt_cakrawala.config(state="normal")
                         self.btn_simpan_profil_cakrawala.config(state="normal")
+
+                elif jenis == "simulasi_hilal_ok":
+                    profil, hasil = payload
+                    self._hasil_simulasi_hilal_terakhir = hasil
+                    tgl_str = hasil["tanggal"].strftime('%d %B %Y')
+
+                    def _fmt(nilai, satuan, desimal=2):
+                        return "-" if nilai is None else f"{nilai:.{desimal}f}{satuan}"
+
+                    tinggi_cakrawala = _fmt(hasil["tinggi_hilal_atas_cakrawala_saat_ghurub_cakrawala"], "°")
+                    tinggi_datar = _fmt(hasil["tinggi_hilal_atas_datar_saat_ghurub_datar"], "°")
+                    lag_cakrawala = _fmt(hasil["lag_cakrawala_menit"], " menit", 1)
+                    lag_datar = _fmt(hasil["lag_datar_menit"], " menit", 1)
+                    elongasi_ghurub = _fmt(hasil["elongasi_saat_ghurub_cakrawala"], "°")
+                    fraksi_ghurub = _fmt(hasil["fraksi_iluminasi_saat_ghurub_cakrawala"], "%")
+
+                    teks = (
+                        f"Ghurub matahari -- cakrawala nyata: "
+                        f"{_label_jam_hhmm(hasil['jam_ghurub_cakrawala'])}   |   "
+                        f"datar (0°): {_label_jam_hhmm(hasil['jam_ghurub_datar'])}\n"
+                        f"Terbenam bulan -- cakrawala nyata: "
+                        f"{_label_jam_hhmm(hasil['jam_terbenam_bulan_cakrawala'])}   |   "
+                        f"datar (0°): {_label_jam_hhmm(hasil['jam_terbenam_bulan_datar'])}\n"
+                        f"Tinggi hilal saat ghurub -- cakrawala nyata: {tinggi_cakrawala}   |   "
+                        f"datar (0°): {tinggi_datar}\n"
+                        f"Lag hilal (durasi di atas cakrawala setelah ghurub) -- nyata: "
+                        f"{lag_cakrawala}   |   datar: {lag_datar}\n"
+                        f"Elongasi saat ghurub cakrawala: {elongasi_ghurub}   |   "
+                        f"Fraksi iluminasi: {fraksi_ghurub}"
+                    )
+                    self.label_hasil_simulasi_hilal.config(text=teks)
+                    self._log(f"Simulasi Hilal {tgl_str} selesai: {teks.replace(chr(10), '  ')}")
+                    self.btn_jalankan_simulasi_hilal.config(state="normal")
+                    try:
+                        fig_sim = buat_figure_simulasi_hilal(profil, hasil)
+                        frame_sim = self._tampilkan_peta(
+                            "simulasi_hilal", f"🔭 Simulasi Hilal — {tgl_str}", fig_sim)
+                        self.notebook.select(frame_sim)
+                    except Exception as e:
+                        self._log(f"(Grafik simulasi hilal gagal ditampilkan, tapi ringkasan "
+                                   f"tetap tersedia di panel Hasil: {e})")
+                        messagebox.showerror("Gagal menampilkan grafik", str(e))
+
+                elif jenis == "simulasi_hilal_error":
+                    self._log(f"ERROR: {payload}")
+                    messagebox.showerror("Terjadi kesalahan", payload)
+                    self.label_hasil_simulasi_hilal.config(text="Gagal menyimulasikan. Lihat pesan error.")
+                    self.btn_jalankan_simulasi_hilal.config(state="normal")
 
                 elif jenis == "planetarium_ok":
                     tanggal, jam_utc, lat, lon, mode, data = payload
