@@ -6834,6 +6834,12 @@ def hitung_profil_cakrawala(lat, lon, tinggi_mata=2.0, radius_km=30, n_azimuth=1
     tidak ada mode offline). Return dict siap-pakai utk plot/simpan txt:
         {
           "lat", "lon", "tinggi_mata", "radius_km",
+          "elev_tanah": elevasi tanah (m) persis di titik pengamat,
+          "tinggi_pengamat": elev_tanah + tinggi_mata (m di atas laut) --
+              INI yang dipakai simulasikan_hilal() utk menghitung "ufuk
+              dip" (kerendahan ufuk krn tinggi pengamat, TANPA gunung/
+              bukit penghalang -- beda dgn "ufuk topo"/sudut_horizon di
+              bawah yang sudah memperhitungkan penghalang nyata),
           "azimuth": array (derajat, 0-360),
           "sudut_horizon": array (derajat elevasi, boleh negatif),
           "jarak_horizon_km": array,
@@ -6902,6 +6908,7 @@ def hitung_profil_cakrawala(lat, lon, tinggi_mata=2.0, radius_km=30, n_azimuth=1
 
     return {
         "lat": lat, "lon": lon, "tinggi_mata": tinggi_mata, "radius_km": radius_km,
+        "elev_tanah": float(elev_tanah), "tinggi_pengamat": float(tinggi_pengamat),
         "azimuth": azimuth, "sudut_horizon": sudut_horizon,
         "jarak_horizon_km": jarak_horizon / 1000.0, "elevasi_titik_m": elevasi_horizon,
         "puncak_berlabel": puncak_berlabel,
@@ -6919,6 +6926,7 @@ def simpan_profil_cakrawala_txt(path, profil):
         f.write(f"# lat={profil['lat']:.6f}\n")
         f.write(f"# lon={profil['lon']:.6f}\n")
         f.write(f"# tinggi_mata_m={profil['tinggi_mata']:.2f}\n")
+        f.write(f"# elev_tanah_m={profil.get('elev_tanah', 0.0):.2f}\n")
         f.write(f"# radius_km={profil['radius_km']:.2f}\n")
         f.write(f"# dibuat={datetime.now().isoformat(timespec='seconds')}\n")
         f.write("# kolom: azimuth_deg,sudut_horizon_deg,jarak_horizon_km,elevasi_titik_m\n")
@@ -6957,15 +6965,65 @@ def muat_profil_cakrawala_txt(path):
                 sudut_horizon.append(float(sudut))
                 jarak_horizon_km.append(float(jarak))
                 elevasi_titik_m.append(float(elev))
+    tinggi_mata = float(meta.get("tinggi_mata_m", 2.0))
+    # elev_tanah_m tidak ada di file lama (sebelum field ini ditambahkan) --
+    # default 0.0 (anggap tanah setinggi laut), TETAP LEBIH AMAN drpd
+    # mengarang angka; dip yg dihitung darinya jadi sedikit under-estimate
+    # utk profil lama yg lokasinya tinggi, tapi tidak fatal (cuma dipakai
+    # sbg garis pembanding "ufuk dip" di Simulasi Hilal). "_elev_tanah_dari_file"
+    # dicatat SUPAYA PEMANGGIL TAHU file ini perlu dilengkapi -- lihat
+    # lengkapi_elev_tanah_profil_txt() di bawah, dipanggil dari Simulasi Hilal.
+    elev_tanah_dari_file = "elev_tanah_m" in meta
+    elev_tanah = float(meta.get("elev_tanah_m", 0.0))
     return {
         "lat": float(meta.get("lat", 0.0)), "lon": float(meta.get("lon", 0.0)),
-        "tinggi_mata": float(meta.get("tinggi_mata_m", 2.0)),
+        "tinggi_mata": tinggi_mata, "elev_tanah": elev_tanah,
+        "tinggi_pengamat": tinggi_mata + elev_tanah,
+        "_elev_tanah_dari_file": elev_tanah_dari_file,
         "radius_km": float(meta.get("radius_km", 0.0)),
         "azimuth": np.array(azimuth), "sudut_horizon": np.array(sudut_horizon),
         "jarak_horizon_km": np.array(jarak_horizon_km),
         "elevasi_titik_m": np.array(elevasi_titik_m),
         "puncak_berlabel": puncak_berlabel,
     }
+
+
+def lengkapi_elev_tanah_profil_txt(path, profil, progress_cb=lambda msg: None):
+    """Kalau `profil` (hasil muat_profil_cakrawala_txt()) berasal dari file
+    .txt LAMA yang belum punya metadata elev_tanah_m (field ini baru
+    ditambahkan belakangan, dipakai menghitung "ufuk dip" di Simulasi
+    Hilal -- lihat simulasikan_hilal()), lengkapi SEKALI INI dgn mengambil
+    elevasi tanah dari sumber yg sama dgn hitung_profil_cakrawala() (AWS
+    Terrain Tiles), lalu SIMPAN BALIK ke file .txt yg sama (menimpa,
+    metadata lain & data azimuth/sudut_horizon/puncak tetap persis sama)
+    supaya tidak perlu diulang lagi tiap kali profil ini dimuat.
+
+    BUTUH INTERNET utk profil lama yg belum lengkap; kalau gagal (offline,
+    dll) profil dikembalikan APA ADANYA (elev_tanah tetap fallback 0.0,
+    TIDAK dianggap error) -- pemanggil (GUI) sebaiknya jalankan ini di
+    thread terpisah spy tidak membekukan antarmuka.
+
+    Aman dipanggil berkali-kali/dgn profil apa saja: kalau elev_tanah
+    sudah diketahui dari file (profil["_elev_tanah_dari_file"] True),
+    fungsi ini langsung return profil tanpa menyentuh internet/disk sama
+    sekali."""
+    if profil.get("_elev_tanah_dari_file", True):
+        return profil
+    try:
+        import requests
+        sesi = requests.Session()
+        progress_cb(f"Melengkapi elevasi tanah profil lama ({os.path.basename(path)})...")
+        elev_tanah = _cakrawala_ambil_elevasi(
+            [(profil["lat"], profil["lon"])], {}, sesi, progress_cb)[0]
+        profil["elev_tanah"] = float(elev_tanah)
+        profil["tinggi_pengamat"] = float(profil["tinggi_mata"]) + float(elev_tanah)
+        profil["_elev_tanah_dari_file"] = True
+        simpan_profil_cakrawala_txt(path, profil)
+        progress_cb(f"Elevasi tanah dilengkapi: {elev_tanah:.1f} m -- "
+                     f"tersimpan ke {os.path.basename(path)}.")
+    except Exception as e:
+        progress_cb(f"(Gagal melengkapi elevasi tanah profil lama, dilewati: {e})")
+    return profil
 
 
 def buat_figure_profil_cakrawala(profil):
@@ -7051,11 +7109,26 @@ def _cari_potong_turun_petang(jam_lokal, nilai):
 def simulasikan_hilal(profil, tanggal, zona_offset_jam, ts=None, eph=None,
                        mode="ringan", interval_menit=2):
     """Simulasikan posisi Matahari & Bulan sepanjang satu hari (tanggal,
-    waktu SETEMPAT di lokasi profil), dibandingkan dgn PROFIL CAKRAWALA
-    NYATA (bukan cakrawala datar 0 derajat) -- utk menjawab pertanyaan:
-    "kalau ada gunung/bukit di arah hilal, apakah hilal itu (dan
-    Matahari saat ghurub) masih di atas garis cakrawala yg BENAR-BENAR
-    terlihat, dan berapa lama?"
+    waktu SETEMPAT di lokasi profil), dibandingkan dgn TIGA definisi ufuk
+    sekaligus -- bukan cuma cakrawala datar 0 derajat spt kriteria hisab
+    pada umumnya, dan bukan cuma cakrawala topografi nyata:
+
+      1. "astro"  -- ufuk ASTRONOMIS: bidang datar 0 derajat, definisi
+                     buku teks/kriteria hisab pada umumnya (elevasi mata
+                     laut, tanpa kerendahan ufuk, tanpa penghalang).
+      2. "dip"    -- ufuk astronomis DIKOREKSI kerendahan ufuk (dip) krn
+                     tinggi pengamat (profil['tinggi_pengamat'], m di atas
+                     laut) -- msh ufuk laut/rata idealnya, TANPA gunung/
+                     bukit penghalang, cuma efek geometris "makin tinggi
+                     mata makin jauh & makin rendah cakrawala nampak".
+      3. "topo"   -- ufuk TOPOGRAFI NYATA dari Profil Cakrawala (bisa
+                     lebih tinggi dari ufuk dip kalau ada gunung/bukit/
+                     gedung yg menghalangi arah tsb).
+
+    Ketiganya dipakai menjawab pertanyaan: "matahari/hilal terbenam jam
+    berapa & di ketinggian berapa, kalau dibandingkan definisi ufuk yang
+    mana?", dan berapa DAZ/ArcV/ArcL (parameter kriteria visibilitas
+    hilal ala Yallop/Odeh/MABIMS) pada masing-masing momen ghurub itu.
 
     profil: dict hasil hitung_profil_cakrawala() / muat_profil_cakrawala_txt()
             -- WAJIB, tanpa ini simulasi tidak bisa jalan sama sekali
@@ -7068,16 +7141,32 @@ def simulasikan_hilal(profil, tanggal, zona_offset_jam, ts=None, eph=None,
       "jam_lokal", "az_matahari", "alt_matahari", "az_bulan", "alt_bulan",
       "horizon_di_az_matahari", "horizon_di_az_bulan",
       "tinggi_relatif_matahari", "tinggi_relatif_bulan"   (semua array,
-          "tinggi_relatif_*" = altitude - sudut cakrawala nyata di azimuth
-          benda itu; positif berarti masih di atas cakrawala yg terlihat)
-      "jam_ghurub_datar", "jam_ghurub_cakrawala"   (jam desimal / None)
-      "jam_terbenam_bulan_datar", "jam_terbenam_bulan_cakrawala"
-      "tinggi_hilal_atas_cakrawala_saat_ghurub_cakrawala"  (derajat / None)
-      "tinggi_hilal_atas_datar_saat_ghurub_datar"          (derajat / None)
-      "az_bulan_saat_ghurub_cakrawala", "elongasi_saat_ghurub_cakrawala"
-      "fraksi_iluminasi_saat_ghurub_cakrawala"
-      "lag_cakrawala_menit", "lag_datar_menit"  (durasi hilal masih di atas
-          cakrawala SETELAH matahari terbenam, versi nyata vs versi datar)
+          "tinggi_relatif_*" = altitude - sudut cakrawala TOPO nyata di
+          azimuth benda itu; positif berarti masih di atas cakrawala yg
+          terlihat)
+      "dip_derajat"  -- kerendahan ufuk (derajat) dari tinggi_pengamat
+      "ghurub": {"astro": {...}, "dip": {...}, "topo": {...}}  -- tiap
+          entri dict berisi:
+            "label"            -- nama definisi ufuk (utk legenda/teks)
+            "jam_ghurub"       -- jam desimal lokal matahari "terbenam"
+                                  menurut definisi ufuk ini (None kalau
+                                  tak terjadi hari itu)
+            "jam_terbenam_bulan", "lag_menit"  -- jam bulan/hilal ikut
+                                  "terbenam" di ufuk yg sama, & selisihnya
+                                  (menit) thd jam_ghurub (durasi hilal
+                                  msh di atas ufuk itu SETELAH ghurub)
+            "tinggi_hilal"     -- tinggi hilal DI ATAS GARIS UFUK ini
+                                  (derajat), persis saat jam_ghurub
+            "az_matahari", "alt_matahari", "az_bulan", "alt_bulan"
+                               -- posisi masing2 benda persis saat
+                                  jam_ghurub
+            "daz"   -- DAZ  = Az bulan - Az matahari (derajat, +/-)
+            "arcv"  -- ArcV = Alt bulan - Alt matahari, alias "selisih
+                       tinggi" (derajat, +/-)
+            "arcl"  -- ArcL = elongasi/sudut pisah geosentris Bulan-
+                       Matahari (derajat, selalu positif) -- sama definisi
+                       dgn "elongasi" di tabel efemeris
+            "fraksi_iluminasi" -- fraksi piringan bulan yg terang (%)
     """
     lat, lon = profil["lat"], profil["lon"]
     tabel = hitung_tabel_efemeris(
@@ -7097,31 +7186,61 @@ def simulasikan_hilal(profil, tanggal, zona_offset_jam, ts=None, eph=None,
     tinggi_relatif_sun = alt_sun - horizon_sun
     tinggi_relatif_moon = alt_moon - horizon_moon
 
-    jam_ghurub_datar = _cari_potong_turun_petang(jam_lokal, alt_sun)
-    jam_ghurub_cakrawala = _cari_potong_turun_petang(jam_lokal, tinggi_relatif_sun)
-    jam_terbenam_bulan_datar = _cari_potong_turun_petang(jam_lokal, alt_moon)
-    jam_terbenam_bulan_cakrawala = _cari_potong_turun_petang(jam_lokal, tinggi_relatif_moon)
+    # Kerendahan ufuk (dip) dari tinggi pengamat -- formula standar yg sama
+    # dipakai di hitung_waktu_sholat (0.0347*sqrt(tinggi_m)). Profil lama
+    # (sblm field ini ada) fallback ke tinggi_mata saja lwt muat_profil_
+    # cakrawala_txt(), jadi .get() di sini cuma jaring pengaman tambahan.
+    tinggi_pengamat = float(profil.get("tinggi_pengamat", profil.get("tinggi_mata", 2.0)) or 0.0)
+    dip_derajat = 0.0347 * math.sqrt(max(tinggi_pengamat, 0.0))
 
     def _pada_jam(jam_target, arr):
         return float(np.interp(jam_target, jam_lokal, arr)) if jam_target is not None else None
 
-    tinggi_hilal_cakrawala = None
-    if jam_ghurub_cakrawala is not None:
-        alt_m = _pada_jam(jam_ghurub_cakrawala, alt_moon)
-        hor_m = _pada_jam(jam_ghurub_cakrawala, horizon_moon)
-        tinggi_hilal_cakrawala = alt_m - hor_m
+    def _ringkas_ghurub(jam_g, jam_terbenam_bulan, tinggi_hilal, label):
+        if jam_g is None:
+            return {
+                "label": label, "jam_ghurub": None, "jam_terbenam_bulan": None,
+                "lag_menit": None, "tinggi_hilal": None,
+                "az_matahari": None, "alt_matahari": None,
+                "az_bulan": None, "alt_bulan": None,
+                "daz": None, "arcv": None, "arcl": None, "fraksi_iluminasi": None,
+            }
+        az_s, alt_s = _pada_jam(jam_g, az_sun), _pada_jam(jam_g, alt_sun)
+        az_b, alt_b = _pada_jam(jam_g, az_moon), _pada_jam(jam_g, alt_moon)
+        lag_menit = ((jam_terbenam_bulan - jam_g) * 60.0
+                     if jam_terbenam_bulan is not None else None)
+        return {
+            "label": label, "jam_ghurub": jam_g, "jam_terbenam_bulan": jam_terbenam_bulan,
+            "lag_menit": lag_menit, "tinggi_hilal": tinggi_hilal,
+            "az_matahari": az_s, "alt_matahari": alt_s, "az_bulan": az_b, "alt_bulan": alt_b,
+            "daz": ((az_b - az_s + 180.0) % 360.0) - 180.0, "arcv": alt_b - alt_s,
+            "arcl": _pada_jam(jam_g, elong), "fraksi_iluminasi": _pada_jam(jam_g, frac_illum),
+        }
 
-    tinggi_hilal_datar = None
-    if jam_ghurub_datar is not None:
-        tinggi_hilal_datar = _pada_jam(jam_ghurub_datar, alt_moon)
+    # -- 1. Ufuk astronomis (datar 0 derajat) --
+    jam_ghurub_astro = _cari_potong_turun_petang(jam_lokal, alt_sun)
+    jam_terbenam_bulan_astro = _cari_potong_turun_petang(jam_lokal, alt_moon)
+    tinggi_hilal_astro = _pada_jam(jam_ghurub_astro, alt_moon) if jam_ghurub_astro is not None else None
+    ghurub_astro = _ringkas_ghurub(jam_ghurub_astro, jam_terbenam_bulan_astro,
+                                    tinggi_hilal_astro, "Ufuk Astronomis (datar 0°)")
 
-    lag_cakrawala_menit = None
-    if jam_ghurub_cakrawala is not None and jam_terbenam_bulan_cakrawala is not None:
-        lag_cakrawala_menit = (jam_terbenam_bulan_cakrawala - jam_ghurub_cakrawala) * 60.0
+    # -- 2. Ufuk dip (datar - kerendahan ufuk, tanpa penghalang nyata) --
+    jam_ghurub_dip = _cari_potong_turun_petang(jam_lokal, alt_sun + dip_derajat)
+    jam_terbenam_bulan_dip = _cari_potong_turun_petang(jam_lokal, alt_moon + dip_derajat)
+    tinggi_hilal_dip = (_pada_jam(jam_ghurub_dip, alt_moon) + dip_derajat
+                         if jam_ghurub_dip is not None else None)
+    ghurub_dip = _ringkas_ghurub(jam_ghurub_dip, jam_terbenam_bulan_dip, tinggi_hilal_dip,
+                                  f"Ufuk Dip (kerendahan ufuk {dip_derajat:.3f}°)")
 
-    lag_datar_menit = None
-    if jam_ghurub_datar is not None and jam_terbenam_bulan_datar is not None:
-        lag_datar_menit = (jam_terbenam_bulan_datar - jam_ghurub_datar) * 60.0
+    # -- 3. Ufuk topografi nyata (Profil Cakrawala) --
+    jam_ghurub_topo = _cari_potong_turun_petang(jam_lokal, tinggi_relatif_sun)
+    jam_terbenam_bulan_topo = _cari_potong_turun_petang(jam_lokal, tinggi_relatif_moon)
+    tinggi_hilal_topo = None
+    if jam_ghurub_topo is not None:
+        tinggi_hilal_topo = (_pada_jam(jam_ghurub_topo, alt_moon)
+                              - _pada_jam(jam_ghurub_topo, horizon_moon))
+    ghurub_topo = _ringkas_ghurub(jam_ghurub_topo, jam_terbenam_bulan_topo, tinggi_hilal_topo,
+                                   "Ufuk Topografi (cakrawala nyata)")
 
     return {
         "lat": lat, "lon": lon, "tanggal": tanggal, "zona_offset_jam": zona_offset_jam,
@@ -7130,15 +7249,8 @@ def simulasikan_hilal(profil, tanggal, zona_offset_jam, ts=None, eph=None,
         "horizon_di_az_matahari": horizon_sun, "horizon_di_az_bulan": horizon_moon,
         "tinggi_relatif_matahari": tinggi_relatif_sun, "tinggi_relatif_bulan": tinggi_relatif_moon,
         "elongasi": elong, "fraksi_iluminasi": frac_illum,
-        "jam_ghurub_datar": jam_ghurub_datar, "jam_ghurub_cakrawala": jam_ghurub_cakrawala,
-        "jam_terbenam_bulan_datar": jam_terbenam_bulan_datar,
-        "jam_terbenam_bulan_cakrawala": jam_terbenam_bulan_cakrawala,
-        "tinggi_hilal_atas_cakrawala_saat_ghurub_cakrawala": tinggi_hilal_cakrawala,
-        "tinggi_hilal_atas_datar_saat_ghurub_datar": tinggi_hilal_datar,
-        "az_bulan_saat_ghurub_cakrawala": _pada_jam(jam_ghurub_cakrawala, az_moon),
-        "elongasi_saat_ghurub_cakrawala": _pada_jam(jam_ghurub_cakrawala, elong),
-        "fraksi_iluminasi_saat_ghurub_cakrawala": _pada_jam(jam_ghurub_cakrawala, frac_illum),
-        "lag_cakrawala_menit": lag_cakrawala_menit, "lag_datar_menit": lag_datar_menit,
+        "dip_derajat": dip_derajat,
+        "ghurub": {"astro": ghurub_astro, "dip": ghurub_dip, "topo": ghurub_topo},
     }
 
 
@@ -7154,26 +7266,44 @@ def _label_jam_hhmm(jam_desimal):
     return f"{h:02d}:{m:02d}"
 
 
+
+# Gaya visual (warna) tiap definisi ufuk -- dipakai konsisten di garis
+# horizontal ufuk itu sendiri MAUPUN penanda Matahari/Bulan yang mengacu
+# ke definisi tsb, supaya gampang dikaitkan sekilas pandang.
+_GAYA_UFUK = {
+    "astro": {"warna": "#2563EB", "linestyle": "--"},   # biru -- ufuk datar 0°
+    "dip":   {"warna": "#7C3AED", "linestyle": ":"},    # ungu -- ufuk dip
+    "topo":  {"warna": "#111827", "linestyle": "-"},    # nyaris hitam -- ufuk topografi nyata
+}
+
+
 def buat_figure_simulasi_hilal(profil, hasil):
     """Figure panorama cakrawala (spt buat_figure_profil_cakrawala) DI-ZOOM
     ke sekitar azimuth terbenam Matahari & Bulan, dgn jejak lintasan &
-    penanda posisi Matahari/Bulan persis saat "ghurub cakrawala" (matahari
-    terbenam di balik garis cakrawala NYATA)."""
+    TIGA penanda posisi Matahari/Bulan persis saat ghurub -- satu utk
+    tiap definisi ufuk (astronomis datar 0°, dip, & topografi nyata),
+    masing2 diberi warna sendiri (lihat _GAYA_UFUK) supaya bisa
+    dibandingkan langsung di satu grafik."""
     import matplotlib.pyplot as plt
     from matplotlib.ticker import MultipleLocator
 
     azimuth = profil["azimuth"]
     sudut_horizon = profil["sudut_horizon"]
-    jam_ghurub = hasil["jam_ghurub_cakrawala"] if hasil["jam_ghurub_cakrawala"] is not None \
-        else hasil["jam_ghurub_datar"]
+    puncak_berlabel = profil.get("puncak_berlabel", [])
+    ghurub = hasil["ghurub"]
+    dip_derajat = hasil["dip_derajat"]
 
-    # Jendela waktu yg digambar: dari 30 menit sebelum ghurub datar s.d.
-    # 20 menit setelah bulan terbenam (cakrawala nyata ATAU datar, mana yg
-    # lebih lama) -- supaya seluruh peristiwa penting kelihatan.
-    j0 = (hasil["jam_ghurub_datar"] or jam_ghurub or 18.0) - 0.5
-    kandidat_akhir = [t for t in (hasil["jam_terbenam_bulan_cakrawala"],
-                                   hasil["jam_terbenam_bulan_datar"]) if t is not None]
-    j1 = (max(kandidat_akhir) if kandidat_akhir else (jam_ghurub or 18.0) + 1.0) + 0.33
+    jam_ghurub_semua = [g["jam_ghurub"] for g in ghurub.values() if g["jam_ghurub"] is not None]
+    jam_terbenam_semua = [g["jam_terbenam_bulan"] for g in ghurub.values()
+                           if g["jam_terbenam_bulan"] is not None]
+
+    # Jendela waktu yg digambar: dari 30 menit sebelum ghurub PALING AWAL
+    # (biasanya ufuk dip/astro) s.d. 20 menit setelah bulan "terbenam"
+    # PALING AKHIR (biasanya ufuk topo, kalau terhalang gunung/bukit) --
+    # supaya ketiga peristiwa ghurub kelihatan semua.
+    j0 = (min(jam_ghurub_semua) if jam_ghurub_semua else 18.0) - 0.5
+    kandidat_akhir = jam_terbenam_semua + jam_ghurub_semua
+    j1 = (max(kandidat_akhir) if kandidat_akhir else 19.0) + 0.33
 
     mask_waktu = (hasil["jam_lokal"] >= j0) & (hasil["jam_lokal"] <= j1)
     az_sun_w = hasil["az_matahari"][mask_waktu]
@@ -7181,38 +7311,84 @@ def buat_figure_simulasi_hilal(profil, hasil):
     az_moon_w = hasil["az_bulan"][mask_waktu]
     alt_moon_w = hasil["alt_bulan"][mask_waktu]
 
-    az_tengah = hasil["az_bulan_saat_ghurub_cakrawala"] or float(np.median(az_moon_w)) \
-        if len(az_moon_w) else 270.0
-    lebar_zoom = 20.0
+    # Pusat zoom azimuth: pakai posisi Bulan saat ghurub topo (paling
+    # representatif -- itu yg "sungguhan" akan dicoba dilihat pengamat),
+    # fallback ke dip lalu astro, baru ke median lintasan Bulan.
+    az_tengah = None
+    for kunci in ("topo", "dip", "astro"):
+        if ghurub[kunci]["az_bulan"] is not None:
+            az_tengah = ghurub[kunci]["az_bulan"]
+            break
+    if az_tengah is None:
+        az_tengah = float(np.median(az_moon_w)) if len(az_moon_w) else 270.0
+    # Jendela zoom azimuth diperlebar (dari dahulu ±20° jadi ±45°) supaya
+    # lebih banyak kontur cakrawala nyata ikut tampil sbg patokan visual,
+    # tidak cuma sepotong kecil di sekitar titik ghurub.
+    lebar_zoom = 45.0
     az_min, az_max = az_tengah - lebar_zoom, az_tengah + lebar_zoom
 
-    y_min = np.floor(sudut_horizon.min()) - 1
+    y_min = min(np.floor(sudut_horizon.min()) - 1, np.floor(-dip_derajat) - 1)
     y_max_kandidat = [sudut_horizon.max()]
     if len(alt_moon_w):
         y_max_kandidat.append(np.nanmax(alt_moon_w))
     if len(alt_sun_w):
         y_max_kandidat.append(np.nanmax(alt_sun_w))
-    y_max = np.ceil(max(y_max_kandidat)) + 2
+    # Puncak/gunung berlabel yg jatuh di dalam jendela zoom azimuth saja
+    # (di luar itu tak relevan krn tak akan terlihat di plot yg sudah
+    # di-zoom ini) -- dipakai utk kasih label nama gunung spt di Profil
+    # Cakrawala, supaya konturnya juga bisa dikenali "ini gunung apa".
+    puncak_terlihat = [(az, sudut, nama) for (az, sudut, nama) in puncak_berlabel
+                        if az_min <= az <= az_max]
 
-    fig, ax = plt.subplots(figsize=(9, 5))
-    ax.plot(azimuth, sudut_horizon, color="dimgray", linewidth=1.2)
+    y_max = np.ceil(max(y_max_kandidat)) + 2 + (3.5 if puncak_terlihat else 0)
+
+    # Figure dibuat lebih landscape/wide (16:6.5) -- sebelumnya 11x5.5 hampir
+    # persegi, dan area plotnya sendiri masih dipangkas jadi 66% lebar oleh
+    # tight_layout(rect=...) demi memberi tempat legenda di kanan. Sekarang
+    # legenda dipindah ke BAWAH (lihat ax.legend di akhir fungsi ini) supaya
+    # seluruh lebar figure dipakai utk plot, bukan dimakan legenda.
+    fig, ax = plt.subplots(figsize=(16, 6.5))
+    h_topo, = ax.plot(azimuth, sudut_horizon, color=_GAYA_UFUK["topo"]["warna"], linewidth=1.2,
+                       label="Ufuk topografi (cakrawala nyata)")
     ax.fill_between(azimuth, sudut_horizon, y_min, color="#8B7355", alpha=0.6)
-    ax.axhline(0, color="blue", linestyle="--", linewidth=0.8, alpha=0.5, label="Cakrawala datar (0°)")
 
-    ax.plot(az_sun_w, alt_sun_w, color="#D97706", linewidth=1.6, label="Lintasan Matahari")
-    ax.plot(az_moon_w, alt_moon_w, color="#1D4ED8", linewidth=1.6, label="Lintasan Bulan (hilal)")
+    # Label nama gunung/puncak (spt di Profil Cakrawala) -- garis tegak
+    # tipis dari kontur ke atas + nama miring, hanya utk puncak yg jatuh
+    # di dalam jendela zoom ini supaya tidak bertumpuk penuh di plot yg
+    # sempit.
+    for az, sudut, nama in puncak_terlihat:
+        ax.plot([az, az], [sudut, sudut + 1.2], color="black", linewidth=0.6, alpha=0.7)
+        ax.text(az, sudut + 1.4, nama, rotation=75, ha="left", va="bottom", fontsize=7)
+    h_astro0 = ax.axhline(0, color=_GAYA_UFUK["astro"]["warna"], linestyle=_GAYA_UFUK["astro"]["linestyle"],
+                           linewidth=1.0, alpha=0.7, label="Ufuk astronomis (datar 0°)")
+    h_dip0 = ax.axhline(-dip_derajat, color=_GAYA_UFUK["dip"]["warna"], linestyle=_GAYA_UFUK["dip"]["linestyle"],
+                         linewidth=1.2, alpha=0.8, label=f"Ufuk dip (kerendahan {dip_derajat:.2f}°)")
 
-    if hasil["jam_ghurub_cakrawala"] is not None:
-        az_g = float(np.interp(hasil["jam_ghurub_cakrawala"], hasil["jam_lokal"], hasil["az_matahari"]))
-        y_g = float(_interpolasi_horizon_cakrawala(profil, np.array([az_g]))[0])
-        ax.plot(az_g, y_g, "o", color="#D97706",
-                markersize=9, markeredgecolor="black", zorder=5,
-                label=f"Matahari saat ghurub cakrawala ({_label_jam_hhmm(hasil['jam_ghurub_cakrawala'])})")
-        az_m = hasil["az_bulan_saat_ghurub_cakrawala"]
-        alt_m = float(np.interp(hasil["jam_ghurub_cakrawala"], hasil["jam_lokal"], hasil["alt_bulan"]))
-        ax.plot(az_m, alt_m, "*", color="#FDE68A", markersize=16, markeredgecolor="black", zorder=6,
-                label=f"Hilal saat ghurub cakrawala (tinggi {hasil['tinggi_hilal_atas_cakrawala_saat_ghurub_cakrawala']:.2f}° "
-                      "di atas cakrawala nyata)")
+    h_lintas_matahari, = ax.plot(az_sun_w, alt_sun_w, color="#D97706", linewidth=1.4, alpha=0.8,
+                                  label="Lintasan Matahari")
+    h_lintas_bulan, = ax.plot(az_moon_w, alt_moon_w, color="#1D4ED8", linewidth=1.4, alpha=0.8,
+                               label="Lintasan Bulan (hilal)")
+
+    # Handle & label penanda ☉ (Matahari) dan ☾ (Bulan/hilal) DIPISAH ke dua
+    # daftar sendiri (bukan digabung urut per kunci ufuk spt sebelumnya)
+    # supaya nanti bisa dikelompokkan jadi kolom legenda sendiri2: satu
+    # kolom khusus Matahari, satu kolom khusus Bulan -- tidak lagi
+    # berselang-seling/acak spt sebelumnya.
+    handles_matahari, handles_bulan = [], []
+    for kunci in ("astro", "dip", "topo"):
+        g = ghurub[kunci]
+        if g["jam_ghurub"] is None:
+            continue
+        warna_tepi = _GAYA_UFUK[kunci]["warna"]
+        h_sun, = ax.plot(g["az_matahari"], g["alt_matahari"], "o", color="#D97706", markersize=9,
+                          markeredgecolor=warna_tepi, markeredgewidth=1.8, zorder=5,
+                          label=f"☉ {g['label']} — ghurub {_label_jam_hhmm(g['jam_ghurub'])}")
+        h_moon, = ax.plot(g["az_bulan"], g["alt_bulan"], "o", color="#F8FAFC", markersize=9,
+                           markeredgecolor=warna_tepi, markeredgewidth=1.8, zorder=6,
+                           label=f"☾ {g['label']} — tinggi hilal {g['tinggi_hilal']:.2f}°, "
+                                 f"DAZ {g['daz']:+.2f}°, ArcV {g['arcv']:+.2f}°, ArcL {g['arcl']:.2f}°")
+        handles_matahari.append(h_sun)
+        handles_bulan.append(h_moon)
 
     ax.set_xlim(max(0, az_min), min(360, az_max))
     ax.set_ylim(y_min, y_max)
@@ -7224,8 +7400,45 @@ def buat_figure_simulasi_hilal(profil, hasil):
     tgl = hasil["tanggal"]
     ax.set_title(f"Simulasi Hilal — {tgl.day:02d}-{tgl.month:02d}-{tgl.year} — "
                  f"({profil['lat']:.4f}, {profil['lon']:.4f})")
-    ax.legend(loc="upper right", fontsize=7)
-    fig.tight_layout()
+    # Legenda dipindah ke BAWAH plot (horizontal, 3 kolom) -- sebelumnya di
+    # kanan (bbox_to_anchor=(1.01,1.0)) yg memaksa area plot dipangkas jadi
+    # cuma 66% lebar figure (lihat tight_layout lama). Dgn legenda di bawah,
+    # seluruh lebar figure yg sudah landscape dipakai penuh utk area plot,
+    # jadi kontur cakrawala kelihatan lebih luas sbg patokan.
+    # --- Legenda disusun MANUAL jadi 3 kolom berkelompok -------------------
+    # Sebelumnya ax.legend() otomatis mengambil handle sesuai urutan
+    # ax.plot()/axhline() dipanggil, lalu matplotlib mengisi legenda kolom
+    # demi kolom (bukan per kategori) -- hasilnya kolom 1/2/3 isinya
+    # campur-aduk ufuk, Matahari, & Bulan tidak beraturan, susah dibaca.
+    # Di bawah ini kita paksa 3 kolom yg masing2 SATU KATEGORI penuh:
+    #   kolom 1 = garis ufuk & lintasan (referensi)
+    #   kolom 2 = semua penanda ☉ Matahari
+    #   kolom 3 = semua penanda ☾ Bulan/hilal
+    # dgn baris "placeholder" kosong (handle tak-tampak) sbg penyeimbang
+    # tinggi kolom, krn ax.legend() mengisi berurutan turun per-kolom dulu
+    # baru pindah ke kolom berikutnya -- jadi ukuran tiap grup HARUS sama
+    # panjang supaya jatuh persis satu kolom, tidak nyerempet ke kolom lain.
+    from matplotlib.lines import Line2D
+
+    def _placeholder(label=""):
+        return Line2D([], [], color="none", label=label)
+
+    kolom_ufuk = [h_topo, h_astro0, h_dip0, h_lintas_matahari, h_lintas_bulan]
+    kolom_matahari = list(handles_matahari)
+    kolom_bulan = list(handles_bulan)
+
+    tinggi_kolom = max(len(kolom_ufuk), len(kolom_matahari), len(kolom_bulan))
+    for kolom in (kolom_ufuk, kolom_matahari, kolom_bulan):
+        while len(kolom) < tinggi_kolom:
+            kolom.append(_placeholder())
+
+    handles_urut = kolom_ufuk + kolom_matahari + kolom_bulan
+    labels_urut = [h.get_label() for h in handles_urut]
+
+    ax.legend(handles=handles_urut, labels=labels_urut, loc="upper center",
+              bbox_to_anchor=(0.5, -0.14), ncol=3, fontsize=7.5,
+              borderaxespad=0, frameon=True, handletextpad=0.6, columnspacing=1.4)
+    fig.tight_layout(rect=(0.0, 0.20, 1.0, 1.0))
     return fig
 
 
@@ -10611,17 +10824,24 @@ class HisabWinApp(tk.Tk):
     #  keduanya sama-sama mengisi variabel yang sama.) ---
     def _bangun_akordeon_simulasi_hilal(self, body, pad):
         """Isi badan akordeon "🔭 Simulasi Hilal": bandingkan posisi
-        Matahari & Bulan sepanjang sore/malam hari tertentu terhadap
-        Profil Cakrawala NYATA (bukan cakrawala datar 0° spt kriteria
-        hisab pada umumnya) -- menjawab "kalau ada gunung/bukit di arah
+        Matahari & Bulan sepanjang sore/malam hari tertentu terhadap TIGA
+        definisi ufuk sekaligus -- astronomis (datar 0°), dip (datar
+        dikoreksi kerendahan ufuk krn tinggi pengamat), & topografi nyata
+        dari Profil Cakrawala -- sekaligus DAZ/ArcV/ArcL (parameter
+        kriteria visibilitas hilal ala Yallop/Odeh) persis saat ghurub
+        tiap definisi ufuk itu. Menjawab "kalau ada gunung/bukit di arah
         hilal, apakah hilal & matahari saat ghurub masih di atas garis
-        cakrawala yg BENAR-BENAR terlihat, dan berapa lama?"."""
+        cakrawala yg BENAR-BENAR terlihat, dan berapa lama -- dibandingkan
+        definisi ufuk yang lebih ideal/teoretis?"."""
 
         ttk.Label(
             body,
             text="Simulasikan posisi Matahari & Bulan sepanjang sore/malam "
-                 "hari tertentu, dibandingkan dgn Profil Cakrawala NYATA "
-                 "(bukan cakrawala datar 0°) -- utk melihat apakah hilal "
+                 "hari tertentu terhadap TIGA garis ufuk sekaligus: "
+                 "astronomis (datar 0°), dip (kerendahan ufuk krn tinggi "
+                 "pengamat), & topografi nyata dari Profil Cakrawala -- "
+                 "lengkap dgn DAZ, ArcV (selisih tinggi), & ArcL (elongasi) "
+                 "persis saat ghurub tiap ufuk. Utk melihat apakah hilal "
                  "masih di atas horizon yang sungguhan terlihat, walau "
                  "terhalang gunung/bukit sekalipun.",
             font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left",
@@ -10773,7 +10993,11 @@ class HisabWinApp(tk.Tk):
 
     def _on_pilih_profil_simulasi_hilal(self, event=None):
         """Begitu user memilih 1 item combobox, LANGSUNG muat profilnya --
-        tanpa dialog, tanpa langkah tambahan apa pun."""
+        tanpa dialog, tanpa langkah tambahan apa pun. Kalau file-nya
+        profil LAMA yang belum punya elev_tanah (dipakai utk "ufuk dip"),
+        profil TETAP langsung dipakai apa adanya (fallback elev_tanah=0.0,
+        tidak memblokir UI), sambil sekalian dilengkapi & disimpan balik
+        di latar belakang -- lihat _lengkapi_elev_tanah_simulasi_hilal_thread."""
         label = self.var_pilih_profil_simulasi_hilal.get()
         path = self._peta_label_ke_path_profil_simulasi_hilal.get(label)
         if not path:
@@ -10786,6 +11010,21 @@ class HisabWinApp(tk.Tk):
         self._hasil_cakrawala_terakhir = profil
         self._perbarui_status_profil_simulasi_hilal()
         self._log(f"Profil Cakrawala dipilih utk Simulasi Hilal: {os.path.basename(path)}")
+
+        if not profil.get("_elev_tanah_dari_file", True):
+            self._log("  (profil lama, belum ada data elevasi tanah -- melengkapi "
+                       "otomatis di latar belakang, butuh internet...)")
+            threading.Thread(
+                target=self._lengkapi_elev_tanah_simulasi_hilal_thread,
+                args=(path, profil), daemon=True).start()
+
+    def _lengkapi_elev_tanah_simulasi_hilal_thread(self, path, profil):
+        try:
+            progress_cb = lambda msg: self.antrian.put(("progress", msg))
+            profil_lengkap = lengkapi_elev_tanah_profil_txt(path, profil, progress_cb=progress_cb)
+            self.antrian.put(("elev_tanah_dilengkapi", (path, profil_lengkap)))
+        except Exception as e:
+            self.antrian.put(("progress", f"(Gagal melengkapi elevasi tanah profil: {e})"))
 
     def _on_cari_ijtimak_simulasi_hilal(self):
         teks_tahun = self.entry_tahun_simulasi_hilal.get().strip()
@@ -11841,6 +12080,19 @@ class HisabWinApp(tk.Tk):
                 elif jenis == "progress":
                     self._log(payload)
 
+                elif jenis == "elev_tanah_dilengkapi":
+                    # Hasil pelengkapan elev_tanah profil LAMA di latar
+                    # belakang (lihat _lengkapi_elev_tanah_simulasi_hilal_thread).
+                    # profil_lengkap adalah OBJEK DICT YANG SAMA dgn yang
+                    # sudah dipasang ke self._hasil_cakrawala_terakhir saat
+                    # dipilih (dimutasi in-place kalau berhasil) -- cek
+                    # identitasnya dulu, supaya kalau user sempat ganti ke
+                    # profil lain sementara pelengkapan berjalan, status
+                    # yg lagi tampil TIDAK ikut ketimpa oleh profil lama itu.
+                    path, profil_lengkap = payload
+                    if self._hasil_cakrawala_terakhir is profil_lengkap:
+                        self._perbarui_status_profil_simulasi_hilal()
+
                 elif jenis == "grid_global_ok":
                     # Peta global (MABIMS & Muhammadiyah / PKG 1-PKG 2) siap
                     # duluan -- langsung ditampilkan di sini, TIDAK menunggu
@@ -11969,29 +12221,35 @@ class HisabWinApp(tk.Tk):
                     self._hasil_simulasi_hilal_terakhir = hasil
                     tgl_str = hasil["tanggal"].strftime('%d %B %Y')
 
-                    def _fmt(nilai, satuan, desimal=2):
-                        return "-" if nilai is None else f"{nilai:.{desimal}f}{satuan}"
+                    def _fmt(nilai, satuan="°", desimal=2, tanda=False):
+                        if nilai is None:
+                            return "-"
+                        fstr = f"{{:+.{desimal}f}}" if tanda else f"{{:.{desimal}f}}"
+                        return fstr.format(nilai) + satuan
 
-                    tinggi_cakrawala = _fmt(hasil["tinggi_hilal_atas_cakrawala_saat_ghurub_cakrawala"], "°")
-                    tinggi_datar = _fmt(hasil["tinggi_hilal_atas_datar_saat_ghurub_datar"], "°")
-                    lag_cakrawala = _fmt(hasil["lag_cakrawala_menit"], " menit", 1)
-                    lag_datar = _fmt(hasil["lag_datar_menit"], " menit", 1)
-                    elongasi_ghurub = _fmt(hasil["elongasi_saat_ghurub_cakrawala"], "°")
-                    fraksi_ghurub = _fmt(hasil["fraksi_iluminasi_saat_ghurub_cakrawala"], "%")
-
+                    _IKON_UFUK = {"astro": "🌐", "dip": "📐", "topo": "🏔️"}
+                    blok = []
+                    for kunci in ("astro", "dip", "topo"):
+                        g = hasil["ghurub"][kunci]
+                        blok.append(
+                            f"{_IKON_UFUK[kunci]} {g['label']}\n"
+                            f"  Ghurub: {_label_jam_hhmm(g['jam_ghurub'])}   |   "
+                            f"Bulan terbenam: {_label_jam_hhmm(g['jam_terbenam_bulan'])}   |   "
+                            f"Lag: {_fmt(g['lag_menit'], ' menit', 1)}\n"
+                            f"  Tinggi hilal: {_fmt(g['tinggi_hilal'])}   |   "
+                            f"DAZ: {_fmt(g['daz'], tanda=True)}   |   "
+                            f"ArcV: {_fmt(g['arcv'], tanda=True)}   |   "
+                            f"ArcL: {_fmt(g['arcl'])}   |   "
+                            f"Iluminasi: {_fmt(g['fraksi_iluminasi'], '%', 1)}"
+                        )
                     teks = (
-                        f"Ghurub matahari -- cakrawala nyata: "
-                        f"{_label_jam_hhmm(hasil['jam_ghurub_cakrawala'])}   |   "
-                        f"datar (0°): {_label_jam_hhmm(hasil['jam_ghurub_datar'])}\n"
-                        f"Terbenam bulan -- cakrawala nyata: "
-                        f"{_label_jam_hhmm(hasil['jam_terbenam_bulan_cakrawala'])}   |   "
-                        f"datar (0°): {_label_jam_hhmm(hasil['jam_terbenam_bulan_datar'])}\n"
-                        f"Tinggi hilal saat ghurub -- cakrawala nyata: {tinggi_cakrawala}   |   "
-                        f"datar (0°): {tinggi_datar}\n"
-                        f"Lag hilal (durasi di atas cakrawala setelah ghurub) -- nyata: "
-                        f"{lag_cakrawala}   |   datar: {lag_datar}\n"
-                        f"Elongasi saat ghurub cakrawala: {elongasi_ghurub}   |   "
-                        f"Fraksi iluminasi: {fraksi_ghurub}"
+                        f"Kerendahan ufuk (dip): {_fmt(hasil['dip_derajat'], '°', 3)} "
+                        f"(dari tinggi pengamat {profil.get('tinggi_pengamat', profil.get('tinggi_mata', '-'))} m)\n\n"
+                        + "\n\n".join(blok) +
+                        "\n\nDAZ = beda azimuth Bulan-Matahari, ArcV = beda tinggi "
+                        "(selisih altitude) Bulan-Matahari, ArcL = elongasi/sudut "
+                        "pisah Bulan-Matahari -- ketiganya dihitung persis saat "
+                        "ghurub definisi ufuk masing-masing."
                     )
                     self.label_hasil_simulasi_hilal.config(text=teks)
                     self._log(f"Simulasi Hilal {tgl_str} selesai: {teks.replace(chr(10), '  ')}")
