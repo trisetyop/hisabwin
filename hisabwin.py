@@ -10487,6 +10487,7 @@ class HisabWinApp(tk.Tk):
                 "Bisa dilihat lagi kapan saja lewat \"🗂️ Buka Manajer Profil "
                 "Tersimpan...\" -- tanpa perlu internet.")
             self._log(f"Profil Cakrawala disimpan ke Profil Tersimpan: {path}")
+            self._muat_ulang_daftar_profil_simulasi_hilal()
         except OSError as e:
             messagebox.showerror("Gagal menyimpan", f"Tidak bisa menulis file .txt:\n{e}")
 
@@ -10634,41 +10635,61 @@ class HisabWinApp(tk.Tk):
             font=FONT_KECIL, foreground=WARNA_PERINGATAN, justify="left",
             wraplength=280)
         self.label_profil_simulasi_hilal.pack(anchor="w", padx=10, pady=(8, 4))
-        ttk.Label(
-            frame_profil,
-            text="Hitung dulu di bagian 🏔️ Profil Cakrawala di atas, atau "
-                 "muat salah satu profil yang sudah tersimpan.",
-            font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left",
-            wraplength=280,
-        ).pack(fill="x", padx=10, pady=(0, 4))
+
+        frame_pilih_profil = ttk.Frame(frame_profil)
+        frame_pilih_profil.pack(fill="x", padx=10, pady=(0, 10))
+        self._peta_label_ke_path_profil_simulasi_hilal = {}
+        self.var_pilih_profil_simulasi_hilal = tk.StringVar()
+        self.combo_pilih_profil_simulasi_hilal = ttk.Combobox(
+            frame_pilih_profil, textvariable=self.var_pilih_profil_simulasi_hilal,
+            state="readonly", width=26)
+        self.combo_pilih_profil_simulasi_hilal.pack(side="left", fill="x", expand=True)
+        self.combo_pilih_profil_simulasi_hilal.bind(
+            "<<ComboboxSelected>>", self._on_pilih_profil_simulasi_hilal)
         ttk.Button(
-            frame_profil, text="🗂️ Muat dari Profil Tersimpan...",
-            command=self._on_buka_manajer_profil_cakrawala
-        ).pack(padx=10, pady=(0, 10), anchor="w")
+            frame_pilih_profil, text="🔄", width=3,
+            command=self._muat_ulang_daftar_profil_simulasi_hilal
+        ).pack(side="left", padx=(4, 0))
 
-        frame_tgl = ttk.LabelFrame(body, text="2. Tanggal & Zona Waktu")
+        frame_tgl = ttk.LabelFrame(body, text="2. Tanggal (dari Ijtimak) & Zona Waktu")
         frame_tgl.pack(fill="x", **pad)
-        waktu_ini_lokal = datetime.utcnow() + timedelta(hours=ZONA_WAKTU_PETA_LANGIT[0][1])
-        ttk.Label(frame_tgl, text="Tanggal:").grid(row=0, column=0, padx=4, pady=6)
-        self.entry_tgl_hari_simulasi_hilal = ttk.Entry(frame_tgl, width=4)
-        self.entry_tgl_hari_simulasi_hilal.insert(0, str(waktu_ini_lokal.day))
-        self.entry_tgl_hari_simulasi_hilal.grid(row=0, column=1, padx=2)
-        ttk.Label(frame_tgl, text="Bulan:").grid(row=0, column=2, padx=4)
-        self.entry_tgl_bulan_simulasi_hilal = ttk.Entry(frame_tgl, width=4)
-        self.entry_tgl_bulan_simulasi_hilal.insert(0, str(waktu_ini_lokal.month))
-        self.entry_tgl_bulan_simulasi_hilal.grid(row=0, column=3, padx=2)
-        ttk.Label(frame_tgl, text="Tahun:").grid(row=0, column=4, padx=4)
-        self.entry_tgl_tahun_simulasi_hilal = ttk.Entry(frame_tgl, width=6)
-        self.entry_tgl_tahun_simulasi_hilal.insert(0, str(waktu_ini_lokal.year))
-        self.entry_tgl_tahun_simulasi_hilal.grid(row=0, column=5, padx=2)
 
-        ttk.Label(frame_tgl, text="Zona:").grid(
-            row=1, column=0, sticky="w", padx=4, pady=(6, 2))
+        ttk.Label(frame_tgl, text="Tahun Masehi:").grid(row=0, column=0, padx=6, pady=6, sticky="w")
+        self.entry_tahun_simulasi_hilal = ttk.Entry(frame_tgl, width=8)
+        self.entry_tahun_simulasi_hilal.insert(0, str(datetime.now().year))
+        self.entry_tahun_simulasi_hilal.grid(row=0, column=1, padx=4, pady=6, sticky="w")
+        self.btn_cari_ijtimak_simulasi_hilal = ttk.Button(
+            frame_tgl, text="Cari Ijtimak", command=self._on_cari_ijtimak_simulasi_hilal)
+        self.btn_cari_ijtimak_simulasi_hilal.grid(row=0, column=2, padx=6, pady=6, sticky="w")
+
+        list_container = ttk.Frame(frame_tgl)
+        list_container.grid(row=1, column=0, columnspan=3, sticky="nsew", padx=6, pady=(0, 6))
+        frame_tgl.columnconfigure(0, weight=1)
+        scrollbar_simhilal = ttk.Scrollbar(list_container)
+        scrollbar_simhilal.pack(side="right", fill="y")
+        self.listbox_ijtimak_simulasi_hilal = tk.Listbox(
+            list_container, height=5, yscrollcommand=scrollbar_simhilal.set,
+            bg=WARNA_PANEL, fg=WARNA_TEKS, relief="flat", borderwidth=0,
+            highlightthickness=1, highlightbackground=WARNA_BORDER, highlightcolor=WARNA_AKSEN,
+            selectbackground=WARNA_AKSEN, selectforeground="white", font=FONT_KECIL)
+        self.listbox_ijtimak_simulasi_hilal.pack(side="left", fill="both", expand=True)
+        scrollbar_simhilal.config(command=self.listbox_ijtimak_simulasi_hilal.yview)
+        self.ijtimak_times_simulasi_hilal = []
+
+        frame_pilihan_hari_simhilal = ttk.Frame(frame_tgl)
+        frame_pilihan_hari_simhilal.grid(row=2, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 4))
+        self.pilihan_hari_simulasi_hilal = tk.StringVar(value="ijtimak")
+        ttk.Radiobutton(frame_pilihan_hari_simhilal, text="Hari Ijtimak", value="ijtimak",
+                         variable=self.pilihan_hari_simulasi_hilal).pack(side="left", padx=(2, 10))
+        ttk.Radiobutton(frame_pilihan_hari_simhilal, text="Sehari Setelah Ijtimak", value="setelah",
+                         variable=self.pilihan_hari_simulasi_hilal).pack(side="left")
+
+        ttk.Label(frame_tgl, text="Zona:").grid(row=3, column=0, sticky="w", padx=6, pady=(4, 6))
         self.var_zona_simulasi_hilal = tk.StringVar(value=ZONA_WAKTU_PETA_LANGIT[0][0])
         ttk.Combobox(
             frame_tgl, textvariable=self.var_zona_simulasi_hilal, state="readonly",
-            values=[z[0] for z in ZONA_WAKTU_PETA_LANGIT], width=28,
-        ).grid(row=1, column=1, columnspan=5, padx=2, pady=(6, 2), sticky="w")
+            values=[z[0] for z in ZONA_WAKTU_PETA_LANGIT], width=24,
+        ).grid(row=3, column=1, columnspan=2, padx=4, pady=(4, 6), sticky="w")
 
         ttk.Label(
             body,
@@ -10692,6 +10713,7 @@ class HisabWinApp(tk.Tk):
 
         self._hasil_simulasi_hilal_terakhir = None
         self._perbarui_status_profil_simulasi_hilal()
+        self._muat_ulang_daftar_profil_simulasi_hilal()
 
     def _perbarui_status_profil_simulasi_hilal(self):
         """Sinkronkan label status profil di akordeon Simulasi Hilal dgn
@@ -10715,26 +10737,96 @@ class HisabWinApp(tk.Tk):
                  f"{n_puncak} puncak bernama teridentifikasi.",
             foreground=WARNA_TEKS)
 
+    def _daftar_profil_cakrawala_tersimpan(self):
+        """List (label, path) semua profil .txt di folder data terkelola
+        (_folder_data_profil_cakrawala()), terbaru dulu -- dipakai combobox
+        pilih-cepat di akordeon Simulasi Hilal (BUKAN dialog Manajer Profil
+        yang penuh, cukup pilih langsung dari dropdown)."""
+        folder = _folder_data_profil_cakrawala()
+        try:
+            nama_file = [n for n in os.listdir(folder) if n.lower().endswith(".txt")]
+        except OSError:
+            return []
+        nama_file.sort(key=lambda n: os.path.getmtime(os.path.join(folder, n)), reverse=True)
+        hasil = []
+        for nama in nama_file:
+            path = os.path.join(folder, nama)
+            meta = _baca_meta_profil_cakrawala_txt(path) or {}
+            try:
+                lat, lon = float(meta.get("lat")), float(meta.get("lon"))
+                label = f"({lat:.4f}, {lon:.4f}) — {nama}"
+            except (TypeError, ValueError):
+                label = nama
+            hasil.append((label, path))
+        return hasil
+
+    def _muat_ulang_daftar_profil_simulasi_hilal(self):
+        """Segarkan isi combobox pilih-profil dari folder data terkelola.
+        Dipanggil saat akordeon ini pertama dibangun, saat tombol 🔄
+        ditekan, dan otomatis tiap kali ada profil baru selesai
+        dihitung/disimpan/diimpor (lihat pemanggilnya)."""
+        daftar = self._daftar_profil_cakrawala_tersimpan()
+        self._peta_label_ke_path_profil_simulasi_hilal = dict(daftar)
+        self.combo_pilih_profil_simulasi_hilal["values"] = [label for label, _ in daftar]
+        if not daftar:
+            self.var_pilih_profil_simulasi_hilal.set("")
+
+    def _on_pilih_profil_simulasi_hilal(self, event=None):
+        """Begitu user memilih 1 item combobox, LANGSUNG muat profilnya --
+        tanpa dialog, tanpa langkah tambahan apa pun."""
+        label = self.var_pilih_profil_simulasi_hilal.get()
+        path = self._peta_label_ke_path_profil_simulasi_hilal.get(label)
+        if not path:
+            return
+        try:
+            profil = muat_profil_cakrawala_txt(path)
+        except Exception as e:
+            messagebox.showerror("Gagal membaca profil", f"Tidak bisa membaca:\n{path}\n\n{e}")
+            return
+        self._hasil_cakrawala_terakhir = profil
+        self._perbarui_status_profil_simulasi_hilal()
+        self._log(f"Profil Cakrawala dipilih utk Simulasi Hilal: {os.path.basename(path)}")
+
+    def _on_cari_ijtimak_simulasi_hilal(self):
+        teks_tahun = self.entry_tahun_simulasi_hilal.get().strip()
+        if not (teks_tahun.isdigit() and len(teks_tahun) == 4):
+            messagebox.showerror("Input tidak valid", "Masukkan angka tahun 4 digit, mis. 2026.")
+            return
+        tahun = int(teks_tahun)
+        self.btn_cari_ijtimak_simulasi_hilal.config(state="disabled")
+        self.listbox_ijtimak_simulasi_hilal.delete(0, "end")
+        self._log(f"Mencari data ijtimak tahun {tahun} (untuk Simulasi Hilal)...")
+        threading.Thread(
+            target=self._cari_ijtimak_simulasi_hilal_thread, args=(tahun,), daemon=True).start()
+
+    def _cari_ijtimak_simulasi_hilal_thread(self, tahun):
+        try:
+            ijtimak_times = cari_ijtimak_tahun(tahun, self.ts, self.eph, mode=self.mode.get())
+            self.antrian.put(("ijtimak_simhilal_ok", ijtimak_times))
+        except Exception as e:
+            self.antrian.put(("error", f"Gagal mencari ijtimak (Simulasi Hilal): {e}"))
+
     def _on_jalankan_simulasi_hilal(self):
         profil = self._hasil_cakrawala_terakhir
         if not profil:
             messagebox.showwarning(
                 "Profil Cakrawala belum ada",
                 "Hitung Profil Cakrawala dulu di bagian 🏔️ Profil Cakrawala "
-                "di atas, atau muat salah satu yang sudah tersimpan lewat "
-                "tombol \"🗂️ Muat dari Profil Tersimpan...\" di bagian ini.")
+                "di atas, atau pilih salah satu dari dropdown \"Profil "
+                "Cakrawala Aktif\" di bagian ini.")
             return
-        try:
-            try:
-                hari = int(self.entry_tgl_hari_simulasi_hilal.get())
-                bulan = int(self.entry_tgl_bulan_simulasi_hilal.get())
-                tahun = int(self.entry_tgl_tahun_simulasi_hilal.get())
-                tanggal = datetime(tahun, bulan, hari)
-            except ValueError:
-                raise ValueError("Tanggal tidak valid. Pastikan hari/bulan/tahun berupa angka & tanggal ada.")
-        except ValueError as e:
-            messagebox.showerror("Input tidak valid", str(e))
+
+        seleksi = self.listbox_ijtimak_simulasi_hilal.curselection()
+        if not seleksi:
+            messagebox.showwarning(
+                "Ijtimak belum dipilih",
+                "Cari ijtimak (tahun) lalu pilih salah satu dari daftar terlebih dahulu.")
             return
+        idx = seleksi[0]
+        waktu_ijtimak = ke_utc_datetime(self.ijtimak_times_simulasi_hilal[idx])
+        tanggal_ijtimak = datetime(waktu_ijtimak.year, waktu_ijtimak.month, waktu_ijtimak.day)
+        tanggal = (tanggal_ijtimak if self.pilihan_hari_simulasi_hilal.get() == "ijtimak"
+                   else tanggal_ijtimak + timedelta(days=1))
 
         zona_label = self.var_zona_simulasi_hilal.get()
         zona_offset = dict(ZONA_WAKTU_PETA_LANGIT).get(zona_label, 7.0)
@@ -10750,7 +10842,8 @@ class HisabWinApp(tk.Tk):
 
         self.btn_jalankan_simulasi_hilal.config(state="disabled")
         self.label_hasil_simulasi_hilal.config(text="Menyimulasikan... lihat log Status di atas untuk progres.")
-        self._log(f"\nMenyimulasikan hilal {tanggal.strftime('%d %B %Y')} di "
+        self._log(f"\nMenyimulasikan hilal {tanggal.strftime('%d %B %Y')} (ijtimak "
+                   f"{format_waktu_ijtimak(waktu_ijtimak)}) di "
                    f"({profil['lat']:.4f}, {profil['lon']:.4f}) thd Profil Cakrawala aktif...")
 
         threading.Thread(
@@ -11680,6 +11773,18 @@ class HisabWinApp(tk.Tk):
                         self.btn_proses.config(state="normal")
                         self._log(f"Ditemukan {len(self.ijtimak_times)} kali ijtimak. Pilih salah satu di atas.")
                     self.btn_cari.config(state="normal")
+
+                elif jenis == "ijtimak_simhilal_ok":
+                    self.ijtimak_times_simulasi_hilal = payload
+                    if len(payload) == 0:
+                        self._log("Tidak ditemukan data ijtimak untuk tahun tersebut (Simulasi Hilal).")
+                    else:
+                        for t in payload:
+                            label = format_waktu_ijtimak(ke_utc_datetime(t))
+                            self.listbox_ijtimak_simulasi_hilal.insert("end", label)
+                        self.listbox_ijtimak_simulasi_hilal.selection_set(0)
+                        self._log(f"Ditemukan {len(payload)} kali ijtimak (Simulasi Hilal). Pilih salah satu di atas.")
+                    self.btn_cari_ijtimak_simulasi_hilal.config(state="normal")
 
                 elif jenis == "gerhana_ok":
                     # Hasil mentah cari_gerhana_matahari_kandidat_ringan()/
