@@ -5442,6 +5442,52 @@ def hitung_tabel_efemeris_jpl(tanggal, lat_deg, lon_deg, zona_offset_jam, ts, ep
     alt_moon, az_moon, jarak_moon = observer.at(t).observe(moon).apparent().altaz(
         temperature_C=10.0, pressure_mbar=1010.0)
 
+    # FALLBACK refraksi utk altitude GEOMETRIS di pita dekat ufuk (-3.5° s/d
+    # 0°). Formula refraksi bawaan Skyfield (dipicu lewat parameter
+    # temperature_C/pressure_mbar di altaz() di atas) TERBUKTI (dicek
+    # langsung ke source skyfield/earthlib.py `refraction()`, bukan dugaan)
+    # py potongan KERAS: formula jalan normal utk -1.0° <= alt <= 89.9°,
+    # tapi PERSIS di bawah -1.0° langsung dipaksa NOL (bukan meluruh
+    # halus) -- diverifikasi numerik: alt=-1.00 -> refraksi 0.830°,
+    # alt=-1.01 -> refraksi 0.000° (lompatan ~0.83° dlm 0.01° altitude).
+    # Solusi: hitung ULANG altitude GEOMETRIS (altaz() TANPA argumen
+    # refraksi -- pola yg sama dipakai di tempat lain file ini, mis. baris
+    # ~4923), lalu KHUSUS titik dlm pita ini timpa altitude apparent dgn
+    # formula Saemundsson yg sama persis dipakai mode ringan
+    # (koreksi_refraksi()).
+    #
+    # BATAS BAWAH PITA: -3.5 (BUKAN -2.0 spt versi awal, dan BUKAN "alt<=0"
+    # tanpa batas). Dua alasan, DUA-duanya diverifikasi numerik (bukan
+    # dugaan) lewat tes nyata pakai kernel de421.bsp & Skyfield asli:
+    #  1) koreksi_refraksi() py singularitas persis di alt=-5.11° (1/0 ->
+    #     NaN), jadi batas bawah WAJIB berhenti jauh sblm itu.
+    #  2) Versi awal (-2.0) SENDIRI ternyata bikin sambungan/lompatan baru
+    #     persis di -2.0° (~0.74°), krn di luar pita kembali ke nilai
+    #     Skyfield yg notabene sudah 0 (krn <-1). Jadi menyempitkan pita
+    #     cuma MEMINDAH masalah, bukan menghilangkan -- solusi PRAKTIS-nya
+    #     bukan mencari titik "sambungan mulus" (dua formula beda toh
+    #     tidak akan pernah pas persis di titik potongnya), tapi PASTIKAN
+    #     sambungan itu jatuh di altitude yg TIDAK PERNAH jadi ambang
+    #     ghurub/moonset sungguhan di app ini (dip+SD+topo realistis
+    #     jarang melebihi ~-1 s/d -2°, lihat data profil cakrawala nyata).
+    #     -3.5 aman utk kedua alasan itu sekaligus.
+    alt_sun_geo, _, _ = observer.at(t).observe(sun).apparent().altaz()
+    alt_moon_geo, _, _ = observer.at(t).observe(moon).apparent().altaz()
+    alt_matahari_deg = alt_sun.degrees.copy()
+    alt_bulan_deg = alt_moon.degrees.copy()
+    _pita_sun = (alt_sun_geo.degrees <= 0.0) & (alt_sun_geo.degrees >= -3.5)
+    _pita_moon = (alt_moon_geo.degrees <= 0.0) & (alt_moon_geo.degrees >= -3.5)
+    # Indexing boolean (bukan np.where) SENGAJA dipakai di sini -- np.where
+    # tetap mengevaluasi KEDUA cabang utk SELURUH array, jadi koreksi_
+    # refraksi() akan tetap dipanggil (dan berpotensi NaN/negatif tak
+    # fisis, lihat catatan di atas) utk titik JAUH di luar pita jg,
+    # walau hasilnya toh dibuang -- indexing di bawah memastikan formula
+    # itu CUMA pernah dievaluasi pada titik yg memang aman (dlm pita).
+    alt_matahari_deg[_pita_sun] = (alt_sun_geo.degrees[_pita_sun]
+                                    + koreksi_refraksi(alt_sun_geo.degrees[_pita_sun]))
+    alt_bulan_deg[_pita_moon] = (alt_moon_geo.degrees[_pita_moon]
+                                  + koreksi_refraksi(alt_moon_geo.degrees[_pita_moon]))
+
     # Deklinasi & elongasi dihitung dari posisi GEOSENTRIS (diamati dari
     # pusat Bumi, bukan dari lokasi pengamat) -- konsisten dengan makna
     # "deklinasi" & "elongasi" di bagian lain aplikasi ini (mis.
@@ -5464,10 +5510,14 @@ def hitung_tabel_efemeris_jpl(tanggal, lat_deg, lon_deg, zona_offset_jam, ts, ep
         badan = eph[kunci_skyfield]
         alt_p, az_p, _ = observer.at(t).observe(badan).apparent().altaz(
             temperature_C=10.0, pressure_mbar=1010.0)
+        alt_p_geo, _, _ = observer.at(t).observe(badan).apparent().altaz()
+        alt_p_deg = alt_p.degrees.copy()
+        _pita_p = (alt_p_geo.degrees <= 0.0) & (alt_p_geo.degrees >= -3.5)
+        alt_p_deg[_pita_p] = alt_p_geo.degrees[_pita_p] + koreksi_refraksi(alt_p_geo.degrees[_pita_p])
         pos_p_geo = earth.at(t).observe(badan).apparent()
         _, dec_p, _ = pos_p_geo.radec(epoch='date')
         data_planet[obj_id] = {
-            "az": az_p.degrees, "alt": alt_p.degrees, "dec": dec_p.degrees,
+            "az": az_p.degrees, "alt": alt_p_deg, "dec": dec_p.degrees,
         }
 
     hasil = []
@@ -5475,9 +5525,9 @@ def hitung_tabel_efemeris_jpl(tanggal, lat_deg, lon_deg, zona_offset_jam, ts, ep
         baris = {
             "jam_lokal": float(jam_lokal[i]),
             "label_jam": _label_jam_dari_desimal(jam_lokal[i]),
-            "az_matahari": float(az_sun.degrees[i]), "alt_matahari": float(alt_sun.degrees[i]),
+            "az_matahari": float(az_sun.degrees[i]), "alt_matahari": float(alt_matahari_deg[i]),
             "dec_matahari": float(dec_sun.degrees[i]), "jarak_matahari_au": float(jarak_matahari.au[i]),
-            "az_bulan": float(az_moon.degrees[i]), "alt_bulan": float(alt_moon.degrees[i]),
+            "az_bulan": float(az_moon.degrees[i]), "alt_bulan": float(alt_bulan_deg[i]),
             "dec_bulan": float(dec_moon.degrees[i]), "jarak_bulan_km": float(jarak_moon.km[i]),
             "elongasi_deg": float(elong.degrees[i]),
             "fraksi_iluminasi_persen": float(fraksi_iluminasi[i]),
@@ -6861,25 +6911,32 @@ def hitung_profil_cakrawala(lat, lon, tinggi_mata=2.0, radius_km=30, n_azimuth=1
     jarak_arr = np.linspace(radius_km * 1000 / n_sample, radius_km * 1000, n_sample)
 
     progress_cb(f"Menyiapkan {n_azimuth * n_sample} titik sampel ({n_azimuth} arah x {n_sample} jarak)...")
-    semua_titik = []  # (az_idx, jarak_m, lat, lon)
+    semua_titik = []  # (az_idx, s_idx, jarak_m, lat, lon)
     for az_idx, az in enumerate(azimuth):
-        for d in jarak_arr:
+        for s_idx, d in enumerate(jarak_arr):
             plat, plon = _cakrawala_titik_tujuan(lat, lon, az, d)
-            semua_titik.append((az_idx, d, plat, plon))
+            semua_titik.append((az_idx, s_idx, d, plat, plon))
 
-    koordinat = [(p[2], p[3]) for p in semua_titik]
+    koordinat = [(p[3], p[4]) for p in semua_titik]
     elevasi = _cakrawala_ambil_elevasi(koordinat, cache_tile, sesi, progress_cb)
     progress_cb(f"Selesai mengambil elevasi. Total tile diunduh: {len(cache_tile)}")
 
     sudut_horizon = np.full(n_azimuth, -90.0)
     jarak_horizon = np.zeros(n_azimuth)
     elevasi_horizon = np.zeros(n_azimuth)
+    # Matriks sudut PENUH (semua lapisan jarak, bukan cuma skyline/maks) --
+    # dulu dibuang stlh dapat skyline; sekarang disimpan supaya
+    # buat_figure_ridgeline_cakrawala() bisa gambar efek berlapis
+    # (painter's algorithm, ala versi Colab) TANPA unduh ulang tile tiap
+    # kali profil ini dibuka lagi.
+    matriks_sudut = np.full((n_azimuth, n_sample), -90.0)
     r_efektif = R_BUMI_CAKRAWALA / (1 - REFRAKSI_CAKRAWALA)
 
-    for idx, (az_idx, d, plat, plon) in enumerate(semua_titik):
+    for idx, (az_idx, s_idx, d, plat, plon) in enumerate(semua_titik):
         elev_target = elevasi[idx]
         penurunan_lengkung = (d ** 2) / (2 * r_efektif)
         sudut = math.degrees(math.atan((elev_target - tinggi_pengamat - penurunan_lengkung) / d))
+        matriks_sudut[az_idx, s_idx] = sudut
         if sudut > sudut_horizon[az_idx]:
             sudut_horizon[az_idx] = sudut
             jarak_horizon[az_idx] = d
@@ -6913,6 +6970,7 @@ def hitung_profil_cakrawala(lat, lon, tinggi_mata=2.0, radius_km=30, n_azimuth=1
         "azimuth": azimuth, "sudut_horizon": sudut_horizon,
         "jarak_horizon_km": jarak_horizon / 1000.0, "elevasi_titik_m": elevasi_horizon,
         "puncak_berlabel": puncak_berlabel,
+        "matriks_sudut": matriks_sudut, "matriks_jarak_km": jarak_arr / 1000.0,
     }
 
 
@@ -6937,6 +6995,21 @@ def simpan_profil_cakrawala_txt(path, profil):
         f.write("# puncak_berlabel: azimuth_deg,sudut_horizon_deg,nama\n")
         for az, sudut, nama in profil["puncak_berlabel"]:
             f.write(f"#PUNCAK,{az:.2f},{sudut:.4f},{nama}\n")
+        # Matriks lapisan penuh (utk ridgeline berlapis) -- OPSIONAL, cuma
+        # ada di profil yg dihitung SETELAH fitur ini ada. Profil lama hasil
+        # muat_profil_cakrawala_txt() tidak punya "matriks_sudut" (None),
+        # dilewati saja -- tetap valid, cuma tombol Ridge Line-nya nonaktif
+        # sampai profil itu dihitung ulang.
+        matriks_sudut = profil.get("matriks_sudut")
+        matriks_jarak_km = profil.get("matriks_jarak_km")
+        if matriks_sudut is not None and matriks_jarak_km is not None:
+            jarak_str = ",".join(f"{j:.4f}" for j in matriks_jarak_km)
+            f.write(f"# jarak_layer_km={jarak_str}\n")
+            f.write("# kolom_layer: azimuth_idx,sudut_layer_1..sudut_layer_N "
+                     "(N sesuai jumlah nilai di jarak_layer_km)\n")
+            for az_idx in range(matriks_sudut.shape[0]):
+                nilai_str = ",".join(f"{v:.3f}" for v in matriks_sudut[az_idx])
+                f.write(f"#LAYER,{az_idx},{nilai_str}\n")
 
 
 def muat_profil_cakrawala_txt(path):
@@ -6948,6 +7021,7 @@ def muat_profil_cakrawala_txt(path):
     meta = {}
     azimuth, sudut_horizon, jarak_horizon_km, elevasi_titik_m = [], [], [], []
     puncak_berlabel = []
+    baris_layer = []  # [(az_idx, [sudut, ...]), ...] -- disatukan jadi matriks stlh loop
     with open(path, "r", encoding="utf-8") as f:
         for baris in f:
             baris = baris.strip()
@@ -6956,6 +7030,9 @@ def muat_profil_cakrawala_txt(path):
             if baris.startswith("#PUNCAK,"):
                 _, az, sudut, nama = baris.split(",", 3)
                 puncak_berlabel.append((float(az), float(sudut), nama))
+            elif baris.startswith("#LAYER,"):
+                bagian = baris.split(",")
+                baris_layer.append((int(bagian[1]), [float(v) for v in bagian[2:]]))
             elif baris.startswith("#"):
                 if "=" in baris:
                     k, v = baris[1:].split("=", 1)
@@ -6976,6 +7053,16 @@ def muat_profil_cakrawala_txt(path):
     # lengkapi_elev_tanah_profil_txt() di bawah, dipanggil dari Simulasi Hilal.
     elev_tanah_dari_file = "elev_tanah_m" in meta
     elev_tanah = float(meta.get("elev_tanah_m", 0.0))
+
+    # Matriks lapisan (ridgeline) -- None kalau file lama/belum dihitung
+    # ulang stlh fitur ini ada (lihat catatan simpan_profil_cakrawala_txt).
+    matriks_sudut = None
+    matriks_jarak_km = None
+    if baris_layer and "jarak_layer_km" in meta:
+        matriks_jarak_km = np.array([float(x) for x in meta["jarak_layer_km"].split(",")])
+        baris_layer.sort(key=lambda t: t[0])
+        matriks_sudut = np.array([nilai for _, nilai in baris_layer])
+
     return {
         "lat": float(meta.get("lat", 0.0)), "lon": float(meta.get("lon", 0.0)),
         "tinggi_mata": tinggi_mata, "elev_tanah": elev_tanah,
@@ -6986,6 +7073,7 @@ def muat_profil_cakrawala_txt(path):
         "jarak_horizon_km": np.array(jarak_horizon_km),
         "elevasi_titik_m": np.array(elevasi_titik_m),
         "puncak_berlabel": puncak_berlabel,
+        "matriks_sudut": matriks_sudut, "matriks_jarak_km": matriks_jarak_km,
     }
 
 
@@ -7064,6 +7152,88 @@ def buat_figure_profil_cakrawala(profil):
     for az, sudut, nama in puncak_berlabel:
         ax.plot([az, az], [sudut, sudut + 1.5], color="black", linewidth=0.6, alpha=0.7)
         ax.text(az, sudut + 1.8, nama, rotation=75, ha="left", va="bottom", fontsize=7)
+
+    fig.tight_layout()
+    return fig
+
+
+def buat_figure_ridgeline_cakrawala(profil):
+    """Versi 'berlapis' dari buat_figure_profil_cakrawala() -- tiap lapisan
+    jarak digambar sbg poligon terisi (painter's algorithm: jauh->dekat),
+    diwarnai gradien menurut jarak, mereplikasi efek panorama 2.5D dari
+    skrip Colab "Panorama Horizon Viewer". BEDA dgn versi Colab-nya:
+      - TIDAK pakai scipy.signal.find_peaks -- profil["puncak_berlabel"]
+        dipakai langsung (sudah dideteksi & dicocokkan ke OSM sekali saat
+        hitung_profil_cakrawala(), tidak perlu diulang di sini).
+      - TIDAK ada versi Plotly interaktif -- app ini Tkinter
+        (FigureCanvasTkAgg), bukan browser, jadi cukup matplotlib statis
+        (tetap bisa pan/zoom lewat NavigationToolbar2Tk yg sudah dipakai
+        app ini utk semua peta/grafik lain).
+      - Butuh profil["matriks_sudut"]/["matriks_jarak_km"] (semua lapisan
+        jarak, bukan cuma skyline) -- HANYA ADA di profil yg dihitung/
+        dimuat SETELAH fitur ridgeline ini ditambahkan. Profil lama (dari
+        .txt sebelum ini ada) tidak punya data itu -- lempar ValueError
+        dgn pesan jelas, BUKAN error teknis mentah, supaya GUI bisa
+        tampilkan messagebox yg masuk akal (minta hitung ulang profilnya).
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.colors as mcolors
+    from matplotlib.ticker import MultipleLocator
+
+    matriks_sudut = profil.get("matriks_sudut")
+    matriks_jarak_km = profil.get("matriks_jarak_km")
+    if matriks_sudut is None or matriks_jarak_km is None:
+        raise ValueError(
+            "Profil ini belum punya data lapisan (dibuat sebelum fitur Ridge Line "
+            "ada, atau dimuat dari .txt lama). Hitung ulang Profil Cakrawala-nya "
+            "(tombol \"Hitung Profil Cakrawala\") supaya tampilan berlapis ini bisa dipakai."
+        )
+
+    azimuth = profil["azimuth"]
+    sudut_horizon = profil["sudut_horizon"]
+    puncak_berlabel = profil["puncak_berlabel"]
+    n_sample = matriks_sudut.shape[1]
+
+    y_floor = matriks_sudut.min() - 5.0
+    y_min = np.floor(sudut_horizon.min()) - 1
+    y_max = np.ceil(sudut_horizon.max()) + 1 + (8 if puncak_berlabel else 0)
+
+    norm = mcolors.Normalize(vmin=matriks_jarak_km.min(), vmax=matriks_jarak_km.max())
+    cmap = plt.get_cmap("copper_r")
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+
+    # Painter's algorithm: gambar lapisan dari yg PALING JAUH dulu, lalu
+    # makin dekat menutupi di atasnya -- efek pegunungan bertumpuk.
+    for s_idx in range(n_sample - 1, -1, -1):
+        y_curve = matriks_sudut[:, s_idx]
+        warna = cmap(norm(matriks_jarak_km[s_idx]))
+        ax.fill_between(azimuth, y_floor, y_curve, color=warna, linewidth=0, zorder=2)
+        ax.plot(azimuth, y_curve, color="black", linewidth=0.2, alpha=0.3, zorder=2)
+
+    # Garis siluet skyline teratas, sama seperti versi garis-tunggal.
+    ax.plot(azimuth, sudut_horizon, color="black", linewidth=1.2, alpha=0.9, zorder=3)
+
+    ax.set_xlim(0, 360)
+    ax.set_ylim(y_min, y_max)
+    ax.xaxis.set_major_locator(MultipleLocator(30))
+    ax.xaxis.set_minor_locator(MultipleLocator(10))
+    ax.yaxis.set_major_locator(MultipleLocator(5))
+    ax.grid(which="minor", linewidth=0.3, alpha=0.3, zorder=1)
+    ax.grid(which="major", linewidth=0.6, alpha=0.4, zorder=1)
+    ax.set_xticks(np.arange(0, 361, 30))
+    ax.set_xticklabels(["U", "30", "60", "T", "120", "150", "S", "210", "240", "B", "300", "330", "U"])
+    ax.set_xlabel("Azimuth (U=Utara, T=Timur, S=Selatan, B=Barat)")
+    ax.set_ylabel("Sudut elevasi (°)")
+    ax.set_title(f"Ridge Line — ({profil['lat']:.4f}, {profil['lon']:.4f}) — "
+                 f"tinggi mata {profil['tinggi_mata']:.1f} m, radius {profil['radius_km']:.0f} km")
+    ax.axhline(0, color="blue", linestyle="--", linewidth=0.8, alpha=0.7, zorder=4,
+               label="Garis datar (0°)")
+    ax.legend(loc="upper right", fontsize=8)
+
+    for az, sudut, nama in puncak_berlabel:
+        ax.plot([az, az], [sudut, sudut + 1.5], color="black", linewidth=0.6, alpha=0.8, zorder=5)
+        ax.text(az, sudut + 1.8, nama, rotation=75, ha="left", va="bottom", fontsize=7, zorder=5)
 
     fig.tight_layout()
     return fig
@@ -10642,6 +10812,11 @@ class HisabWinApp(tk.Tk):
             command=self._on_simpan_ke_manajer_cakrawala, state="disabled")
         self.btn_simpan_profil_cakrawala.pack(side="left", padx=(6, 0))
 
+        self.btn_ridge_cakrawala = ttk.Button(
+            frame_tombol_hasil, text="⛰️ Tampilkan Ridge Line",
+            command=self._on_tampilkan_ridge_cakrawala, state="disabled")
+        self.btn_ridge_cakrawala.pack(side="left", padx=(6, 0))
+
         self._hasil_cakrawala_terakhir = None  # diisi dict hitung_profil_cakrawala() begitu selesai
 
     def _on_hitung_cakrawala(self):
@@ -10676,6 +10851,7 @@ class HisabWinApp(tk.Tk):
         self.btn_hitung_cakrawala.config(state="disabled")
         self.btn_simpan_txt_cakrawala.config(state="disabled")
         self.btn_simpan_profil_cakrawala.config(state="disabled")
+        self.btn_ridge_cakrawala.config(state="disabled")
         self.label_hasil_cakrawala.config(text="Menghitung... lihat log Status di atas untuk progres.")
         self._log(f"\nMenghitung Profil Cakrawala di ({lat:.4f}, {lon:.4f}), "
                    f"radius {radius_km:.0f} km, resolusi {n_azimuth} arah "
@@ -10765,6 +10941,7 @@ class HisabWinApp(tk.Tk):
         self._log(f"Profil Cakrawala dimuat dari file tersimpan: {path}")
         self.btn_simpan_txt_cakrawala.config(state="normal")
         self.btn_simpan_profil_cakrawala.config(state="normal")
+        self.btn_ridge_cakrawala.config(state="normal")
         try:
             fig_cakrawala = buat_figure_profil_cakrawala(profil)
             tgl_label = f"({profil['lat']:.3f}, {profil['lon']:.3f})"
@@ -10773,6 +10950,29 @@ class HisabWinApp(tk.Tk):
             self.notebook.select(frame_cakrawala)
         except Exception as e:
             self._log(f"(Grafik cakrawala gagal ditampilkan, tapi data tetap termuat: {e})")
+            messagebox.showerror("Gagal menampilkan grafik", str(e))
+
+    def _on_tampilkan_ridge_cakrawala(self):
+        """Tombol '⛰️ Tampilkan Ridge Line' -- gambar profil["matriks_sudut"]
+        yg SUDAH ADA di self._hasil_cakrawala_terakhir (TANPA hitung ulang/
+        internet). Kalau profil itu dari .txt lama yg belum punya data
+        lapisan, buat_figure_ridgeline_cakrawala() lempar ValueError dgn
+        pesan yg jelas -- ditangkap di sini & ditampilkan lewat messagebox,
+        bukan crash."""
+        if not self._hasil_cakrawala_terakhir:
+            messagebox.showinfo("Belum ada profil", "Hitung atau muat Profil Cakrawala dulu.")
+            return
+        profil = self._hasil_cakrawala_terakhir
+        try:
+            fig_ridge = buat_figure_ridgeline_cakrawala(profil)
+            tgl_label = f"({profil['lat']:.3f}, {profil['lon']:.3f})"
+            frame_ridge = self._tampilkan_peta(
+                "cakrawala_ridge", f"⛰️ Ridge Line — {tgl_label}", fig_ridge)
+            self.notebook.select(frame_ridge)
+        except ValueError as e:
+            messagebox.showinfo("Perlu hitung ulang", str(e))
+        except Exception as e:
+            self._log(f"(Grafik ridge line gagal ditampilkan: {e})")
             messagebox.showerror("Gagal menampilkan grafik", str(e))
 
     def _on_buka_planetarium(self):
@@ -12227,6 +12427,7 @@ class HisabWinApp(tk.Tk):
                     self.btn_hitung_cakrawala.config(state="normal")
                     self.btn_simpan_txt_cakrawala.config(state="normal")
                     self.btn_simpan_profil_cakrawala.config(state="normal")
+                    self.btn_ridge_cakrawala.config(state="normal")
                     try:
                         fig_cakrawala = buat_figure_profil_cakrawala(profil)
                         tgl_label = f"({profil['lat']:.3f}, {profil['lon']:.3f})"
@@ -12251,6 +12452,7 @@ class HisabWinApp(tk.Tk):
                         # boleh dipakai utk data lama itu.
                         self.btn_simpan_txt_cakrawala.config(state="normal")
                         self.btn_simpan_profil_cakrawala.config(state="normal")
+                        self.btn_ridge_cakrawala.config(state="normal")
 
                 elif jenis == "simulasi_hilal_ok":
                     profil, hasil = payload
