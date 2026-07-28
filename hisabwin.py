@@ -7160,10 +7160,25 @@ def simulasikan_hilal(profil, tanggal, zona_offset_jam, ts=None, eph=None,
                                   (derajat), persis saat jam_ghurub
             "az_matahari", "alt_matahari", "az_bulan", "alt_bulan"
                                -- posisi masing2 benda persis saat
-                                  jam_ghurub
+                                  jam_ghurub. CATATAN: "alt_matahari" di
+                                  sini PUSAT piringan (bukan limb atas) --
+                                  karena jam_ghurub didefinisikan sbg limb
+                                  atas Matahari menyentuh ufuk, alt_matahari
+                                  SELALU = (nilai ufuk ini) - sd_matahari,
+                                  BUKAN 0/-dip_derajat persis. Efeknya:
+                                  "arcv" (lihat bawah) TIDAK SAMA dgn
+                                  "tinggi_hilal" -- arcv = tinggi_hilal +
+                                  sd_matahari utk ufuk astronomis & dip
+                                  (beda lagi utk ufuk topografi krn horizon
+                                  Bulan & Matahari bisa beda tinggi).
+            "sd_matahari"      -- semi-diameter piringan Matahari (derajat)
+                                  persis saat jam_ghurub, dari jarak Bumi-
+                                  Matahari aktual. Selisih arcv-tinggi_hilal.
             "daz"   -- DAZ  = Az bulan - Az matahari (derajat, +/-)
             "arcv"  -- ArcV = Alt bulan - Alt matahari, alias "selisih
-                       tinggi" (derajat, +/-)
+                       tinggi" (derajat, +/-). Alt matahari di sini pusat
+                       piringan (lihat catatan di atas) -- JANGAN disamakan
+                       dgn "tinggi_hilal".
             "arcl"  -- ArcL = elongasi/sudut pisah geosentris Bulan-
                        Matahari (derajat, selalu positif) -- sama definisi
                        dgn "elongasi" di tabel efemeris
@@ -7220,18 +7235,19 @@ def simulasikan_hilal(profil, tanggal, zona_offset_jam, ts=None, eph=None,
         if jam_g is None:
             return {
                 "label": label, "jam_ghurub": None, "jam_terbenam_bulan": None,
-                "lag_menit": None, "tinggi_hilal": None,
+                "lag_menit": None, "tinggi_hilal": None, "sd_matahari": None,
                 "az_matahari": None, "alt_matahari": None,
                 "az_bulan": None, "alt_bulan": None,
                 "daz": None, "arcv": None, "arcl": None, "fraksi_iluminasi": None,
             }
         az_s, alt_s = _pada_jam(jam_g, az_sun), _pada_jam(jam_g, alt_sun)
         az_b, alt_b = _pada_jam(jam_g, az_moon), _pada_jam(jam_g, alt_moon)
+        sd_g = _pada_jam(jam_g, sd_matahari_deg)
         lag_menit = ((jam_terbenam_bulan - jam_g) * 60.0
                      if jam_terbenam_bulan is not None else None)
         return {
             "label": label, "jam_ghurub": jam_g, "jam_terbenam_bulan": jam_terbenam_bulan,
-            "lag_menit": lag_menit, "tinggi_hilal": tinggi_hilal,
+            "lag_menit": lag_menit, "tinggi_hilal": tinggi_hilal, "sd_matahari": sd_g,
             "az_matahari": az_s, "alt_matahari": alt_s, "az_bulan": az_b, "alt_bulan": alt_b,
             "daz": ((az_b - az_s + 180.0) % 360.0) - 180.0, "arcv": alt_b - alt_s,
             "arcl": _pada_jam(jam_g, elong), "fraksi_iluminasi": _pada_jam(jam_g, frac_illum),
