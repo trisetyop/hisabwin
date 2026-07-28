@@ -7554,26 +7554,53 @@ def buat_figure_simulasi_hilal(profil, hasil):
     # legenda dipindah ke BAWAH (lihat ax.legend di akhir fungsi ini) supaya
     # seluruh lebar figure dipakai utk plot, bukan dimakan legenda.
     fig, ax = plt.subplots(figsize=(16, 6.5))
-    h_topo, = ax.plot(azimuth, sudut_horizon, color=_GAYA_UFUK["topo"]["warna"], linewidth=1.2,
-                       label="Ufuk topografi (cakrawala nyata)")
-    ax.fill_between(azimuth, sudut_horizon, y_min, color="#8B7355", alpha=0.6)
+
+    # -- Ufuk topografi: ridgeline BERLAPIS (spt buat_figure_ridgeline_cakrawala),
+    # bukan cuma isian datar satu warna -- supaya kontur gunung/bukit di
+    # sekitar titik ghurub kelihatan berdimensi (lapisan jauh->dekat, gradien
+    # warna menurut jarak) langsung di plot Simulasi Hilal ini, tidak perlu
+    # buka jendela "Ridge Line" terpisah lagi. Butuh profil["matriks_sudut"]/
+    # ["matriks_jarak_km"] (cuma ada di profil yg dihitung/dimuat SETELAH
+    # fitur Ridge Line ditambahkan) -- profil lama tanpa itu tetap dapat
+    # fallback isian datar spt sebelumnya, TIDAK error.
+    matriks_sudut = profil.get("matriks_sudut")
+    matriks_jarak_km = profil.get("matriks_jarak_km")
+    if matriks_sudut is not None and matriks_jarak_km is not None:
+        import matplotlib.colors as mcolors
+        norm = mcolors.Normalize(vmin=matriks_jarak_km.min(), vmax=matriks_jarak_km.max())
+        cmap = plt.get_cmap("copper_r")
+        n_sample = matriks_sudut.shape[1]
+        y_floor_layer = min(y_min, float(matriks_sudut.min()) - 5.0)
+        # Painter's algorithm: lapisan PALING JAUH digambar duluan, lapisan
+        # makin dekat menutupi di atasnya -- efek pegunungan bertumpuk.
+        for s_idx in range(n_sample - 1, -1, -1):
+            y_curve = matriks_sudut[:, s_idx]
+            warna = cmap(norm(matriks_jarak_km[s_idx]))
+            ax.fill_between(azimuth, y_floor_layer, y_curve, color=warna, linewidth=0, zorder=2)
+            ax.plot(azimuth, y_curve, color="black", linewidth=0.2, alpha=0.3, zorder=2)
+        h_topo, = ax.plot(azimuth, sudut_horizon, color=_GAYA_UFUK["topo"]["warna"], linewidth=1.2,
+                           zorder=3, label="Ufuk topografi (cakrawala nyata)")
+    else:
+        h_topo, = ax.plot(azimuth, sudut_horizon, color=_GAYA_UFUK["topo"]["warna"], linewidth=1.2,
+                           label="Ufuk topografi (cakrawala nyata)")
+        ax.fill_between(azimuth, sudut_horizon, y_min, color="#8B7355", alpha=0.6)
 
     # Label nama gunung/puncak (spt di Profil Cakrawala) -- garis tegak
     # tipis dari kontur ke atas + nama miring, hanya utk puncak yg jatuh
     # di dalam jendela zoom ini supaya tidak bertumpuk penuh di plot yg
     # sempit.
     for az, sudut, nama in puncak_terlihat:
-        ax.plot([az, az], [sudut, sudut + 1.2], color="black", linewidth=0.6, alpha=0.7)
-        ax.text(az, sudut + 1.4, nama, rotation=75, ha="left", va="bottom", fontsize=7)
+        ax.plot([az, az], [sudut, sudut + 1.2], color="black", linewidth=0.6, alpha=0.7, zorder=4)
+        ax.text(az, sudut + 1.4, nama, rotation=75, ha="left", va="bottom", fontsize=7, zorder=4)
     h_astro0 = ax.axhline(0, color=_GAYA_UFUK["astro"]["warna"], linestyle=_GAYA_UFUK["astro"]["linestyle"],
-                           linewidth=1.0, alpha=0.7, label="Ufuk astronomis (datar 0°)")
+                           linewidth=1.0, alpha=0.7, zorder=4, label="Ufuk astronomis (datar 0°)")
     h_dip0 = ax.axhline(-dip_derajat, color=_GAYA_UFUK["dip"]["warna"], linestyle=_GAYA_UFUK["dip"]["linestyle"],
-                         linewidth=1.2, alpha=0.8, label=f"Ufuk dip (kerendahan {dip_derajat:.2f}°)")
+                         linewidth=1.2, alpha=0.8, zorder=4, label=f"Ufuk dip (kerendahan {dip_derajat:.2f}°)")
 
     h_lintas_matahari, = ax.plot(az_sun_w, alt_sun_w, color="#D97706", linewidth=1.4, alpha=0.8,
-                                  label="Lintasan Matahari")
+                                  zorder=4, label="Lintasan Matahari")
     h_lintas_bulan, = ax.plot(az_moon_w, alt_moon_w, color="#1D4ED8", linewidth=1.4, alpha=0.8,
-                               label="Lintasan Bulan (hilal)")
+                               zorder=4, label="Lintasan Bulan (hilal)")
 
     # Handle & label penanda ☉ (Matahari) dan ☾ (Bulan/hilal) DIPISAH ke dua
     # daftar sendiri (bukan digabung urut per kunci ufuk spt sebelumnya)
@@ -10800,22 +10827,25 @@ class HisabWinApp(tk.Tk):
         self.label_hasil_cakrawala.pack(anchor="w", padx=10, pady=(10, 4))
 
         frame_tombol_hasil = ttk.Frame(frame_hasil)
-        frame_tombol_hasil.pack(fill="x", padx=10, pady=(0, 10), anchor="w")
+        frame_tombol_hasil.pack(fill="x", padx=10, pady=(0, 10))
 
+        # Tombol ditumpuk vertikal (fill="x"), BUKAN side="left" berjajar --
+        # panel sidebar cuma ~340px, jadi 3 tombol berjajar bikin yg
+        # terakhir (Ridge Line) kepotong/tenggelam di luar area terlihat.
         self.btn_simpan_txt_cakrawala = ttk.Button(
             frame_tombol_hasil, text="💾 Simpan sebagai .txt...", command=self._on_simpan_txt_cakrawala,
             state="disabled")
-        self.btn_simpan_txt_cakrawala.pack(side="left")
+        self.btn_simpan_txt_cakrawala.pack(fill="x", pady=(0, 4))
 
         self.btn_simpan_profil_cakrawala = ttk.Button(
             frame_tombol_hasil, text="📥 Simpan ke Profil Tersimpan",
             command=self._on_simpan_ke_manajer_cakrawala, state="disabled")
-        self.btn_simpan_profil_cakrawala.pack(side="left", padx=(6, 0))
+        self.btn_simpan_profil_cakrawala.pack(fill="x", pady=(0, 4))
 
         self.btn_ridge_cakrawala = ttk.Button(
             frame_tombol_hasil, text="⛰️ Tampilkan Ridge Line",
             command=self._on_tampilkan_ridge_cakrawala, state="disabled")
-        self.btn_ridge_cakrawala.pack(side="left", padx=(6, 0))
+        self.btn_ridge_cakrawala.pack(fill="x")
 
         self._hasil_cakrawala_terakhir = None  # diisi dict hitung_profil_cakrawala() begitu selesai
 
@@ -11107,6 +11137,15 @@ class HisabWinApp(tk.Tk):
             command=self._muat_ulang_daftar_profil_simulasi_hilal
         ).pack(side="left", padx=(4, 0))
 
+        # Sama seperti di akordeon 🏔️ Profil Cakrawala: tombol ini pakai
+        # handler & state (self._hasil_cakrawala_terakhir) yang SAMA persis
+        # -- profil aktif dibagi bersama, jadi ridge line profil yg sedang
+        # aktif di sini bisa dilihat langsung tanpa pindah akordeon.
+        self.btn_ridge_simulasi_hilal = ttk.Button(
+            frame_profil, text="⛰️ Tampilkan Ridge Line Profil Ini",
+            command=self._on_tampilkan_ridge_cakrawala, state="disabled")
+        self.btn_ridge_simulasi_hilal.pack(fill="x", padx=10, pady=(0, 10))
+
         frame_tgl = ttk.LabelFrame(body, text="2. Tanggal (dari Ijtimak) & Zona Waktu")
         frame_tgl.pack(fill="x", **pad)
 
@@ -11183,15 +11222,20 @@ class HisabWinApp(tk.Tk):
         label = getattr(self, "label_profil_simulasi_hilal", None)
         if label is None:
             return
+        btn_ridge = getattr(self, "btn_ridge_simulasi_hilal", None)
         profil = self._hasil_cakrawala_terakhir
         if not profil:
             label.config(text="Belum ada profil dimuat.", foreground=WARNA_PERINGATAN)
+            if btn_ridge is not None:
+                btn_ridge.config(state="disabled")
             return
         n_puncak = len(profil.get("puncak_berlabel", []))
         label.config(
             text=f"✓ Aktif: ({profil['lat']:.4f}, {profil['lon']:.4f}) -- "
                  f"{n_puncak} puncak bernama teridentifikasi.",
             foreground=WARNA_TEKS)
+        if btn_ridge is not None:
+            btn_ridge.config(state="normal")
 
     def _daftar_profil_cakrawala_tersimpan(self):
         """List (label, path) semua profil .txt di folder data terkelola
