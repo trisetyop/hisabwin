@@ -5345,7 +5345,7 @@ def hitung_tabel_efemeris_ringan(tanggal, lat_deg, lon_deg, zona_offset_jam,
     dt_hari = delta_t_detik(tanggal.year, tanggal.month) / 86400.0
     T = (jd_ut + dt_hari - 2451545.0) / 36525.0
 
-    ra_s, dec_s, _, _ = posisi_matahari(T)
+    ra_s, dec_s, _, jarak_matahari_au = posisi_matahari(T)
     ra_m, dec_m, _, _, jarak_m, par_m = posisi_bulan(T)
     dpsi, deps = nutasi_singkat(T)
     eps = (23 + 26 / 60 + 21.448 / 3600 - (46.8150 * T) / 3600) + deps
@@ -5391,7 +5391,7 @@ def hitung_tabel_efemeris_ringan(tanggal, lat_deg, lon_deg, zona_offset_jam,
             "jam_lokal": float(jam_lokal[i]),
             "label_jam": _label_jam_dari_desimal(jam_lokal[i]),
             "az_matahari": float(az_sun[i]), "alt_matahari": float(alt_sun_app[i]),
-            "dec_matahari": float(dec_s[i]),
+            "dec_matahari": float(dec_s[i]), "jarak_matahari_au": float(jarak_matahari_au[i]),
             "az_bulan": float(az_moon[i]), "alt_bulan": float(alt_moon_app[i]),
             "dec_bulan": float(dec_m[i]), "jarak_bulan_km": float(jarak_m[i]),
             "elongasi_deg": float(elong[i]),
@@ -5437,7 +5437,7 @@ def hitung_tabel_efemeris_jpl(tanggal, lat_deg, lon_deg, zona_offset_jam, ts, ep
     # koreksi_refraksi() ke alt_matahari & alt_bulan) maupun
     # hitung_tabel_efemeris_horizons() (yang minta APPARENT=REFRACTED ke
     # JPL Horizons) -- lihat juga pola yang sama di hitung_grid_jpl().
-    alt_sun, az_sun, _ = observer.at(t).observe(sun).apparent().altaz(
+    alt_sun, az_sun, jarak_matahari = observer.at(t).observe(sun).apparent().altaz(
         temperature_C=10.0, pressure_mbar=1010.0)
     alt_moon, az_moon, jarak_moon = observer.at(t).observe(moon).apparent().altaz(
         temperature_C=10.0, pressure_mbar=1010.0)
@@ -5476,7 +5476,7 @@ def hitung_tabel_efemeris_jpl(tanggal, lat_deg, lon_deg, zona_offset_jam, ts, ep
             "jam_lokal": float(jam_lokal[i]),
             "label_jam": _label_jam_dari_desimal(jam_lokal[i]),
             "az_matahari": float(az_sun.degrees[i]), "alt_matahari": float(alt_sun.degrees[i]),
-            "dec_matahari": float(dec_sun.degrees[i]),
+            "dec_matahari": float(dec_sun.degrees[i]), "jarak_matahari_au": float(jarak_matahari.au[i]),
             "az_bulan": float(az_moon.degrees[i]), "alt_bulan": float(alt_moon.degrees[i]),
             "dec_bulan": float(dec_moon.degrees[i]), "jarak_bulan_km": float(jarak_moon.km[i]),
             "elongasi_deg": float(elong.degrees[i]),
@@ -5662,7 +5662,7 @@ def hitung_tabel_efemeris_horizons(tanggal, lat_deg, lon_deg, zona_offset_jam,
 
     hasil = []
     for i in range(len(jam_lokal)):
-        ra_s, dec_s, az_s, alt_s, _ = _ambil_kolom_numerik(baris_per_objek["matahari"][i], "Matahari")
+        ra_s, dec_s, az_s, alt_s, delta_au_s = _ambil_kolom_numerik(baris_per_objek["matahari"][i], "Matahari")
         ra_m, dec_m, az_m, alt_m, delta_au_m = _ambil_kolom_numerik(baris_per_objek["bulan"][i], "Bulan")
         jarak_m_km = delta_au_m * HORIZONS_AU_KE_KM
 
@@ -5676,6 +5676,7 @@ def hitung_tabel_efemeris_horizons(tanggal, lat_deg, lon_deg, zona_offset_jam,
             "jam_lokal": float(jam_lokal[i]),
             "label_jam": _label_jam_dari_desimal(jam_lokal[i]),
             "az_matahari": az_s, "alt_matahari": alt_s, "dec_matahari": dec_s,
+            "jarak_matahari_au": delta_au_s,
             "az_bulan": az_m, "alt_bulan": alt_m, "dec_bulan": dec_m,
             "jarak_bulan_km": jarak_m_km,
             "elongasi_deg": elong,
@@ -7186,12 +7187,31 @@ def simulasikan_hilal(profil, tanggal, zona_offset_jam, ts=None, eph=None,
     tinggi_relatif_sun = alt_sun - horizon_sun
     tinggi_relatif_moon = alt_moon - horizon_moon
 
-    # Kerendahan ufuk (dip) dari tinggi pengamat -- formula standar yg sama
-    # dipakai di hitung_waktu_sholat (0.0347*sqrt(tinggi_m)). Profil lama
-    # (sblm field ini ada) fallback ke tinggi_mata saja lwt muat_profil_
-    # cakrawala_txt(), jadi .get() di sini cuma jaring pengaman tambahan.
+    # Semi-diameter piringan Matahari (derajat), dari jarak Bumi-Matahari
+    # AKTUAL hari itu (959.63" = semi-diameter standar IAU pada jarak 1 AU,
+    # diskalakan berbanding terbalik dgn jarak sesungguhnya -- lihat field
+    # "jarak_matahari_au" yg sekarang disertakan ketiga mode hitung_tabel_
+    # efemeris_*()). Dipakai di bawah supaya "ghurub" berarti PIRINGAN ATAS
+    # Matahari menyentuh garis ufuk (definisi baku observasional), BUKAN
+    # cuma pusat piringan -- sebelumnya alt_sun (pusat piringan) dipakai
+    # langsung utk cari perpotongan, yg membuat ghurub versi Simulasi Hilal
+    # ini sistematis lebih AWAL beberapa menit drpd rutin ghurub presisi
+    # lain di aplikasi ini (yg sudah memasukkan semi-diameter).
+    jarak_matahari_au = np.array([b.get("jarak_matahari_au", 1.0) for b in tabel])
+    sd_matahari_deg = (959.63 / 3600.0) / jarak_matahari_au
+    alt_sun_limb_atas = alt_sun + sd_matahari_deg
+
+    # Kerendahan ufuk (dip) dari tinggi pengamat. SEBELUMNYA pakai
+    # 0.0347*sqrt(h) (formula geometris 1.15'*sqrt(h_ft), TANPA koreksi
+    # refraksi atmosfer) -- sama seperti hitung_waktu_sholat(). Diganti ke
+    # 0.0293*sqrt(h) (=1.76'*sqrt(h_m), formula nautical/Meeus standar yg
+    # SUDAH memasukkan refraksi ~13-15%) khusus di sini supaya sebanding
+    # dgn dip yg dipakai rutin ghurub presisi lain -- hitung_waktu_sholat()
+    # SENGAJA TIDAK diubah (dip di sana konvensi PrayTimes.org yg dipakai
+    # luas oleh aplikasi jadwal sholat lain, beda tujuan dgn simulasi hilal
+    # presisi di sini).
     tinggi_pengamat = float(profil.get("tinggi_pengamat", profil.get("tinggi_mata", 2.0)) or 0.0)
-    dip_derajat = 0.0347 * math.sqrt(max(tinggi_pengamat, 0.0))
+    dip_derajat = 0.0293 * math.sqrt(max(tinggi_pengamat, 0.0))
 
     def _pada_jam(jam_target, arr):
         return float(np.interp(jam_target, jam_lokal, arr)) if jam_target is not None else None
@@ -7218,14 +7238,14 @@ def simulasikan_hilal(profil, tanggal, zona_offset_jam, ts=None, eph=None,
         }
 
     # -- 1. Ufuk astronomis (datar 0 derajat) --
-    jam_ghurub_astro = _cari_potong_turun_petang(jam_lokal, alt_sun)
+    jam_ghurub_astro = _cari_potong_turun_petang(jam_lokal, alt_sun_limb_atas)
     jam_terbenam_bulan_astro = _cari_potong_turun_petang(jam_lokal, alt_moon)
     tinggi_hilal_astro = _pada_jam(jam_ghurub_astro, alt_moon) if jam_ghurub_astro is not None else None
     ghurub_astro = _ringkas_ghurub(jam_ghurub_astro, jam_terbenam_bulan_astro,
                                     tinggi_hilal_astro, "Ufuk Astronomis (datar 0°)")
 
     # -- 2. Ufuk dip (datar - kerendahan ufuk, tanpa penghalang nyata) --
-    jam_ghurub_dip = _cari_potong_turun_petang(jam_lokal, alt_sun + dip_derajat)
+    jam_ghurub_dip = _cari_potong_turun_petang(jam_lokal, alt_sun_limb_atas + dip_derajat)
     jam_terbenam_bulan_dip = _cari_potong_turun_petang(jam_lokal, alt_moon + dip_derajat)
     tinggi_hilal_dip = (_pada_jam(jam_ghurub_dip, alt_moon) + dip_derajat
                          if jam_ghurub_dip is not None else None)
@@ -7233,7 +7253,7 @@ def simulasikan_hilal(profil, tanggal, zona_offset_jam, ts=None, eph=None,
                                   f"Ufuk Dip (kerendahan ufuk {dip_derajat:.3f}°)")
 
     # -- 3. Ufuk topografi nyata (Profil Cakrawala) --
-    jam_ghurub_topo = _cari_potong_turun_petang(jam_lokal, tinggi_relatif_sun)
+    jam_ghurub_topo = _cari_potong_turun_petang(jam_lokal, alt_sun_limb_atas - horizon_sun)
     jam_terbenam_bulan_topo = _cari_potong_turun_petang(jam_lokal, tinggi_relatif_moon)
     tinggi_hilal_topo = None
     if jam_ghurub_topo is not None:
