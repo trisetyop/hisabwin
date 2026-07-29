@@ -7489,7 +7489,14 @@ def buat_figure_simulasi_hilal(profil, hasil):
     TIGA penanda posisi Matahari/Bulan persis saat ghurub -- satu utk
     tiap definisi ufuk (astronomis datar 0°, dip, & topografi nyata),
     masing2 diberi warna sendiri (lihat _GAYA_UFUK) supaya bisa
-    dibandingkan langsung di satu grafik."""
+    dibandingkan langsung di satu grafik.
+
+    Return (fig, info_animasi) -- BUKAN cuma fig spt fungsi buat_figure_*
+    lain di file ini. info_animasi (dict: ax, jam, az/alt Matahari & Bulan
+    yg SUDAH di-window ke rentang waktu yg sama persis dgn garis Lintasan
+    di atas) dipakai _tampilkan_simulasi_hilal_animasi() utk slider/tombol
+    Putar -- caller WAJIB unpack tuple ini, bukan asumsikan return fig
+    tunggal spt buat_figure_profil_cakrawala()/buat_figure_ridgeline_cakrawala()."""
     import matplotlib.pyplot as plt
     from matplotlib.ticker import MultipleLocator
 
@@ -7672,7 +7679,20 @@ def buat_figure_simulasi_hilal(profil, hasil):
               bbox_to_anchor=(0.5, -0.14), ncol=3, fontsize=7.5,
               borderaxespad=0, frameon=True, handletextpad=0.6, columnspacing=1.4)
     fig.tight_layout(rect=(0.0, 0.20, 1.0, 1.0))
-    return fig
+    # info_animasi -- dipakai _tampilkan_simulasi_hilal_animasi() utk
+    # menggambar penanda "posisi saat ini" yg bisa digeser slider/diputar,
+    # DI ATAS gambar statis ini (garis lintasan & 3 penanda ghurub tetap
+    # ada sbg referensi, tidak dihapus). Array2 di sini SUDAH persis yg
+    # dipakai buat garis Lintasan Matahari/Bulan di atas (mask_waktu yg
+    # sama) -- jadi penanda animasi dijamin nempel di garis yg sama persis
+    # yg terlihat, bukan dihitung ulang terpisah.
+    info_animasi = {
+        "ax": ax,
+        "jam": hasil["jam_lokal"][mask_waktu],
+        "az_matahari": az_sun_w, "alt_matahari": alt_sun_w,
+        "az_bulan": az_moon_w, "alt_bulan": alt_moon_w,
+    }
+    return fig, info_animasi
 
 
 class DialogManajerProfilCakrawala(tk.Toplevel):
@@ -9073,6 +9093,20 @@ class HisabWinApp(tk.Tk):
         bukan menumpuk tab-tab baru terus-menerus."""
         info = self._tab_peta.get(nama_tab)
         if info is not None:
+            # Hook generik -- dipanggil SEBELUM widget lama didestroy, biar
+            # fitur yg pakai self.after() berulang di tab ini (mis. tombol
+            # Putar di Simulasi Hilal) sempat berhenti dgn bersih dulu.
+            # after() yg SUDAH terlanjur dijadwalkan berjalan di root/app,
+            # BUKAN di frame -- kalau tidak dihentikan di sini, callback-nya
+            # tetap akan coba jalan & mengakses widget yg baru saja
+            # didestroy di bawah ini -> TclError. Tab lain yg tidak
+            # menyetel "on_rebuild" tidak terpengaruh (dapat None, di-skip).
+            on_rebuild = info.get("on_rebuild")
+            if on_rebuild is not None:
+                try:
+                    on_rebuild()
+                except Exception:
+                    pass
             for widget in info["frame"].winfo_children():
                 widget.destroy()
             if info.get("fig") is not None:
@@ -9096,6 +9130,141 @@ class HisabWinApp(tk.Tk):
         toolbar.update()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         self._tab_peta[nama_tab]["fig"] = fig
+        return frame
+
+    def _tampilkan_simulasi_hilal_animasi(self, fig, info_animasi, judul_tab):
+        """Sama seperti _tampilkan_peta(), KHUSUS tab 'simulasi_hilal' --
+        di bawah kanvas+toolbar ditambah slider waktu & tombol Putar/Jeda
+        yg menggerakkan SATU penanda tambahan (bintang ☉/☾) di sepanjang
+        garis Lintasan Matahari/Bulan yg SUDAH digambar buat_figure_
+        simulasi_hilal() -- garis lintasan & 3 penanda ghurub per-ufuk
+        tetap ada persis spt sebelumnya sbg referensi statis, ini cuma
+        menambah satu penanda "kepala pemutar" yg posisinya di-update via
+        set_data() + canvas.draw_idle() (BUKAN matplotlib.animation.
+        FuncAnimation -- itu py loop event sendiri yg gampang bentrok dgn
+        mainloop Tkinter; di sini animasinya dijalankan via self.after()
+        berulang, pola yg sama dgn timer2 lain di app ini)."""
+        nama_tab = "simulasi_hilal"
+        frame = self._tab_peta_frame(nama_tab, judul_tab)
+
+        ax = info_animasi["ax"]
+        jam_arr = np.asarray(info_animasi["jam"], dtype=float)
+        az_sun, alt_sun = info_animasi["az_matahari"], info_animasi["alt_matahari"]
+        az_moon, alt_moon = info_animasi["az_bulan"], info_animasi["alt_bulan"]
+
+        canvas = FigureCanvasTkAgg(fig, master=frame)
+        canvas.draw()
+        toolbar = NavigationToolbar2Tk(canvas, frame)
+        toolbar.update()
+        self._tab_peta[nama_tab]["fig"] = fig
+
+        # Kurang dari 2 titik waktu (mis. ghurub tak ketemu sama sekali di
+        # lokasi/tanggal ini, lintasan kosong) -- slider tak ada gunanya,
+        # tampilkan statis biasa saja tanpa kontrol tambahan.
+        if len(jam_arr) < 2:
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            return frame
+
+        frame_kontrol = ttk.Frame(frame)
+        frame_kontrol.pack(side="bottom", fill="x", padx=8, pady=(2, 6))
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # Penanda "posisi saat ini" -- bintang besar, beda gaya dari
+        # penanda ghurub statis (lingkaran) biar gampang dibedakan sbg
+        # kepala pemutar, bukan salah satu dari 3 titik ghurub per-ufuk.
+        (penanda_sun,) = ax.plot([az_sun[0]], [alt_sun[0]], marker="*", color="#F59E0B",
+                                  markersize=20, markeredgecolor="black", markeredgewidth=1.0,
+                                  zorder=10, linestyle="none")
+        (penanda_moon,) = ax.plot([az_moon[0]], [alt_moon[0]], marker="*", color="#93C5FD",
+                                   markersize=20, markeredgecolor="black", markeredgewidth=1.0,
+                                   zorder=10, linestyle="none")
+
+        label_waktu = ttk.Label(frame_kontrol, text=_label_jam_hhmm(float(jam_arr[0])),
+                                 font=FONT_UTAMA_BOLD, width=9, anchor="center")
+        label_waktu.pack(side="left", padx=(0, 8))
+
+        var_slider = tk.DoubleVar(value=float(jam_arr[0]))
+        state = {"playing": False, "after_id": None}
+
+        def _perbarui_ke_jam(jam_target):
+            jam_target = min(max(jam_target, float(jam_arr[0])), float(jam_arr[-1]))
+            az_s = float(np.interp(jam_target, jam_arr, az_sun))
+            al_s = float(np.interp(jam_target, jam_arr, alt_sun))
+            az_b = float(np.interp(jam_target, jam_arr, az_moon))
+            al_b = float(np.interp(jam_target, jam_arr, alt_moon))
+            penanda_sun.set_data([az_s], [al_s])
+            penanda_moon.set_data([az_b], [al_b])
+            label_waktu.config(text=_label_jam_hhmm(jam_target))
+            canvas.draw_idle()
+
+        def _on_slider(nilai_str):
+            # Selama animasi jalan (Putar), _langkah_putar() sendiri yg
+            # menggerakkan slider (var_slider.set()) -- itu JUGA memicu
+            # callback "command" ini (perilaku baku ttk.Scale). Guard
+            # "playing" di sini mencegah dua jalur update dobel-hitung
+            # per tick; drag manual oleh user cuma efektif saat TIDAK
+            # sedang diputar (tombol otomatis balik ke "▶ Putar" dulu).
+            if state["playing"]:
+                return
+            _perbarui_ke_jam(float(nilai_str))
+
+        slider = ttk.Scale(frame_kontrol, from_=float(jam_arr[0]), to=float(jam_arr[-1]),
+                            variable=var_slider, command=_on_slider, orient="horizontal")
+        slider.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+        LANGKAH_JAM = (float(jam_arr[-1]) - float(jam_arr[0])) / 240.0  # ~240 tick/putaran penuh
+        INTERVAL_MS = 50
+
+        def _hentikan_putar():
+            state["playing"] = False
+            if state["after_id"] is not None:
+                try:
+                    self.after_cancel(state["after_id"])
+                except Exception:
+                    pass
+                state["after_id"] = None
+            try:
+                btn_putar.config(text="▶ Putar")
+            except tk.TclError:
+                pass  # widget sudah didestroy (tab digambar ulang) -- aman diabaikan
+
+        def _langkah_putar():
+            if not state["playing"]:
+                return
+            jam_baru = var_slider.get() + LANGKAH_JAM
+            selesai = jam_baru >= float(jam_arr[-1])
+            if selesai:
+                jam_baru = float(jam_arr[-1])
+            var_slider.set(jam_baru)
+            _perbarui_ke_jam(jam_baru)
+            if selesai:
+                _hentikan_putar()
+                return
+            state["after_id"] = self.after(INTERVAL_MS, _langkah_putar)
+
+        def _mulai_putar():
+            if var_slider.get() >= float(jam_arr[-1]) - 1e-9:
+                var_slider.set(float(jam_arr[0]))
+                _perbarui_ke_jam(float(jam_arr[0]))
+            state["playing"] = True
+            btn_putar.config(text="⏸ Jeda")
+            _langkah_putar()
+
+        def _on_toggle_putar():
+            if state["playing"]:
+                _hentikan_putar()
+            else:
+                _mulai_putar()
+
+        btn_putar = ttk.Button(frame_kontrol, text="▶ Putar", command=_on_toggle_putar, width=10)
+        btn_putar.pack(side="left")
+
+        # Dipanggil _tab_peta_frame() SEBELUM widget di atas didestroy,
+        # kalau tab ini digambar ulang (mis. user jalankan simulasi lagi
+        # utk tanggal lain) sementara animasi sblmnya masih jalan --
+        # tanpa ini, after() yg sudah terlanjur dijadwalkan bakal coba
+        # akses widget yg sudah tidak ada & lempar TclError.
+        self._tab_peta[nama_tab]["on_rebuild"] = _hentikan_putar
         return frame
 
     def _pastikan_tab_sholat_tampil(self):
@@ -12537,9 +12706,9 @@ class HisabWinApp(tk.Tk):
                     self._log(f"Simulasi Hilal {tgl_str} selesai: {teks.replace(chr(10), '  ')}")
                     self.btn_jalankan_simulasi_hilal.config(state="normal")
                     try:
-                        fig_sim = buat_figure_simulasi_hilal(profil, hasil)
-                        frame_sim = self._tampilkan_peta(
-                            "simulasi_hilal", f"🔭 Simulasi Hilal — {tgl_str}", fig_sim)
+                        fig_sim, info_animasi = buat_figure_simulasi_hilal(profil, hasil)
+                        frame_sim = self._tampilkan_simulasi_hilal_animasi(
+                            fig_sim, info_animasi, f"🔭 Simulasi Hilal — {tgl_str}")
                         self.notebook.select(frame_sim)
                     except Exception as e:
                         self._log(f"(Grafik simulasi hilal gagal ditampilkan, tapi ringkasan "
