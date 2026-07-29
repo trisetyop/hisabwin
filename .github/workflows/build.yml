@@ -77,6 +77,7 @@ jobs:
           --add-data "de421.bsp;." `
           --add-data "bintang_terang.csv;." `
           --add-data "rasi_garis.csv;." `
+          --add-data "gunung_indonesia.csv;." `
           --add-data "cartopy_data;cartopy_data" `
           hisabwin.py
 
@@ -199,6 +200,7 @@ jobs:
           --add-data "de421.bsp:." \
           --add-data "bintang_terang.csv:." \
           --add-data "rasi_garis.csv:." \
+          --add-data "gunung_indonesia.csv:." \
           --add-data "cartopy_data:cartopy_data" \
           hisabwin.py
 

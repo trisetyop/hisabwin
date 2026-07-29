@@ -6633,11 +6633,18 @@ class ClosableNotebook(ttk.Notebook):
 #  PROFIL CAKRAWALA — elevasi horizon 360 derajat dari titik pengamat
 #  (adaptasi dari skrip "Panorama Horizon Viewer" ala heywhatsthat.com)
 #
-#  Sumber data (KEDUANYA butuh INTERNET, tidak ada fallback offline):
+#  Sumber data:
 #    - Elevasi medan  : AWS Terrain Tiles (elevation-tiles-prod, format
-#      Terrarium PNG) -- gratis, tanpa API key.
-#    - Nama puncak    : Overpass API (OpenStreetMap) -- dicoba beberapa
-#      mirror/endpoint berurutan, berhenti begitu satu berhasil.
+#      Terrarium PNG) -- gratis, tanpa API key. BUTUH INTERNET, tidak ada
+#      fallback offline.
+#    - Nama puncak    : database LOKAL gunung_indonesia.csv (dibundel bareng
+#      exe/skrip, lihat ASET_GUNUNG_INDONESIA & _muat_gunung_indonesia_csv
+#      di bawah) -- 28.000+ nama gunung/puncak se-Indonesia dgn koordinat,
+#      hasil ekspor SPARQL query Wikidata ("gunung di Indonesia"), TIDAK
+#      butuh internet. DULU pakai Overpass API (OSM) scr live tiap kali
+#      profil dihitung, tapi mirror publiknya sering jadi bottleneck
+#      (lambat/timeout/rate-limited) -- diganti krn data gunung relatif
+#      statis, jadi cocok dibundel offline drpd query live tiap kali.
 #
 #  SENGAJA tidak pakai scipy.signal.find_peaks (deteksi puncak) krn scipy
 #  di-exclude dari build PyInstaller (lihat --exclude-module scipy di
@@ -6655,13 +6662,8 @@ REFRAKSI_CAKRAWALA = 0.13           # koefisien refraksi atmosfer standar
 _CAKRAWALA_TILE_ZOOM = 12           # detail DEM: 11=kasar/cepat, 13=detail/lambat
 _CAKRAWALA_URL_TILE = ("https://s3.amazonaws.com/elevation-tiles-prod/"
                         "terrarium/{z}/{x}/{y}.png")
-_CAKRAWALA_OVERPASS_ENDPOINTS = [
-    #"https://overpass.kumi.systems/api/interpreter",
-    "https://overpass.private.coffee/api/interpreter",
-    "https://z.overpass-api.de/api/interpreter",
-    "https://lz4.overpass-api.de/api/interpreter",
-    "https://overpass-api.de/api/interpreter",
-]
+ASET_GUNUNG_INDONESIA = os.path.join(_SCRIPT_DIR, "gunung_indonesia.csv")
+_CACHE_GUNUNG_INDONESIA = None      # (list nama, np.array lat, np.array lon) -- lazy-load sekali
 
 
 def _folder_data_profil_cakrawala():
@@ -6841,48 +6843,65 @@ def _deteksi_puncak_horizon_numpy(sudut, prominence_min=0.3):
     return hasil
 
 
-def _cakrawala_ambil_nama_puncak_osm(lat, lon, radius_m, progress_cb=lambda msg: None):
-    """Query Overpass API (OpenStreetMap) utk node natural=peak/volcano di
-    sekitar (lat,lon) dlm radius_m meter. Return list (nama, lat, lon).
-    Mencoba beberapa endpoint/mirror berurutan, berhenti begitu satu
-    berhasil; kalau semua gagal, return list kosong (bukan error fatal --
-    profil cakrawala tetap valid tanpa label nama puncak)."""
-    import requests
-    query = f"""
-    [out:json][timeout:60];
-    (
-      node["natural"="peak"](around:{radius_m},{lat},{lon});
-      node["natural"="volcano"](around:{radius_m},{lat},{lon});
-    );
-    out body;
-    """
-    headers = {
-        "User-Agent": "HisabWin-ProfilCakrawala/1.0 (desktop app, personal use)",
-        "Accept": "application/json",
-    }
-    for endpoint in _CAKRAWALA_OVERPASS_ENDPOINTS:
-        try:
-            resp = requests.post(endpoint, data={"data": query}, headers=headers, timeout=60)
-            resp.raise_for_status()
-            hasil = []
-            for el in resp.json().get("elements", []):
-                nama = el.get("tags", {}).get("name")
-                if nama:
-                    hasil.append((nama, el["lat"], el["lon"]))
-            progress_cb(f"  Nama puncak: {len(hasil)} ditemukan lewat {endpoint}")
-            return hasil
-        except Exception as e:
-            progress_cb(f"  Endpoint nama puncak gagal ({endpoint}): {e}")
-    progress_cb("  Semua endpoint nama puncak gagal -- lanjut TANPA label nama (profil elevasi tetap valid).")
-    return []
+def _muat_gunung_indonesia_csv():
+    """Baca ASET_GUNUNG_INDONESIA (gunung_indonesia.csv, kolom nama,lat,lon,
+    elevasi_m) sekali saja, hasil di-cache di modul-level (_CACHE_GUNUNG_
+    INDONESIA) supaya panggilan berikutnya dlm sesi yg sama (mis. hitung
+    beberapa profil cakrawala berturut-turut) tidak baca file berulang.
+    Return (nama_list, lat_arr, lon_arr); list/array kosong kalau file
+    tidak ketemu/rusak (bukan error fatal -- lanjut tanpa label nama)."""
+    global _CACHE_GUNUNG_INDONESIA
+    if _CACHE_GUNUNG_INDONESIA is not None:
+        return _CACHE_GUNUNG_INDONESIA
+    nama_list, lat_list, lon_list = [], [], []
+    try:
+        with open(ASET_GUNUNG_INDONESIA, "r", encoding="utf-8", newline="") as f:
+            for row in csv.DictReader(f):
+                try:
+                    nama_list.append(row["nama"])
+                    lat_list.append(float(row["lat"]))
+                    lon_list.append(float(row["lon"]))
+                except (KeyError, ValueError, TypeError):
+                    continue  # baris rusak/kolom hilang -- lewati saja, jangan gagalkan seluruh file
+    except OSError:
+        pass  # file tidak ketemu (mis. lupa di-bundel) -- fallback ke list kosong di bawah
+    _CACHE_GUNUNG_INDONESIA = (nama_list, np.array(lat_list), np.array(lon_list))
+    return _CACHE_GUNUNG_INDONESIA
+
+
+def _cakrawala_cari_nama_puncak_lokal(lat, lon, radius_m, progress_cb=lambda msg: None):
+    """Cari nama gunung/puncak di sekitar (lat,lon) dlm radius_m meter dari
+    database LOKAL gunung_indonesia.csv (lihat ASET_GUNUNG_INDONESIA).
+    Return list (nama, lat, lon) -- sama persis kontrak/formatnya dgn versi
+    lama yg query Overpass API (OSM) scr live, tapi versi ini TIDAK butuh
+    koneksi internet sama sekali & tidak ada risiko timeout/rate-limit,
+    krn tinggal filter jarak haversine (vektor numpy) dari data yg sudah
+    dimuat di memori. Kalau database kosong/tidak ketemu, return list
+    kosong -- bukan error fatal, profil cakrawala tetap valid tanpa label
+    nama puncak."""
+    nama_arr, lat_arr, lon_arr = _muat_gunung_indonesia_csv()
+    if len(nama_arr) == 0:
+        progress_cb("  Database gunung_indonesia.csv kosong/tidak ketemu -- lanjut TANPA label nama.")
+        return []
+    lat1, lon1 = math.radians(lat), math.radians(lon)
+    lat2, lon2 = np.radians(lat_arr), np.radians(lon_arr)
+    dlat, dlon = lat2 - lat1, lon2 - lon1
+    a = np.sin(dlat / 2) ** 2 + math.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
+    jarak_m = 2 * R_BUMI_CAKRAWALA * np.arcsin(np.sqrt(a))
+    idx = np.where(jarak_m <= radius_m)[0]
+    hasil = [(nama_arr[i], float(lat_arr[i]), float(lon_arr[i])) for i in idx]
+    progress_cb(f"  Nama puncak: {len(hasil)} ditemukan dari database lokal (offline, {len(nama_arr)} entri total).")
+    return hasil
 
 
 def hitung_profil_cakrawala(lat, lon, tinggi_mata=2.0, radius_km=30, n_azimuth=180,
                              n_sample=40, prominence_min=0.3, jarak_maks_label_km=3.0,
                              progress_cb=lambda msg: None):
     """Fungsi utama: hitung profil elevasi horizon 360 derajat dari titik
-    (lat, lon). BUTUH KONEKSI INTERNET (AWS Terrain Tiles + Overpass API,
-    tidak ada mode offline). Return dict siap-pakai utk plot/simpan txt:
+    (lat, lon). BUTUH KONEKSI INTERNET utk elevasi medan (AWS Terrain
+    Tiles) -- nama puncak diambil dari database lokal gunung_indonesia.csv,
+    TIDAK butuh internet (lihat _cakrawala_cari_nama_puncak_lokal). Return
+    dict siap-pakai utk plot/simpan txt:
         {
           "lat", "lon", "tinggi_mata", "radius_km",
           "elev_tanah": elevasi tanah (m) persis di titik pengamat,
@@ -6946,8 +6965,8 @@ def hitung_profil_cakrawala(lat, lon, tinggi_mata=2.0, radius_km=30, n_azimuth=1
     idx_puncak = _deteksi_puncak_horizon_numpy(sudut_horizon, prominence_min=prominence_min)
     progress_cb(f"Ditemukan {len(idx_puncak)} kandidat puncak.")
 
-    progress_cb("Mengambil nama gunung/puncak dari OpenStreetMap...")
-    puncak_osm = _cakrawala_ambil_nama_puncak_osm(lat, lon, radius_km * 1000, progress_cb)
+    progress_cb("Mencari nama gunung/puncak dari database lokal...")
+    puncak_lokal = _cakrawala_cari_nama_puncak_lokal(lat, lon, radius_km * 1000, progress_cb)
 
     puncak_berlabel = []
     for i in idx_puncak:
@@ -6955,7 +6974,7 @@ def hitung_profil_cakrawala(lat, lon, tinggi_mata=2.0, radius_km=30, n_azimuth=1
             continue
         plat, plon = _cakrawala_titik_tujuan(lat, lon, azimuth[i], jarak_horizon[i])
         nama_terbaik, jarak_terbaik = None, jarak_maks_label_km
-        for nama, nlat, nlon in puncak_osm:
+        for nama, nlat, nlon in puncak_lokal:
             d = _cakrawala_haversine_km(plat, plon, nlat, nlon)
             if d < jarak_terbaik:
                 jarak_terbaik, nama_terbaik = d, nama
@@ -8887,8 +8906,9 @@ class HisabWinApp(tk.Tk):
 
         # --- Bagian akordeon ke-8: Profil Cakrawala (elevasi horizon 360
         #     derajat dari 1 titik pengamat, mirip heywhatsthat.com) --
-        #     BUTUH INTERNET (AWS Terrain Tiles + Overpass API OSM utk nama
-        #     puncak, lihat catatan di hitung_profil_cakrawala()). Hasilnya
+        #     BUTUH INTERNET utk elevasi medan (AWS Terrain Tiles); nama
+        #     puncak dari database lokal offline (lihat catatan di
+        #     hitung_profil_cakrawala()). Hasilnya
         #     bisa disimpan ke .txt lewat tombol "Simpan .txt" -- file ini
         #     RENCANANYA jadi input WAJIB fitur "Simulasi Hilal" yang
         #     menyusul (belum dibuat sekarang, cuma profil cakrawalanya
