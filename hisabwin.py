@@ -497,6 +497,23 @@ starmap.inisialisasi(
 )
 
 # =========================================================
+#  KONTROL TELESKOP (opsional) -- beda dgn skyfield/numpy/shapely dkk yg
+#  WAJIB, `alpyca` (dipakai kontrol_teleskop.py) SENGAJA dibuat opsional:
+#  fitur GoTo mount cuma relevan buat yg punya (atau sedang mensimulasikan
+#  via alpaca_mock_server.py) teleskop, jadi app intinya (hisab/rukyat)
+#  tidak boleh gagal start cuma krn dependency ini belum ke-pip-install.
+#  TELESKOP_TERSEDIA dicek di _bangun_akordeon_teleskop() utk nonaktifkan
+#  tombol Sambung + tampilkan pesan "pip install alpyca" kalau False.
+# =========================================================
+try:
+    from kontrol_teleskop import KontrolTeleskop, KesalahanTeleskop
+    TELESKOP_TERSEDIA = True
+    _TELESKOP_ERROR_IMPOR = None
+except ImportError as _e:
+    TELESKOP_TERSEDIA = False
+    _TELESKOP_ERROR_IMPOR = str(_e)
+
+# =========================================================
 #  UTILITAS
 # =========================================================
 
@@ -5541,6 +5558,72 @@ def hitung_tabel_efemeris_jpl(tanggal, lat_deg, lon_deg, zona_offset_jam, ts, ep
     return hasil
 
 
+def hitung_posisi_realtime_bulan_matahari(lat_deg, lon_deg, elevasi_m, mode, ts=None, eph=None,
+                                            zona_offset_jam=7.0):
+    """Posisi Matahari & Bulan PERSIS SEKARANG (waktu sistem saat fungsi
+    ini dipanggil) -- dipakai fitur "Arahkan ke Bulan (Real-time)"/"Lacak
+    Otomatis" di akordeon Kontrol Teleskop. BEDA dgn Simulasi Hilal: itu
+    fokus ke SATU momen ghurub yg dihitung; rukyat sungguhan biasanya
+    mulai jauh sblm ghurub & terus lanjut stlh itu (rentang jam, bukan
+    satu titik) -- fitur ini yg menjawab kebutuhan itu, bisa dipencet
+    kapan saja, bukan cuma pas ghurub.
+
+    mode='jpl' (ts/eph sudah siap): hitung LANGSUNG di ts.now() (waktu UTC
+    riil dari sistem, TIDAK lewat zona_offset_jam manual -- 'sekarang' itu
+    sendiri tidak ambigu di UTC) -- baris2 di bawah ini SENGAJA disalin
+    persis dari hitung_tabel_efemeris_jpl() di atas (termasuk fallback
+    refraksi -3.5..0, lihat catatan di sana) tapi utk 1 titik waktu
+    (skalar) bukan array 1 hari, drpd hitung tabel sehari penuh cuma buat
+    1 titik (boros kalau dipanggil berulang tiap dtk oleh mode Lacak).
+
+    mode lain (termasuk 'jpl' tapi ts/eph BLM siap): SENGAJA TIDAK
+    menyalin ulang pipeline VSOP87/ELP2000 mode Ringan di sini (panjang,
+    banyak langkah -- menyalin cuma utk 1 titik berisiko diam2 melenceng
+    kalau pipeline aslinya berubah lagi) -- pakai hitung_tabel_efemeris_
+    ringan() APA ADANYA dgn interval_menit=1 (murah, numpy vektor, <10ms
+    utk 1 hari penuh) lalu ambil baris paling dekat jam sekarang.
+
+    PAKAI datetime.utcnow() + zona_offset_jam=0.0 ke hitung_tabel_
+    efemeris_ringan (BUKAN datetime.now() lokal + zona_offset_jam dari
+    parameter/dropdown) -- SEBELUMNYA begitu, TAPI itu diam2 SALAH kalau
+    zona timezone sistem operasinya tidak persis sama dgn zona yg dipilih
+    user di dropdown GUI (mis. laptop diset UTC/zona lain, atau app
+    dijalankan dari server) -- jam_lokal dari datetime.now() lalu dikurangi
+    zona_offset_jam LAGI di dalam hitung_tabel_efemeris_ringan, jadi
+    geser DOBEL. Diverifikasi numerik: bug ini bikin selisih ~94° alt
+    antara mode jpl (ts.now(), selalu benar) vs mode ringan lama, di
+    sandbox yg jam sistemnya kebetulan UTC bukan WIB. Fix: pakai UTC apa
+    adanya di kedua sisi (jam sistem & parameter zona=0 ke tabel), 'sekarang'
+    di UTC tidak ambigu shg tidak butuh tau zona sistem operasi sama sekali.
+    Parameter zona_offset_jam DIPERTAHANKAN di signature fungsi ini demi
+    kompatibilitas pemanggil, TAPI TIDAK DIPAKAI lagi di jalur ini."""
+    if mode == "jpl" and ts is not None and eph is not None:
+        t = ts.now()
+        observer, _ = _observer_skyfield(eph, lat_deg, lon_deg, elevasi_m)
+        sun, moon = eph["sun"], eph["moon"]
+        alt_sun, az_sun, _ = observer.at(t).observe(sun).apparent().altaz(
+            temperature_C=10.0, pressure_mbar=1010.0)
+        alt_moon, az_moon, _ = observer.at(t).observe(moon).apparent().altaz(
+            temperature_C=10.0, pressure_mbar=1010.0)
+        alt_sun_geo, _, _ = observer.at(t).observe(sun).apparent().altaz()
+        alt_moon_geo, _, _ = observer.at(t).observe(moon).apparent().altaz()
+        alt_s_deg, alt_b_deg = float(alt_sun.degrees), float(alt_moon.degrees)
+        if -3.5 <= alt_sun_geo.degrees <= 0.0:
+            alt_s_deg = float(alt_sun_geo.degrees + koreksi_refraksi(alt_sun_geo.degrees))
+        if -3.5 <= alt_moon_geo.degrees <= 0.0:
+            alt_b_deg = float(alt_moon_geo.degrees + koreksi_refraksi(alt_moon_geo.degrees))
+        return {"az_matahari": float(az_sun.degrees), "alt_matahari": alt_s_deg,
+                "az_bulan": float(az_moon.degrees), "alt_bulan": alt_b_deg}
+
+    u = datetime.utcnow()
+    jam_utc_sekarang = u.hour + u.minute / 60.0 + u.second / 3600.0
+    tabel = hitung_tabel_efemeris_ringan(u.date(), lat_deg, lon_deg, 0.0,
+                                          interval_menit=1, elevasi_m=elevasi_m)
+    baris = min(tabel, key=lambda b: abs(b["jam_lokal"] - jam_utc_sekarang))
+    return {"az_matahari": baris["az_matahari"], "alt_matahari": baris["alt_matahari"],
+            "az_bulan": baris["az_bulan"], "alt_bulan": baris["alt_bulan"]}
+
+
 HORIZONS_API_URL = "https://ssd.jpl.nasa.gov/api/horizons.api"
 HORIZONS_TIMEOUT_DETIK = 25
 HORIZONS_AU_KE_KM = 149597870.7
@@ -8704,7 +8787,8 @@ class HisabWinApp(tk.Tk):
                 on_open=lambda: (self._tutup_akordeon_sholat(), self._tutup_akordeon_gerhana(),
                                   self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter(),
                                   self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit(),
-                                  self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal()))
+                                  self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal(),
+                                  self._tutup_akordeon_teleskop()))
         frame0 = ttk.LabelFrame(body_hilal, text="0. Mode Perhitungan")
         frame0.pack(fill="x", **pad)
 
@@ -8807,7 +8891,8 @@ class HisabWinApp(tk.Tk):
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_gerhana(),
                                   self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter(),
                                   self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit(),
-                                  self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal()))
+                                  self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal(),
+                                  self._tutup_akordeon_teleskop()))
 
         # --- Tab tambahan: Waktu Sholat & Arah Kiblat (permanen, selalu ada) ---
         self._bangun_tab_sholat()
@@ -8824,7 +8909,8 @@ class HisabWinApp(tk.Tk):
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter(),
                                   self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit(),
-                                  self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal()))
+                                  self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal(),
+                                  self._tutup_akordeon_teleskop()))
         self._bangun_akordeon_gerhana(self._body_akordeon_gerhana, pad)
 
         # --- Bagian akordeon ke-4: Perbandingan Kalender MABIMS vs KHGT
@@ -8840,7 +8926,8 @@ class HisabWinApp(tk.Tk):
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_konverter(),
                                   self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit(),
-                                  self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal()))
+                                  self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal(),
+                                  self._tutup_akordeon_teleskop()))
         self._bangun_akordeon_kalbanding(self._body_akordeon_kalbanding, pad)
 
         # --- Tab hasil perbandingan (permanen, sama seperti tab Waktu
@@ -8865,7 +8952,8 @@ class HisabWinApp(tk.Tk):
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
                                   self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit(),
-                                  self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal()))
+                                  self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal(),
+                                  self._tutup_akordeon_teleskop()))
         self._bangun_akordeon_konverter(self._body_akordeon_konverter, pad)
 
         # --- Bagian akordeon ke-6: Tabel Efemeris (posisi Matahari & Bulan
@@ -8881,7 +8969,8 @@ class HisabWinApp(tk.Tk):
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
                                   self._tutup_akordeon_konverter(), self._tutup_akordeon_peta_langit(),
-                                  self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal()))
+                                  self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal(),
+                                  self._tutup_akordeon_teleskop()))
         self._bangun_akordeon_efemeris(self._body_akordeon_efemeris, pad)
         self._bangun_tab_efemeris()
 
@@ -8901,7 +8990,8 @@ class HisabWinApp(tk.Tk):
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
                                   self._tutup_akordeon_konverter(), self._tutup_akordeon_efemeris(),
-                                  self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal()))
+                                  self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal(),
+                                  self._tutup_akordeon_teleskop()))
         self._bangun_akordeon_peta_langit(self._body_akordeon_peta_langit, pad)
 
         # --- Bagian akordeon ke-8: Profil Cakrawala (elevasi horizon 360
@@ -8921,7 +9011,8 @@ class HisabWinApp(tk.Tk):
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
                                   self._tutup_akordeon_konverter(), self._tutup_akordeon_efemeris(),
-                                  self._tutup_akordeon_peta_langit(), self._tutup_akordeon_simulasi_hilal()))
+                                  self._tutup_akordeon_peta_langit(), self._tutup_akordeon_simulasi_hilal(),
+                                  self._tutup_akordeon_teleskop()))
         self._bangun_akordeon_cakrawala(self._body_akordeon_cakrawala, pad)
 
         # --- Bagian akordeon ke-9: Simulasi Hilal -- membandingkan posisi
@@ -8938,8 +9029,31 @@ class HisabWinApp(tk.Tk):
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
                                   self._tutup_akordeon_konverter(), self._tutup_akordeon_efemeris(),
-                                  self._tutup_akordeon_peta_langit(), self._tutup_akordeon_cakrawala()))
+                                  self._tutup_akordeon_peta_langit(), self._tutup_akordeon_cakrawala(),
+                                  self._tutup_akordeon_teleskop()))
         self._bangun_akordeon_simulasi_hilal(self._body_akordeon_simulasi_hilal, pad)
+
+        # --- Bagian akordeon ke-10: Kontrol Teleskop -- kirim posisi hilal
+        #     (dari akordeon Simulasi Hilal) ke mount GoTo lewat protokol
+        #     ASCOM Alpaca (kontrol_teleskop.py, lihat catatan lengkap di
+        #     situ). Butuh `pip install alpyca` -- OPSIONAL, beda dgn
+        #     skyfield/numpy/dll yg wajib: kalau belum terpasang, bagian
+        #     ini tetap muncul tapi tombol Sambung nonaktif + pesan
+        #     penjelasan, TIDAK bikin seluruh app gagal start (lihat
+        #     TELESKOP_TERSEDIA di awal file). Belum ada mount asli?
+        #     alpaca_mock_server.py (satu folder) simulasikan mount GoTo
+        #     lewat protokol yg SAMA PERSIS, jadi kode di sini tidak perlu
+        #     diubah sama sekali begitu nanti ganti ke mount sungguhan. ---
+        self._body_akordeon_teleskop, self._buka_akordeon_teleskop, self._tutup_akordeon_teleskop = \
+            self._buat_bagian_akordeon(
+                tab_kontrol, "🔭 Kontrol Teleskop",
+                buka_awal=False,
+                on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
+                                  self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
+                                  self._tutup_akordeon_konverter(), self._tutup_akordeon_efemeris(),
+                                  self._tutup_akordeon_peta_langit(), self._tutup_akordeon_cakrawala(),
+                                  self._tutup_akordeon_simulasi_hilal()))
+        self._bangun_akordeon_teleskop(self._body_akordeon_teleskop, pad)
 
     def _on_ganti_tab_notebook(self, event=None):
         """Dipanggil tiap kali tab notebook kanan (peta/Waktu Sholat)
@@ -9278,6 +9392,23 @@ class HisabWinApp(tk.Tk):
 
         btn_putar = ttk.Button(frame_kontrol, text="▶ Putar", command=_on_toggle_putar, width=10)
         btn_putar.pack(side="left")
+
+        def _on_arahkan_teleskop_ke_sini():
+            # Pakai posisi BULAN (target rukyat, bukan Matahari) di jam
+            # yg SEDANG ditunjuk slider skrg -- interpolasi cepat, tidak
+            # perlu nyimpan state terpisah dari _perbarui_ke_jam() di atas.
+            # _kirim_slew_altaz (di akordeon Kontrol Teleskop) yg urus
+            # pengecekan tersambung/belum & pesan error-nya, jadi tombol
+            # ini aman dipencet kapan saja (termasuk sblm sambung ke mount
+            # -- tinggal dikasih tau lewat messagebox, bukan error diam2).
+            jam_target = float(var_slider.get())
+            az_b = float(np.interp(jam_target, jam_arr, az_moon))
+            al_b = float(np.interp(jam_target, jam_arr, alt_moon))
+            self._kirim_slew_altaz(az_b, al_b)
+
+        btn_arahkan = ttk.Button(frame_kontrol, text="🔭 Arahkan ke Sini",
+                                  command=_on_arahkan_teleskop_ke_sini)
+        btn_arahkan.pack(side="left", padx=(8, 0))
 
         # Dipanggil _tab_peta_frame() SEBELUM widget di atas didestroy,
         # kalau tab ini digambar ulang (mis. user jalankan simulasi lagi
@@ -11399,6 +11530,286 @@ class HisabWinApp(tk.Tk):
         self._perbarui_status_profil_simulasi_hilal()
         self._muat_ulang_daftar_profil_simulasi_hilal()
 
+    def _bangun_akordeon_teleskop(self, body, pad):
+        """Isi badan akordeon "🔭 Kontrol Teleskop": sambung ke mount GoTo
+        lewat protokol ASCOM Alpaca (kontrol_teleskop.py) & arahkan ke
+        posisi Bulan hasil 🔭 Simulasi Hilal. OPSIONAL -- lihat
+        TELESKOP_TERSEDIA di awal file; kalau `alpyca` belum terpasang,
+        bagian ini tetap muncul (bukan disembunyikan) tapi tombol Sambung
+        dinonaktifkan + pesan cara install, biar user tau fiturnya ADA
+        tapi butuh satu langkah lagi, bukan mengira app-nya rusak."""
+        self.kt_teleskop = None  # instance KontrolTeleskop aktif, None kalau belum sambung
+        self._teleskop_poll_after_id = None   # timer poll posisi mount (tiap 1 dtk selama tersambung)
+        self._teleskop_lacak_after_id = None  # timer lacak-otomatis (Real-time), terpisah dari yg di atas
+        self._teleskop_lacak_aktif = False
+
+        if not TELESKOP_TERSEDIA:
+            ttk.Label(
+                body, text="Modul 'alpyca' belum terpasang.\n\n"
+                           "Jalankan di terminal:\n    pip install alpyca\n\n"
+                           "lalu buka ulang HisabWin -- bagian ini otomatis aktif.",
+                font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left", wraplength=280,
+            ).pack(fill="x", padx=10, pady=10)
+            return
+
+        frame_sambung = ttk.LabelFrame(body, text="1. Sambungan Mount")
+        frame_sambung.pack(fill="x", **pad)
+        ttk.Label(frame_sambung, text="Alamat (host:port):").grid(
+            row=0, column=0, padx=6, pady=6, sticky="w")
+        self.entry_alamat_teleskop = ttk.Entry(frame_sambung, width=20)
+        self.entry_alamat_teleskop.insert(0, "127.0.0.1:11111")
+        self.entry_alamat_teleskop.grid(row=0, column=1, padx=6, pady=6)
+        ttk.Label(
+            frame_sambung,
+            text="Belum punya mount? Jalankan alpaca_mock_server.py (satu folder\n"
+                 "dgn hisabwin.py) di terminal terpisah, lalu sambung ke alamat di atas\n"
+                 "(default-nya sudah cocok) -- protokolnya sama persis dgn mount asli.",
+            font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left", wraplength=280,
+        ).grid(row=1, column=0, columnspan=2, padx=6, pady=(0, 6), sticky="w")
+
+        self.btn_sambung_teleskop = ttk.Button(
+            frame_sambung, text="🔌 Sambung", command=self._on_sambung_teleskop,
+            style="Aksen.TButton")
+        self.btn_sambung_teleskop.grid(row=2, column=0, padx=6, pady=(0, 8), sticky="ew")
+        self.btn_putus_teleskop = ttk.Button(
+            frame_sambung, text="Putus", command=self._on_putus_teleskop, state="disabled")
+        self.btn_putus_teleskop.grid(row=2, column=1, padx=6, pady=(0, 8), sticky="ew")
+
+        self.label_status_teleskop = ttk.Label(
+            frame_sambung, text="Belum tersambung.", font=FONT_KECIL,
+            foreground=WARNA_TEKS_MUTED, justify="left", wraplength=280)
+        self.label_status_teleskop.grid(row=3, column=0, columnspan=2, padx=6, pady=(0, 8), sticky="w")
+
+        frame_posisi = ttk.LabelFrame(body, text="2. Posisi Mount Sekarang")
+        frame_posisi.pack(fill="x", **pad)
+        self.label_posisi_teleskop = ttk.Label(
+            frame_posisi, text="—", font=FONT_KECIL, justify="left", wraplength=280)
+        self.label_posisi_teleskop.pack(anchor="w", padx=10, pady=10)
+
+        # --- Real-time (RUKYAT) -- diletakkan SEBELUM "Arahkan saat Ghurub"
+        #     krn ini yg lebih relevan buat rukyat sungguhan: rentang
+        #     usaha rukyat itu LEBAR (biasa mulai jauh sblm ghurub &
+        #     terus lanjut stlh itu memindai langit), bukan cuma persis
+        #     di satu titik ghurub yg dihitung Simulasi Hilal. ---
+        frame_realtime = ttk.LabelFrame(body, text="3. Real-time (buat Rukyat)")
+        frame_realtime.pack(fill="x", **pad)
+        ttk.Label(
+            frame_realtime,
+            text="Posisi Bulan/Matahari PERSIS SEKARANG (bukan simulasi tanggal\n"
+                 "tertentu) -- bisa dipakai kapan saja selama sesi rukyat,\n"
+                 "sebelum maupun sesudah ghurub.",
+            font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left", wraplength=280,
+        ).pack(fill="x", padx=10, pady=(6, 6))
+        self.btn_arahkan_realtime = ttk.Button(
+            frame_realtime, text="🌙 Arahkan ke Bulan (Real-time)",
+            command=self._on_arahkan_teleskop_realtime, state="disabled")
+        self.btn_arahkan_realtime.pack(fill="x", padx=10, pady=(0, 6))
+
+        self.var_lacak_otomatis = tk.BooleanVar(value=False)
+        self.chk_lacak_otomatis = ttk.Checkbutton(
+            frame_realtime, text="🔄 Lacak otomatis (update tiap 30 detik)",
+            variable=self.var_lacak_otomatis, command=self._on_toggle_lacak_otomatis,
+            state="disabled")
+        self.chk_lacak_otomatis.pack(anchor="w", padx=10, pady=(0, 4))
+        self.label_lacak_teleskop = ttk.Label(
+            frame_realtime, text="", font=FONT_KECIL, foreground=WARNA_TEKS_MUTED,
+            justify="left", wraplength=280)
+        self.label_lacak_teleskop.pack(fill="x", padx=10, pady=(0, 10))
+
+        frame_arah = ttk.LabelFrame(body, text="4. Arahkan saat Ghurub (dari Simulasi)")
+        frame_arah.pack(fill="x", **pad)
+        ttk.Label(
+            frame_arah,
+            text="Pakai hasil 🔭 Simulasi Hilal terakhir (posisi Bulan persis saat\n"
+                 "ghurub versi ufuk-dip). Utk arahkan ke waktu LAIN (mis. beberapa\n"
+                 "menit sblm/sesudah ghurub) dari simulasi yg SAMA (bukan real-time),\n"
+                 "buka tab Simulasi Hilal, geser slider, lalu pakai tombol\n"
+                 "\"🔭 Arahkan ke Sini\" di situ.",
+            font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left", wraplength=280,
+        ).pack(fill="x", padx=10, pady=(6, 6))
+        self.btn_arahkan_ghurub_dip = ttk.Button(
+            frame_arah, text="🌙 Arahkan ke Bulan (saat ghurub)",
+            command=self._on_arahkan_teleskop_ke_bulan_ghurub, state="disabled")
+        self.btn_arahkan_ghurub_dip.pack(fill="x", padx=10, pady=(0, 10))
+
+    def _on_sambung_teleskop(self):
+        alamat = self.entry_alamat_teleskop.get().strip()
+        if not alamat:
+            messagebox.showwarning("Alamat kosong", "Isi dulu alamat mount (host:port).")
+            return
+        self.btn_sambung_teleskop.config(state="disabled")
+        self.label_status_teleskop.config(text=f"Menyambung ke {alamat}...")
+
+        def _kerja():
+            try:
+                kt = KontrolTeleskop(alamat)
+                kt.sambung()
+                info = kt.info_mount()
+                kapabilitas = kt.cek_kapabilitas()
+                self.antrian.put(("teleskop_sambung_ok", (kt, info, kapabilitas)))
+            except KesalahanTeleskop as e:
+                self.antrian.put(("teleskop_sambung_error", str(e)))
+            except Exception as e:
+                self.antrian.put(("teleskop_sambung_error", f"Kesalahan tak terduga: {e}"))
+
+        threading.Thread(target=_kerja, daemon=True).start()
+
+    def _on_putus_teleskop(self):
+        if self.kt_teleskop is not None:
+            try:
+                self.kt_teleskop.putus()
+            except Exception:
+                pass
+            self.kt_teleskop = None
+        if self._teleskop_poll_after_id is not None:
+            try:
+                self.after_cancel(self._teleskop_poll_after_id)
+            except Exception:
+                pass
+            self._teleskop_poll_after_id = None
+        self._hentikan_lacak_otomatis()
+        self.btn_sambung_teleskop.config(state="normal")
+        self.btn_putus_teleskop.config(state="disabled")
+        self.btn_arahkan_ghurub_dip.config(state="disabled")
+        self.btn_arahkan_realtime.config(state="disabled")
+        self.var_lacak_otomatis.set(False)
+        self.chk_lacak_otomatis.config(state="disabled")
+        self.label_status_teleskop.config(text="Terputus.")
+        self.label_posisi_teleskop.config(text="—")
+        self.label_lacak_teleskop.config(text="")
+
+    def _poll_posisi_teleskop(self):
+        """Dipanggil berulang tiap 1 detik selama tersambung -- baca posisi
+        mount SEKARANG & tampilkan. Dihentikan otomatis oleh
+        _on_putus_teleskop() (baca after_cancel di situ); kalau koneksi
+        putus sendiri di tengah jalan (mount dimatikan dll), tangkap
+        exception-nya & hentikan polling drpd spam error tiap detik."""
+        if self.kt_teleskop is None:
+            return
+        try:
+            pos = self.kt_teleskop.posisi_sekarang()
+            self.label_posisi_teleskop.config(
+                text=f"RA  = {pos['ra_jam']:.4f} jam\nDec = {pos['dec_deg']:+.3f}°\n"
+                     f"Az  = {pos['az_deg']:.3f}°\nAlt = {pos['alt_deg']:+.3f}°")
+        except Exception as e:
+            self.label_posisi_teleskop.config(text=f"(Gagal baca posisi: {e})")
+        self._teleskop_poll_after_id = self.after(1000, self._poll_posisi_teleskop)
+
+    def _on_arahkan_teleskop_realtime(self):
+        """Tombol "🌙 Arahkan ke Bulan (Real-time)" -- sekali tembak, pakai
+        posisi Bulan PERSIS SEKARANG (bukan tanggal simulasi tertentu).
+        Utama buat rukyat: rentang usaha rukyat lebar, bisa mulai jauh
+        sblm ghurub, jadi jangan cuma andalkan hasil Simulasi Hilal yg
+        terpaku ke satu momen ghurub yg dihitung."""
+        if self.kt_teleskop is None:
+            messagebox.showwarning("Belum tersambung", "Sambung ke mount dulu.")
+            return
+        if not self._hasil_cakrawala_terakhir:
+            messagebox.showwarning(
+                "Lokasi belum diketahui",
+                "Hitung/muat 🏔️ Profil Cakrawala dulu -- dipakai sbg lokasi "
+                "pengamat (lat/lon/tinggi) buat hitung posisi Bulan sekarang.")
+            return
+        try:
+            pos = self._hitung_posisi_realtime_lokal()
+            self._kirim_slew_altaz(pos["az_bulan"], pos["alt_bulan"])
+            self.label_lacak_teleskop.config(
+                text=f"Diarahkan ke Bulan pukul {datetime.now().strftime('%H:%M:%S')} "
+                     f"(Az={pos['az_bulan']:.2f}°, Alt={pos['alt_bulan']:+.2f}°)")
+        except Exception as e:
+            messagebox.showerror("Gagal hitung posisi real-time", str(e))
+
+    def _hitung_posisi_realtime_lokal(self):
+        """Bungkus hitung_posisi_realtime_bulan_matahari() dgn lokasi dari
+        profil cakrawala aktif & mode/ts/eph yg SEDANG dipakai GUI -- satu
+        tempat drpd diulang di tombol sekali-tembak & loop lacak. Fungsi
+        di baliknya kini berbasis UTC langsung (lihat catatan di sana),
+        jadi TIDAK perlu lagi ambil zona dari dropdown manapun di sini."""
+        profil = self._hasil_cakrawala_terakhir
+        return hitung_posisi_realtime_bulan_matahari(
+            profil["lat"], profil["lon"], profil["tinggi_pengamat"],
+            mode=self.mode.get(), ts=self.ts, eph=self.eph)
+
+    def _on_toggle_lacak_otomatis(self):
+        if self.var_lacak_otomatis.get():
+            if self.kt_teleskop is None:
+                self.var_lacak_otomatis.set(False)
+                messagebox.showwarning("Belum tersambung", "Sambung ke mount dulu.")
+                return
+            if not self._hasil_cakrawala_terakhir:
+                self.var_lacak_otomatis.set(False)
+                messagebox.showwarning(
+                    "Lokasi belum diketahui",
+                    "Hitung/muat 🏔️ Profil Cakrawala dulu (dipakai sbg lokasi pengamat).")
+                return
+            self._teleskop_lacak_aktif = True
+            self._langkah_lacak_otomatis()
+        else:
+            self._hentikan_lacak_otomatis()
+
+    def _hentikan_lacak_otomatis(self):
+        self._teleskop_lacak_aktif = False
+        if self._teleskop_lacak_after_id is not None:
+            try:
+                self.after_cancel(self._teleskop_lacak_after_id)
+            except Exception:
+                pass
+            self._teleskop_lacak_after_id = None
+
+    def _langkah_lacak_otomatis(self):
+        """Loop self.after() ~30 detik selama var_lacak_otomatis aktif --
+        hitung ulang posisi Bulan SEKARANG & kirim slew lagi, biar mount
+        terus mengikuti Bulan sepanjang sesi rukyat (bukan cuma sekali di
+        awal): perlu buat mount Alt-Az (posisi Alt/Az tetap jadi salah
+        dlm hitungan detik krn rotasi Bumi) & tetap membantu utk mount
+        EQ (koreksi drift/kesalahan polar alignment scr berkala). Kalau
+        mount MASIH slewing dari perintah sblmnya (belum sampai), lewati
+        giliran ini drpd numpuk perintah slew baru di atas yg lama."""
+        if not self._teleskop_lacak_aktif or self.kt_teleskop is None:
+            return
+        try:
+            if not self.kt_teleskop.sedang_slew():
+                pos = self._hitung_posisi_realtime_lokal()
+                self._kirim_slew_altaz(pos["az_bulan"], pos["alt_bulan"])
+                self.label_lacak_teleskop.config(
+                    text=f"Lacak aktif -- update terakhir {datetime.now().strftime('%H:%M:%S')} "
+                         f"(Az={pos['az_bulan']:.2f}°, Alt={pos['alt_bulan']:+.2f}°)")
+            else:
+                self.label_lacak_teleskop.config(text="Lacak aktif -- mount masih bergerak, "
+                                                       "menunggu giliran berikutnya...")
+        except Exception as e:
+            self.label_lacak_teleskop.config(text=f"Lacak aktif -- gagal update terakhir: {e}")
+        self._teleskop_lacak_after_id = self.after(30000, self._langkah_lacak_otomatis)
+
+    def _on_arahkan_teleskop_ke_bulan_ghurub(self):
+        if self.kt_teleskop is None:
+            messagebox.showwarning("Belum tersambung", "Sambung ke mount dulu.")
+            return
+        if not self._hasil_simulasi_hilal_terakhir:
+            messagebox.showwarning("Belum ada simulasi",
+                                    "Jalankan 🔭 Simulasi Hilal dulu di akordeon sebelumnya.")
+            return
+        g = self._hasil_simulasi_hilal_terakhir["ghurub"]["dip"]
+        if g["az_bulan"] is None:
+            messagebox.showwarning("Tidak ada ghurub", "Bulan tidak ghurub di lokasi/tanggal ini.")
+            return
+        self._kirim_slew_altaz(g["az_bulan"], g["alt_bulan"])
+
+    def _kirim_slew_altaz(self, az_deg, alt_deg):
+        """Dipanggil dari akordeon Kontrol Teleskop MAUPUN tombol
+        "🔭 Arahkan ke Sini" di panel Simulasi Hilal (_tampilkan_
+        simulasi_hilal_animasi) -- satu jalur kirim slew supaya
+        penanganan error/status konsisten di kedua tempat."""
+        if self.kt_teleskop is None:
+            messagebox.showwarning("Belum tersambung",
+                                    "Sambung ke mount dulu lewat akordeon 🔭 Kontrol Teleskop.")
+            return
+        try:
+            self.kt_teleskop.arahkan_ke_altaz(az_deg, alt_deg)
+            self._log(f"Teleskop: mengarahkan ke Az={az_deg:.3f}°, Alt={alt_deg:.3f}°")
+        except KesalahanTeleskop as e:
+            messagebox.showerror("Gagal mengarahkan", str(e))
+
     def _perbarui_status_profil_simulasi_hilal(self):
         """Sinkronkan label status profil di akordeon Simulasi Hilal dgn
         self._hasil_cakrawala_terakhir -- state yg DIBAGI BERSAMA dgn
@@ -12646,6 +13057,27 @@ class HisabWinApp(tk.Tk):
                     self._log(f"ERROR: {payload}")
                     messagebox.showerror("Terjadi kesalahan", payload)
                     self.btn_tampilkan_peta_langit.config(state="normal")
+
+                elif jenis == "teleskop_sambung_ok":
+                    kt, info, kapabilitas = payload
+                    self.kt_teleskop = kt
+                    self.btn_sambung_teleskop.config(state="disabled")
+                    self.btn_putus_teleskop.config(state="normal")
+                    self.btn_arahkan_ghurub_dip.config(state="normal")
+                    self.btn_arahkan_realtime.config(state="normal")
+                    self.chk_lacak_otomatis.config(state="normal")
+                    self.label_status_teleskop.config(
+                        text=f"Tersambung: {info['nama']}\n"
+                             f"Slew RA/Dec: {'ya' if kapabilitas['bisa_slew_radec'] else 'tidak'} | "
+                             f"Slew Alt/Az: {'ya' if kapabilitas['bisa_slew_altaz'] else 'tidak'}")
+                    self._log(f"Teleskop tersambung: {info['nama']} ({info['deskripsi']})")
+                    self._poll_posisi_teleskop()
+
+                elif jenis == "teleskop_sambung_error":
+                    self._log(f"ERROR sambung teleskop: {payload}")
+                    self.btn_sambung_teleskop.config(state="normal")
+                    self.label_status_teleskop.config(text=f"Gagal menyambung: {payload}")
+                    messagebox.showerror("Gagal menyambung ke mount", payload)
 
                 elif jenis == "cakrawala_ok":
                     profil = payload

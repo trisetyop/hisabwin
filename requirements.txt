@@ -7,3 +7,4 @@ ttkbootstrap
 pillow
 pyinstaller
 requests
+alpyca
