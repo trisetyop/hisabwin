@@ -21,10 +21,16 @@
 #  host:port ke alamat mount aslinya.
 # ============================================================
 from alpaca.telescope import Telescope
+from alpaca.camera import Camera
 from alpaca.exceptions import (
     NotConnectedException, InvalidValueException, InvalidOperationException,
     DriverException, AlpacaRequestException,
 )
+
+
+class KesalahanKamera(Exception):
+    """Sama spt KesalahanTeleskop -- satu jenis exception drpd GUI harus
+    tau detail internal alpyca/ASCOM Camera."""
 
 
 class KesalahanTeleskop(Exception):
@@ -154,3 +160,111 @@ class KontrolTeleskop:
     def _pastikan_tersambung(self):
         if not self._tersambung:
             raise KesalahanTeleskop("Belum sambung() ke mount")
+
+
+class KontrolKamera:
+    """Satu kamera (device Alpaca TERPISAH dari mount -- bisa di host:port
+    yg sama, bisa juga beda, krn di dunia nyata kamera & mount SERINGKALI
+    driver/software berbeda). Didesain utk LIVE VIEW MANUAL & KONTINU:
+    hilal itu tidak bisa "dijadwalkan" persis kapan tampak, jadi TIDAK ADA
+    capture otomatis di sini (mis. tersambung ke slew selesai) -- yang ada
+    cuma (a) exposure BERULANG terus-menerus utk preview hidup, dan (b)
+    fungsi simpan_frame_sekarang() yg pemanggilannya 100% keputusan
+    manusia, kapan saja, independen dari siklus preview.
+
+    Pemakaian dasar:
+        kk = KontrolKamera("127.0.0.1:11111")
+        kk.sambung()
+        kk.mulai_exposure(0.5)          # ulangi terus dari GUI (loop after())
+        while not kk.siap(): time.sleep(0.05)
+        larik = kk.ambil_larik()        # numpy 2D/3D, siap ditampilkan
+        # ... tampilkan larik ke GUI ...
+        # kapanpun user klik "Simpan": kk.simpan_ke_png(larik, path)
+    """
+
+    def __init__(self, alamat, nomor_perangkat=0):
+        self.alamat = alamat
+        self._k = Camera(alamat, nomor_perangkat)
+        self._tersambung = False
+
+    def sambung(self):
+        try:
+            self._k.Connected = True
+        except (AlpacaRequestException, DriverException) as e:
+            raise KesalahanKamera(f"Gagal sambung ke kamera di {self.alamat}: {e}") from e
+        self._tersambung = True
+
+    def putus(self):
+        try:
+            self._k.Connected = False
+        except Exception:
+            pass
+        self._tersambung = False
+
+    def tersambung(self):
+        return self._tersambung
+
+    def info_kamera(self):
+        try:
+            return {"nama": self._k.Name, "deskripsi": self._k.Description,
+                    "lebar": self._k.CameraXSize, "tinggi": self._k.CameraYSize}
+        except Exception as e:
+            raise KesalahanKamera(f"Gagal membaca info kamera: {e}") from e
+
+    def mulai_exposure(self, durasi_detik, cahaya=True):
+        """Mulai SATU exposure (async -- kembali segera, cek siap() utk tau
+        kapan selesai). GUI yg pakai ini utk live-view manggil fungsi ini
+        BERULANG (lihat siap()->ambil_larik()->mulai_exposure() lagi) dari
+        loop self.after() -- BUKAN dipanggil sekali lalu berhenti."""
+        self._pastikan_tersambung()
+        try:
+            self._k.StartExposure(durasi_detik, cahaya)
+        except InvalidValueException as e:
+            raise KesalahanKamera(f"Durasi exposure di luar jangkauan: {e}") from e
+        except (AlpacaRequestException, DriverException) as e:
+            raise KesalahanKamera(f"Gagal mulai exposure: {e}") from e
+
+    def siap(self):
+        try:
+            return bool(self._k.ImageReady)
+        except Exception as e:
+            raise KesalahanKamera(f"Gagal cek status exposure: {e}") from e
+
+    def ambil_larik(self):
+        """Ambil hasil exposure TERAKHIR sbg array numpy 2D (mono) atau 3D
+        (warna, HWC) -- siap dioper ke PIL.Image.fromarray() utk
+        ditampilkan/disimpan. alpyca otomatis tangani JSON ATAU ImageBytes
+        biner tergantung apa yg dikirim server (lihat catatan di
+        alpaca_mock_server.py -- mock ini pakai JSON polos)."""
+        self._pastikan_tersambung()
+        try:
+            import numpy as np
+            data = self._k.ImageArray
+            return np.array(data, dtype=np.uint16)
+        except Exception as e:
+            raise KesalahanKamera(f"Gagal ambil data gambar: {e}") from e
+
+    def hentikan_exposure(self):
+        try:
+            self._k.AbortExposure()
+        except Exception as e:
+            raise KesalahanKamera(f"Gagal menghentikan exposure: {e}") from e
+
+    @staticmethod
+    def simpan_ke_png(larik, path):
+        """Simpan array numpy (dari ambil_larik()) ke file PNG -- dipanggil
+        MURNI atas klik manual user (tombol "📸 Simpan Frame Ini"), TIDAK
+        PERNAH dipanggil otomatis dari loop preview. Auto-scale 16-bit/nilai
+        arbiter mock ke 8-bit spy tampil layak di PNG biasa."""
+        from PIL import Image
+        arr = larik.astype("float64")
+        lo, hi = arr.min(), arr.max()
+        if hi > lo:
+            arr8 = ((arr - lo) / (hi - lo) * 255.0).astype("uint8")
+        else:
+            arr8 = arr.astype("uint8")
+        Image.fromarray(arr8).save(path)
+
+    def _pastikan_tersambung(self):
+        if not self._tersambung:
+            raise KesalahanKamera("Belum sambung() ke kamera")

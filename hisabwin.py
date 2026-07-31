@@ -506,7 +506,8 @@ starmap.inisialisasi(
 #  tombol Sambung + tampilkan pesan "pip install alpyca" kalau False.
 # =========================================================
 try:
-    from kontrol_teleskop import KontrolTeleskop, KesalahanTeleskop
+    from kontrol_teleskop import (KontrolTeleskop, KesalahanTeleskop,
+                                   KontrolKamera, KesalahanKamera)
     TELESKOP_TERSEDIA = True
     _TELESKOP_ERROR_IMPOR = None
 except ImportError as _e:
@@ -9157,6 +9158,22 @@ class HisabWinApp(tk.Tk):
                 nama_tab_ditemukan = nama_tab
                 break
 
+        if nama_tab_ditemukan is not None:
+            # Hentikan dulu loop after() yg masih berjalan di tab ini (live
+            # view kamera, animasi simulasi hilal, dll) SEBELUM widget-nya
+            # dihancurkan -- sebelumnya on_rebuild cuma dipanggil kalau tab
+            # digambar ULANG lewat _tab_peta_frame, TIDAK kalau ditutup
+            # lewat tombol × di sini, jadi loop-nya tetap jalan di
+            # background & melempar TclError begitu widget target sudah
+            # tidak ada (mis. live view kamera yg terus polling kamera
+            # walau tabnya sudah ditutup).
+            on_rebuild = self._tab_peta[nama_tab_ditemukan].get("on_rebuild")
+            if on_rebuild is not None:
+                try:
+                    on_rebuild()
+                except Exception:
+                    pass
+
         self.notebook.forget(tab_id)
 
         if nama_tab_ditemukan is not None:
@@ -11542,12 +11559,23 @@ class HisabWinApp(tk.Tk):
         self._teleskop_poll_after_id = None   # timer poll posisi mount (tiap 1 dtk selama tersambung)
         self._teleskop_lacak_after_id = None  # timer lacak-otomatis (Real-time), terpisah dari yg di atas
         self._teleskop_lacak_aktif = False
+        self.kk_kamera = None  # instance KontrolKamera aktif, None kalau belum sambung
+        self._live_view_state = {"berjalan": False, "after_id": None, "larik_terakhir": None}
 
         if not TELESKOP_TERSEDIA:
+            _pesan_teleskop = (
+                "Modul 'alpyca' belum terpasang (atau ada masalah lain saat "
+                "memuat kontrol_teleskop.py).\n\n"
+                "Jalankan di terminal:\n    pip install alpyca\n\n"
+                "lalu buka ulang HisabWin -- bagian ini otomatis aktif.\n\n"
+                "Detail error asli (buat cek kalau alpyca sudah terpasang "
+                "tapi pesan ini masih muncul -- bisa jadi salah "
+                "environment/Python, kontrol_teleskop.py tidak ditemukan, "
+                "atau dependency lain yang belum terpasang):\n"
+                f"    {_TELESKOP_ERROR_IMPOR or '(tidak ada info)'}"
+            )
             ttk.Label(
-                body, text="Modul 'alpyca' belum terpasang.\n\n"
-                           "Jalankan di terminal:\n    pip install alpyca\n\n"
-                           "lalu buka ulang HisabWin -- bagian ini otomatis aktif.",
+                body, text=_pesan_teleskop,
                 font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left", wraplength=280,
             ).pack(fill="x", padx=10, pady=10)
             return
@@ -11607,7 +11635,7 @@ class HisabWinApp(tk.Tk):
 
         self.var_lacak_otomatis = tk.BooleanVar(value=False)
         self.chk_lacak_otomatis = ttk.Checkbutton(
-            frame_realtime, text="🔄 Lacak otomatis (update tiap 30 detik)",
+            frame_realtime, text="🔄 Lacak otomatis (update tiap 1 detik)",
             variable=self.var_lacak_otomatis, command=self._on_toggle_lacak_otomatis,
             state="disabled")
         self.chk_lacak_otomatis.pack(anchor="w", padx=10, pady=(0, 4))
@@ -11631,6 +11659,48 @@ class HisabWinApp(tk.Tk):
             frame_arah, text="🌙 Arahkan ke Bulan (saat ghurub)",
             command=self._on_arahkan_teleskop_ke_bulan_ghurub, state="disabled")
         self.btn_arahkan_ghurub_dip.pack(fill="x", padx=10, pady=(0, 10))
+
+        # --- Kamera: LIVE VIEW MANUAL & KONTINU -- BUKAN capture otomatis.
+        #     Hilal sifatnya tidak bisa dijadwalkan persis kapan tampak,
+        #     jadi yg disediakan cuma (a) preview yg jalan terus-menerus &
+        #     (b) tombol simpan yg 100% keputusan manusia, kapan saja
+        #     selama preview jalan -- lihat KontrolKamera di kontrol_
+        #     teleskop.py utk penjelasan lengkap filosofinya. ---
+        frame_kamera = ttk.LabelFrame(body, text="5. Kamera — Live View (manual)")
+        frame_kamera.pack(fill="x", **pad)
+        ttk.Label(
+            frame_kamera,
+            text="Preview jalan TERUS-MENERUS begitu dibuka -- TIDAK ada\n"
+                 "capture otomatis apapun. Kamu yang putuskan kapan simpan\n"
+                 "frame, kapan saja selama sesi rukyat.",
+            font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left", wraplength=280,
+        ).pack(fill="x", padx=10, pady=(6, 6))
+
+        ttk.Label(frame_kamera, text="Alamat kamera (host:port):").pack(
+            anchor="w", padx=10)
+        self.entry_alamat_kamera = ttk.Entry(frame_kamera, width=20)
+        self.entry_alamat_kamera.insert(0, "127.0.0.1:11111")
+        self.entry_alamat_kamera.pack(anchor="w", padx=10, pady=(0, 6))
+
+        frame_tombol_kamera = ttk.Frame(frame_kamera)
+        frame_tombol_kamera.pack(fill="x", padx=10, pady=(0, 6))
+        self.btn_sambung_kamera = ttk.Button(
+            frame_tombol_kamera, text="🔌 Sambung Kamera",
+            command=self._on_sambung_kamera, style="Aksen.TButton")
+        self.btn_sambung_kamera.pack(side="left")
+        self.btn_putus_kamera = ttk.Button(
+            frame_tombol_kamera, text="Putus", command=self._on_putus_kamera, state="disabled")
+        self.btn_putus_kamera.pack(side="left", padx=(6, 0))
+
+        self.label_status_kamera = ttk.Label(
+            frame_kamera, text="Belum tersambung.", font=FONT_KECIL,
+            foreground=WARNA_TEKS_MUTED, justify="left", wraplength=280)
+        self.label_status_kamera.pack(fill="x", padx=10, pady=(0, 6))
+
+        self.btn_buka_live_view = ttk.Button(
+            frame_kamera, text="🎥 Buka Live View", command=self._on_buka_live_view,
+            state="disabled")
+        self.btn_buka_live_view.pack(fill="x", padx=10, pady=(0, 10))
 
     def _on_sambung_teleskop(self):
         alamat = self.entry_alamat_teleskop.get().strip()
@@ -11757,14 +11827,23 @@ class HisabWinApp(tk.Tk):
             self._teleskop_lacak_after_id = None
 
     def _langkah_lacak_otomatis(self):
-        """Loop self.after() ~30 detik selama var_lacak_otomatis aktif --
+        """Loop self.after() ~1 detik selama var_lacak_otomatis aktif --
         hitung ulang posisi Bulan SEKARANG & kirim slew lagi, biar mount
         terus mengikuti Bulan sepanjang sesi rukyat (bukan cuma sekali di
         awal): perlu buat mount Alt-Az (posisi Alt/Az tetap jadi salah
         dlm hitungan detik krn rotasi Bumi) & tetap membantu utk mount
         EQ (koreksi drift/kesalahan polar alignment scr berkala). Kalau
         mount MASIH slewing dari perintah sblmnya (belum sampai), lewati
-        giliran ini drpd numpuk perintah slew baru di atas yg lama."""
+        giliran ini drpd numpuk perintah slew baru di atas yg lama --
+        jadi laju kirim SLEW sesungguhnya dibatasi kecepatan mount, bukan
+        1 detik ini (1 detik cuma seberapa SERING dicek/dihitung ulang).
+        Diukur (bukan tebakan): hitung_posisi_realtime_bulan_matahari()
+        ~19ms (mode ringan) / ~108ms (mode jpl, Skyfield) per panggilan --
+        dua2nya aman dipanggil tiap 1 detik dari main thread Tkinter
+        (jeda GUI sekejap, bukan macet), TAPI kalau nanti mau interval
+        LEBIH cepat dari 1 detik, jalur jpl (108ms) perlu dipindah ke
+        thread terpisah spt _on_sambung_teleskop, drpd dipanggil langsung
+        di sini."""
         if not self._teleskop_lacak_aktif or self.kt_teleskop is None:
             return
         try:
@@ -11779,7 +11858,7 @@ class HisabWinApp(tk.Tk):
                                                        "menunggu giliran berikutnya...")
         except Exception as e:
             self.label_lacak_teleskop.config(text=f"Lacak aktif -- gagal update terakhir: {e}")
-        self._teleskop_lacak_after_id = self.after(30000, self._langkah_lacak_otomatis)
+        self._teleskop_lacak_after_id = self.after(1000, self._langkah_lacak_otomatis)
 
     def _on_arahkan_teleskop_ke_bulan_ghurub(self):
         if self.kt_teleskop is None:
@@ -11809,6 +11888,184 @@ class HisabWinApp(tk.Tk):
             self._log(f"Teleskop: mengarahkan ke Az={az_deg:.3f}°, Alt={alt_deg:.3f}°")
         except KesalahanTeleskop as e:
             messagebox.showerror("Gagal mengarahkan", str(e))
+
+    # ---------------------------------------------------------------
+    # KAMERA -- live view manual & kontinu (lihat catatan filosofi di
+    # KontrolKamera, kontrol_teleskop.py: TIDAK ADA capture otomatis)
+    # ---------------------------------------------------------------
+    def _on_sambung_kamera(self):
+        alamat = self.entry_alamat_kamera.get().strip()
+        if not alamat:
+            messagebox.showwarning("Alamat kosong", "Isi dulu alamat kamera (host:port).")
+            return
+        self.btn_sambung_kamera.config(state="disabled")
+        self.label_status_kamera.config(text=f"Menyambung ke {alamat}...")
+
+        def _kerja():
+            try:
+                kk = KontrolKamera(alamat)
+                kk.sambung()
+                info = kk.info_kamera()
+                self.antrian.put(("kamera_sambung_ok", (kk, info)))
+            except KesalahanKamera as e:
+                self.antrian.put(("kamera_sambung_error", str(e)))
+            except Exception as e:
+                self.antrian.put(("kamera_sambung_error", f"Kesalahan tak terduga: {e}"))
+
+        threading.Thread(target=_kerja, daemon=True).start()
+
+    def _on_putus_kamera(self):
+        self._hentikan_live_view()
+        if self.kk_kamera is not None:
+            try:
+                self.kk_kamera.putus()
+            except Exception:
+                pass
+            self.kk_kamera = None
+        self.btn_sambung_kamera.config(state="normal")
+        self.btn_putus_kamera.config(state="disabled")
+        self.btn_buka_live_view.config(state="disabled")
+        self.label_status_kamera.config(text="Terputus.")
+
+    def _on_buka_live_view(self):
+        if self.kk_kamera is None:
+            messagebox.showwarning("Belum tersambung", "Sambung ke kamera dulu.")
+            return
+        self._tampilkan_live_view_kamera()
+
+    def _tampilkan_live_view_kamera(self):
+        """Buka/gambar-ulang tab 'live_view_kamera': Label gambar yg
+        di-update terus-menerus (siklus mulai_exposure -> poll siap() ->
+        ambil_larik() -> tampilkan -> ULANGI, semua lewat self.after(),
+        BUKAN thread terpisah -- tiap panggilan alpyca cepat (satu request
+        HTTP), jadi aman di main thread spt pola polling posisi mount)
+        + tombol Jeda/Lanjutkan + tombol Simpan Frame Ini (MANUAL, cuma
+        jalan kalau diklik, tidak pernah otomatis)."""
+        from PIL import Image, ImageTk
+
+        judul = "🎥 Live View Kamera"
+        frame = self._tab_peta_frame("live_view_kamera", judul)
+
+        label_gambar = tk.Label(frame, background="black")
+        label_gambar.pack(fill="both", expand=True, padx=8, pady=8)
+
+        frame_kontrol = ttk.Frame(frame)
+        frame_kontrol.pack(side="bottom", fill="x", padx=8, pady=(0, 8))
+
+        label_status = ttk.Label(frame_kontrol, text="Menyiapkan preview...", font=FONT_KECIL)
+        label_status.pack(side="left", padx=(0, 8))
+
+        state = self._live_view_state
+        state["berjalan"] = True
+        state["after_id"] = None
+        state["larik_terakhir"] = None
+        DURASI_EXPOSURE = 0.5  # detik -- pendek spy preview terasa "hidup", bukan slideshow lambat
+
+        def _larik_ke_photoimage(larik):
+            arr = larik.astype("float64")
+            lo, hi = float(arr.min()), float(arr.max())
+            if hi > lo:
+                arr8 = ((arr - lo) / (hi - lo) * 255.0).astype("uint8")
+            else:
+                arr8 = arr.astype("uint8")
+            img = Image.fromarray(arr8)
+            # Perbesar spy kelihatan di tab (mock 320x240 kecil) -- mount
+            # asli biasanya beresolusi jauh lebih besar, jadi ini lebih
+            # sering nge-KECIL-in drpd nge-besarin di pemakaian nyata.
+            lebar_target = 640
+            skala = lebar_target / img.width
+            img = img.resize((lebar_target, int(img.height * skala)))
+            return ImageTk.PhotoImage(img)
+
+        def _mulai_exposure_berikutnya():
+            if not state["berjalan"]:
+                return
+            try:
+                self.kk_kamera.mulai_exposure(DURASI_EXPOSURE)
+            except KesalahanKamera as e:
+                label_status.config(text=f"Error exposure: {e}")
+                return
+            state["after_id"] = self.after(50, _cek_siap)
+
+        def _cek_siap():
+            if not state["berjalan"]:
+                return
+            try:
+                siap = self.kk_kamera.siap()
+            except KesalahanKamera as e:
+                label_status.config(text=f"Error baca status: {e}")
+                return
+            if not siap:
+                state["after_id"] = self.after(50, _cek_siap)
+                return
+            try:
+                larik = self.kk_kamera.ambil_larik()
+            except KesalahanKamera as e:
+                label_status.config(text=f"Error ambil gambar: {e}")
+                return
+            state["larik_terakhir"] = larik
+            foto = _larik_ke_photoimage(larik)
+            label_gambar.image = foto  # WAJIB simpan referensi -- Tkinter
+                                       # buang PhotoImage tanpa referensi Python
+            label_gambar.config(image=foto)
+            label_status.config(
+                text=f"Live -- update {datetime.now().strftime('%H:%M:%S')} "
+                     f"(exposure {DURASI_EXPOSURE:.1f}dtk)")
+            _mulai_exposure_berikutnya()
+
+        def _toggle_jeda():
+            if state["berjalan"]:
+                state["berjalan"] = False
+                if state["after_id"] is not None:
+                    try:
+                        self.after_cancel(state["after_id"])
+                    except Exception:
+                        pass
+                    state["after_id"] = None
+                btn_jeda.config(text="▶ Lanjutkan")
+                label_status.config(text="Dijeda.")
+            else:
+                state["berjalan"] = True
+                btn_jeda.config(text="⏸ Jeda")
+                _mulai_exposure_berikutnya()
+
+        def _on_simpan_frame():
+            """SATU-SATUNYA cara file tersimpan -- murni klik manual ini,
+            tidak pernah dipanggil dari _cek_siap()/loop di atas."""
+            if state["larik_terakhir"] is None:
+                messagebox.showinfo("Belum ada frame", "Tunggu preview tampil dulu.")
+                return
+            folder = os.path.join(os.path.expanduser("~"), "HisabWin_Rukyat")
+            os.makedirs(folder, exist_ok=True)
+            nama = f"rukyat_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            path = os.path.join(folder, nama)
+            try:
+                KontrolKamera.simpan_ke_png(state["larik_terakhir"], path)
+                label_status.config(text=f"Tersimpan: {path}")
+                self._log(f"Frame kamera disimpan manual: {path}")
+            except Exception as e:
+                messagebox.showerror("Gagal menyimpan", str(e))
+
+        btn_jeda = ttk.Button(frame_kontrol, text="⏸ Jeda", command=_toggle_jeda, width=12)
+        btn_jeda.pack(side="left", padx=(0, 8))
+        btn_simpan = ttk.Button(frame_kontrol, text="📸 Simpan Frame Ini",
+                                 command=_on_simpan_frame, style="Aksen.TButton")
+        btn_simpan.pack(side="left")
+
+        self._tab_peta[nama_tab if (nama_tab := "live_view_kamera") else None]["on_rebuild"] = \
+            self._hentikan_live_view
+        self.notebook.select(frame)
+        _mulai_exposure_berikutnya()
+
+    def _hentikan_live_view(self):
+        state = self._live_view_state
+        state["berjalan"] = False
+        if state["after_id"] is not None:
+            try:
+                self.after_cancel(state["after_id"])
+            except Exception:
+                pass
+            state["after_id"] = None
 
     def _perbarui_status_profil_simulasi_hilal(self):
         """Sinkronkan label status profil di akordeon Simulasi Hilal dgn
@@ -13078,6 +13335,26 @@ class HisabWinApp(tk.Tk):
                     self.btn_sambung_teleskop.config(state="normal")
                     self.label_status_teleskop.config(text=f"Gagal menyambung: {payload}")
                     messagebox.showerror("Gagal menyambung ke mount", payload)
+
+                elif jenis == "kamera_sambung_ok":
+                    kk, info = payload
+                    self.kk_kamera = kk
+                    self.btn_sambung_kamera.config(state="disabled")
+                    self.btn_putus_kamera.config(state="normal")
+                    self.btn_buka_live_view.config(state="normal")
+                    nama = info.get("nama", "Kamera") if isinstance(info, dict) else str(info)
+                    deskripsi = info.get("deskripsi", "") if isinstance(info, dict) else ""
+                    teks_status = f"Tersambung: {nama}"
+                    if deskripsi:
+                        teks_status += f"\n{deskripsi}"
+                    self.label_status_kamera.config(text=teks_status)
+                    self._log(f"Kamera tersambung: {nama}")
+
+                elif jenis == "kamera_sambung_error":
+                    self._log(f"ERROR sambung kamera: {payload}")
+                    self.btn_sambung_kamera.config(state="normal")
+                    self.label_status_kamera.config(text=f"Gagal menyambung: {payload}")
+                    messagebox.showerror("Gagal menyambung ke kamera", payload)
 
                 elif jenis == "cakrawala_ok":
                     profil = payload
