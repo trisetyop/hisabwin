@@ -5559,70 +5559,100 @@ def hitung_tabel_efemeris_jpl(tanggal, lat_deg, lon_deg, zona_offset_jam, ts, ep
     return hasil
 
 
-def hitung_posisi_realtime_bulan_matahari(lat_deg, lon_deg, elevasi_m, mode, ts=None, eph=None,
-                                            zona_offset_jam=7.0):
-    """Posisi Matahari & Bulan PERSIS SEKARANG (waktu sistem saat fungsi
-    ini dipanggil) -- dipakai fitur "Arahkan ke Bulan (Real-time)"/"Lacak
-    Otomatis" di akordeon Kontrol Teleskop. BEDA dgn Simulasi Hilal: itu
-    fokus ke SATU momen ghurub yg dihitung; rukyat sungguhan biasanya
-    mulai jauh sblm ghurub & terus lanjut stlh itu (rentang jam, bukan
-    satu titik) -- fitur ini yg menjawab kebutuhan itu, bisa dipencet
-    kapan saja, bukan cuma pas ghurub.
+OBJEK_TELESKOP_TETAP = {
+    # Dua objek ini SELALU tersedia di kedua mode (ringan & jpl) --
+    # beda dari planet (lihat PLANET_TAMBAHAN_KATALOG di atas) yg VSOP87/
+    # ELP2000 mode ringan TIDAK cakup (itu teori gerak Matahari & Bulan
+    # scr spesifik, bukan teori planet umum).
+    "bulan": "🌙 Bulan (Hilal, default)",
+    "matahari": "☀️ Matahari",
+}
+
+
+def katalog_objek_teleskop(eph=None):
+    """Gabungan objek TETAP (Bulan/Matahari) + planet -- dipakai isi
+    dropdown pemilih objek di akordeon Kontrol Teleskop. Kalau `eph` sudah
+    dimuat, planet difilter ke yg SUNGGUHAN ada di kernel itu (lihat
+    daftar_planet_tersedia_di_eph); kalau blm (mode ringan/kernel blm
+    dimuat), tetap tampilkan semua 8 dari katalog -- GUI yg tanggung jawab
+    kasih tau "butuh mode jpl" kalau user pilih planet tapi kernelnya blm
+    siap (lihat hitung_posisi_realtime_objek()).
+    Return dict {objek_id: label} URUT: Bulan, Matahari, lalu planet."""
+    katalog = dict(OBJEK_TELESKOP_TETAP)
+    sumber_planet = daftar_planet_tersedia_di_eph(eph) if eph is not None else PLANET_TAMBAHAN_KATALOG
+    for obj_id, info in sumber_planet.items():
+        katalog[obj_id] = info[0]
+    return katalog
+
+
+def hitung_posisi_realtime_objek(lat_deg, lon_deg, elevasi_m, objek_id, mode, ts=None, eph=None):
+    """Posisi SATU objek (default 'bulan', tapi bisa 'matahari' atau salah
+    satu id di PLANET_TAMBAHAN_KATALOG) PERSIS SEKARANG (waktu sistem saat
+    fungsi ini dipanggil) -- dipakai fitur real-time/Lacak Otomatis di
+    akordeon Kontrol Teleskop. Bulan tetap DEFAULT (aplikasi ini fokus
+    hisab-rukyat hilal), tapi objek lain kadang perlu -- mis. cek
+    keselarasan mount pakai Matahari siang hari, arahkan ke planet terang
+    (Venus/Jupiter) yg lebih gampang dicari drpd hilal tipis buat latihan/
+    kalibrasi. BEDA dgn Simulasi Hilal: itu fokus ke SATU momen ghurub yg
+    dihitung; rukyat sungguhan biasanya mulai jauh sblm ghurub & terus
+    lanjut stlh itu (rentang jam, bukan satu titik) -- fitur ini yg
+    menjawab kebutuhan itu, bisa dipencet kapan saja.
 
     mode='jpl' (ts/eph sudah siap): hitung LANGSUNG di ts.now() (waktu UTC
     riil dari sistem, TIDAK lewat zona_offset_jam manual -- 'sekarang' itu
-    sendiri tidak ambigu di UTC) -- baris2 di bawah ini SENGAJA disalin
-    persis dari hitung_tabel_efemeris_jpl() di atas (termasuk fallback
-    refraksi -3.5..0, lihat catatan di sana) tapi utk 1 titik waktu
-    (skalar) bukan array 1 hari, drpd hitung tabel sehari penuh cuma buat
-    1 titik (boros kalau dipanggil berulang tiap dtk oleh mode Lacak).
+    sendiri tidak ambigu di UTC) -- utk objek APAPUN (Bulan/Matahari/
+    planet, dari eph["sun"]/eph["moon"]/eph[kunci_skyfield]), termasuk
+    fallback refraksi -3.5..0 (lihat catatan di hitung_tabel_efemeris_jpl).
 
-    mode lain (termasuk 'jpl' tapi ts/eph BLM siap): SENGAJA TIDAK
-    menyalin ulang pipeline VSOP87/ELP2000 mode Ringan di sini (panjang,
-    banyak langkah -- menyalin cuma utk 1 titik berisiko diam2 melenceng
-    kalau pipeline aslinya berubah lagi) -- pakai hitung_tabel_efemeris_
-    ringan() APA ADANYA dgn interval_menit=1 (murah, numpy vektor, <10ms
-    utk 1 hari penuh) lalu ambil baris paling dekat jam sekarang.
+    mode lain (termasuk 'jpl' tapi ts/eph BLM siap): CUMA jalan utk
+    objek_id 'bulan'/'matahari' (VSOP87/ELP2000 mode Ringan tidak cakup
+    planet) -- pakai hitung_tabel_efemeris_ringan() APA ADANYA (sama spt
+    sblmnya) dgn interval_menit=1, ambil baris terdekat jam UTC sekarang.
+    Objek planet di jalur ini melempar ValueError dgn pesan jelas ("butuh
+    mode jpl"), BUKAN diam2 salah/crash teknis.
 
-    PAKAI datetime.utcnow() + zona_offset_jam=0.0 ke hitung_tabel_
-    efemeris_ringan (BUKAN datetime.now() lokal + zona_offset_jam dari
-    parameter/dropdown) -- SEBELUMNYA begitu, TAPI itu diam2 SALAH kalau
-    zona timezone sistem operasinya tidak persis sama dgn zona yg dipilih
-    user di dropdown GUI (mis. laptop diset UTC/zona lain, atau app
-    dijalankan dari server) -- jam_lokal dari datetime.now() lalu dikurangi
-    zona_offset_jam LAGI di dalam hitung_tabel_efemeris_ringan, jadi
-    geser DOBEL. Diverifikasi numerik: bug ini bikin selisih ~94° alt
-    antara mode jpl (ts.now(), selalu benar) vs mode ringan lama, di
-    sandbox yg jam sistemnya kebetulan UTC bukan WIB. Fix: pakai UTC apa
-    adanya di kedua sisi (jam sistem & parameter zona=0 ke tabel), 'sekarang'
-    di UTC tidak ambigu shg tidak butuh tau zona sistem operasi sama sekali.
-    Parameter zona_offset_jam DIPERTAHANKAN di signature fungsi ini demi
-    kompatibilitas pemanggil, TAPI TIDAK DIPAKAI lagi di jalur ini."""
+    PAKAI datetime.utcnow() (BUKAN datetime.now() lokal + zona_offset_jam)
+    di jalur fallback -- lihat riwayat obrolan: kombinasi jam sistem lokal
+    + zona dropdown pernah kebukti diam2 geser ~94° kalau zona sistem
+    operasinya tdk match zona yg dipilih user. UTC di kedua sisi tidak
+    ambigu, tidak butuh tau zona sistem sama sekali.
+
+    Return {"az": derajat, "alt": derajat, "label": nama tampilan objek}."""
+    katalog = katalog_objek_teleskop(eph)
+    if objek_id not in katalog:
+        raise ValueError(f"Objek '{objek_id}' tidak dikenal.")
+    label = katalog[objek_id]
+
     if mode == "jpl" and ts is not None and eph is not None:
+        if objek_id == "bulan":
+            badan = eph["moon"]
+        elif objek_id == "matahari":
+            badan = eph["sun"]
+        else:
+            _, kunci_skyfield, _ = PLANET_TAMBAHAN_KATALOG[objek_id]
+            badan = eph[kunci_skyfield]
         t = ts.now()
         observer, _ = _observer_skyfield(eph, lat_deg, lon_deg, elevasi_m)
-        sun, moon = eph["sun"], eph["moon"]
-        alt_sun, az_sun, _ = observer.at(t).observe(sun).apparent().altaz(
+        alt_ap, az_ap, _ = observer.at(t).observe(badan).apparent().altaz(
             temperature_C=10.0, pressure_mbar=1010.0)
-        alt_moon, az_moon, _ = observer.at(t).observe(moon).apparent().altaz(
-            temperature_C=10.0, pressure_mbar=1010.0)
-        alt_sun_geo, _, _ = observer.at(t).observe(sun).apparent().altaz()
-        alt_moon_geo, _, _ = observer.at(t).observe(moon).apparent().altaz()
-        alt_s_deg, alt_b_deg = float(alt_sun.degrees), float(alt_moon.degrees)
-        if -3.5 <= alt_sun_geo.degrees <= 0.0:
-            alt_s_deg = float(alt_sun_geo.degrees + koreksi_refraksi(alt_sun_geo.degrees))
-        if -3.5 <= alt_moon_geo.degrees <= 0.0:
-            alt_b_deg = float(alt_moon_geo.degrees + koreksi_refraksi(alt_moon_geo.degrees))
-        return {"az_matahari": float(az_sun.degrees), "alt_matahari": alt_s_deg,
-                "az_bulan": float(az_moon.degrees), "alt_bulan": alt_b_deg}
+        alt_geo, _, _ = observer.at(t).observe(badan).apparent().altaz()
+        alt_deg = float(alt_ap.degrees)
+        if -3.5 <= alt_geo.degrees <= 0.0:
+            alt_deg = float(alt_geo.degrees + koreksi_refraksi(alt_geo.degrees))
+        return {"az": float(az_ap.degrees), "alt": alt_deg, "label": label}
+
+    if objek_id not in ("bulan", "matahari"):
+        raise ValueError(
+            f"{label} butuh mode 'jpl' dgn kernel efemeris sudah dimuat -- "
+            "mode ringan (VSOP87/ELP2000) cuma mendukung Bulan & Matahari.")
 
     u = datetime.utcnow()
     jam_utc_sekarang = u.hour + u.minute / 60.0 + u.second / 3600.0
     tabel = hitung_tabel_efemeris_ringan(u.date(), lat_deg, lon_deg, 0.0,
                                           interval_menit=1, elevasi_m=elevasi_m)
     baris = min(tabel, key=lambda b: abs(b["jam_lokal"] - jam_utc_sekarang))
-    return {"az_matahari": baris["az_matahari"], "alt_matahari": baris["alt_matahari"],
-            "az_bulan": baris["az_bulan"], "alt_bulan": baris["alt_bulan"]}
+    sufiks = "matahari" if objek_id == "matahari" else "bulan"
+    return {"az": baris[f"az_{sufiks}"], "alt": baris[f"alt_{sufiks}"], "label": label}
 
 
 HORIZONS_API_URL = "https://ssd.jpl.nasa.gov/api/horizons.api"
@@ -11623,11 +11653,38 @@ class HisabWinApp(tk.Tk):
         frame_realtime.pack(fill="x", **pad)
         ttk.Label(
             frame_realtime,
-            text="Posisi Bulan/Matahari PERSIS SEKARANG (bukan simulasi tanggal\n"
+            text="Posisi objek PERSIS SEKARANG (bukan simulasi tanggal\n"
                  "tertentu) -- bisa dipakai kapan saja selama sesi rukyat,\n"
                  "sebelum maupun sesudah ghurub.",
             font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left", wraplength=280,
         ).pack(fill="x", padx=10, pady=(6, 6))
+
+        frame_objek = ttk.Frame(frame_realtime)
+        frame_objek.pack(fill="x", padx=10, pady=(0, 6))
+        ttk.Label(frame_objek, text="Objek:").pack(side="left")
+        # Katalog dibangun TANPA eph (blm tentu sudah dimuat pas GUI ini
+        # dibangun) -- fallback ke PLANET_TAMBAHAN_KATALOG penuh (8 planet)
+        # via katalog_objek_teleskop(None). Bulan tetap PALING ATAS/default
+        # krn app ini fokus hisab-rukyat hilal (lihat catatan filosofi di
+        # hitung_posisi_realtime_objek()) -- objek lain ada, tapi bukan yg
+        # disorot. Milih planet sblm kernel dimuat/mode ringan tetap boleh
+        # dipilih di dropdown, cuma nanti kasih pesan jelas saat dipakai
+        # (bukan disembunyikan dari pilihan -- lihat _on_arahkan_teleskop_
+        # realtime), krn __init__ GUI ini terjadi SEBELUM user tentu sempat
+        # muat kernel di akordeon lain.
+        self._katalog_objek_teleskop = katalog_objek_teleskop(None)  # {id: label}
+        # Combobox nunjukin LABEL yg enak dibaca (bukan ID mentah spt
+        # "jupiter") -- reverse-lookup label->id di bawah dipakai balik
+        # tiap kali perlu ID-nya (lihat _on_ganti_objek_teleskop &
+        # _hitung_posisi_realtime_lokal).
+        self._label_ke_id_objek_teleskop = {v: k for k, v in self._katalog_objek_teleskop.items()}
+        self.var_objek_teleskop = tk.StringVar(value=self._katalog_objek_teleskop["bulan"])
+        self.combo_objek_teleskop = ttk.Combobox(
+            frame_objek, textvariable=self.var_objek_teleskop, state="readonly",
+            width=22, values=list(self._katalog_objek_teleskop.values()))
+        self.combo_objek_teleskop.pack(side="left", padx=(6, 0))
+        self.combo_objek_teleskop.bind("<<ComboboxSelected>>", self._on_ganti_objek_teleskop)
+
         self.btn_arahkan_realtime = ttk.Button(
             frame_realtime, text="🌙 Arahkan ke Bulan (Real-time)",
             command=self._on_arahkan_teleskop_realtime, state="disabled")
@@ -11765,12 +11822,22 @@ class HisabWinApp(tk.Tk):
             self.label_posisi_teleskop.config(text=f"(Gagal baca posisi: {e})")
         self._teleskop_poll_after_id = self.after(1000, self._poll_posisi_teleskop)
 
+    def _on_ganti_objek_teleskop(self, _event=None):
+        """Combobox pemilih objek berubah -- perbarui label tombol Arahkan
+        biar jelas objek APA yg bakal dikirim ke mount (bukan diam2 selalu
+        bilang 'Bulan' padahal user sudah pilih Jupiter, mis.). var_objek_
+        teleskop nyimpen LABEL (yg tampil di combobox), bukan ID -- lihat
+        _hitung_posisi_realtime_lokal() utk arah sebaliknya (label->id)."""
+        label = self.var_objek_teleskop.get()
+        self.btn_arahkan_realtime.config(text=f"🎯 Arahkan ke {label} (Real-time)")
+
     def _on_arahkan_teleskop_realtime(self):
-        """Tombol "🌙 Arahkan ke Bulan (Real-time)" -- sekali tembak, pakai
-        posisi Bulan PERSIS SEKARANG (bukan tanggal simulasi tertentu).
-        Utama buat rukyat: rentang usaha rukyat lebar, bisa mulai jauh
-        sblm ghurub, jadi jangan cuma andalkan hasil Simulasi Hilal yg
-        terpaku ke satu momen ghurub yg dihitung."""
+        """Tombol "🎯 Arahkan ke <objek> (Real-time)" -- sekali tembak,
+        pakai posisi objek yg DIPILIH di dropdown (default Bulan) PERSIS
+        SEKARANG (bukan tanggal simulasi tertentu). Utama buat rukyat:
+        rentang usaha rukyat lebar, bisa mulai jauh sblm ghurub, jadi
+        jangan cuma andalkan hasil Simulasi Hilal yg terpaku ke satu
+        momen ghurub yg dihitung."""
         if self.kt_teleskop is None:
             messagebox.showwarning("Belum tersambung", "Sambung ke mount dulu.")
             return
@@ -11778,26 +11845,29 @@ class HisabWinApp(tk.Tk):
             messagebox.showwarning(
                 "Lokasi belum diketahui",
                 "Hitung/muat 🏔️ Profil Cakrawala dulu -- dipakai sbg lokasi "
-                "pengamat (lat/lon/tinggi) buat hitung posisi Bulan sekarang.")
+                "pengamat (lat/lon/tinggi) buat hitung posisi objek sekarang.")
             return
         try:
             pos = self._hitung_posisi_realtime_lokal()
-            self._kirim_slew_altaz(pos["az_bulan"], pos["alt_bulan"])
+            self._kirim_slew_altaz(pos["az"], pos["alt"])
             self.label_lacak_teleskop.config(
-                text=f"Diarahkan ke Bulan pukul {datetime.now().strftime('%H:%M:%S')} "
-                     f"(Az={pos['az_bulan']:.2f}°, Alt={pos['alt_bulan']:+.2f}°)")
+                text=f"Diarahkan ke {pos['label']} pukul {datetime.now().strftime('%H:%M:%S')} "
+                     f"(Az={pos['az']:.2f}°, Alt={pos['alt']:+.2f}°)")
+        except ValueError as e:
+            messagebox.showwarning("Objek tak tersedia", str(e))
         except Exception as e:
             messagebox.showerror("Gagal hitung posisi real-time", str(e))
 
     def _hitung_posisi_realtime_lokal(self):
-        """Bungkus hitung_posisi_realtime_bulan_matahari() dgn lokasi dari
-        profil cakrawala aktif & mode/ts/eph yg SEDANG dipakai GUI -- satu
-        tempat drpd diulang di tombol sekali-tembak & loop lacak. Fungsi
-        di baliknya kini berbasis UTC langsung (lihat catatan di sana),
-        jadi TIDAK perlu lagi ambil zona dari dropdown manapun di sini."""
+        """Bungkus hitung_posisi_realtime_objek() dgn lokasi dari profil
+        cakrawala aktif, objek yg SEDANG dipilih di dropdown, & mode/ts/eph
+        yg SEDANG dipakai GUI -- satu tempat drpd diulang di tombol
+        sekali-tembak & loop lacak. Fungsi di baliknya berbasis UTC
+        langsung, jadi TIDAK perlu ambil zona dari dropdown manapun."""
         profil = self._hasil_cakrawala_terakhir
-        return hitung_posisi_realtime_bulan_matahari(
-            profil["lat"], profil["lon"], profil["tinggi_pengamat"],
+        objek_id = self._label_ke_id_objek_teleskop[self.var_objek_teleskop.get()]
+        return hitung_posisi_realtime_objek(
+            profil["lat"], profil["lon"], profil["tinggi_pengamat"], objek_id,
             mode=self.mode.get(), ts=self.ts, eph=self.eph)
 
     def _on_toggle_lacak_otomatis(self):
@@ -11837,8 +11907,8 @@ class HisabWinApp(tk.Tk):
         giliran ini drpd numpuk perintah slew baru di atas yg lama --
         jadi laju kirim SLEW sesungguhnya dibatasi kecepatan mount, bukan
         1 detik ini (1 detik cuma seberapa SERING dicek/dihitung ulang).
-        Diukur (bukan tebakan): hitung_posisi_realtime_bulan_matahari()
-        ~19ms (mode ringan) / ~108ms (mode jpl, Skyfield) per panggilan --
+        Diukur (bukan tebakan): hitung_posisi_realtime_objek() ~19ms
+        (mode ringan) / ~108ms (mode jpl, Skyfield) per panggilan --
         dua2nya aman dipanggil tiap 1 detik dari main thread Tkinter
         (jeda GUI sekejap, bukan macet), TAPI kalau nanti mau interval
         LEBIH cepat dari 1 detik, jalur jpl (108ms) perlu dipindah ke
@@ -11849,13 +11919,19 @@ class HisabWinApp(tk.Tk):
         try:
             if not self.kt_teleskop.sedang_slew():
                 pos = self._hitung_posisi_realtime_lokal()
-                self._kirim_slew_altaz(pos["az_bulan"], pos["alt_bulan"])
+                self._kirim_slew_altaz(pos["az"], pos["alt"])
                 self.label_lacak_teleskop.config(
-                    text=f"Lacak aktif -- update terakhir {datetime.now().strftime('%H:%M:%S')} "
-                         f"(Az={pos['az_bulan']:.2f}°, Alt={pos['alt_bulan']:+.2f}°)")
+                    text=f"Lacak {pos['label']} aktif -- update terakhir "
+                         f"{datetime.now().strftime('%H:%M:%S')} "
+                         f"(Az={pos['az']:.2f}°, Alt={pos['alt']:+.2f}°)")
             else:
                 self.label_lacak_teleskop.config(text="Lacak aktif -- mount masih bergerak, "
                                                        "menunggu giliran berikutnya...")
+        except ValueError as e:
+            self.label_lacak_teleskop.config(text=f"Lacak dihentikan -- {e}")
+            self.var_lacak_otomatis.set(False)
+            self._hentikan_lacak_otomatis()
+            return
         except Exception as e:
             self.label_lacak_teleskop.config(text=f"Lacak aktif -- gagal update terakhir: {e}")
         self._teleskop_lacak_after_id = self.after(1000, self._langkah_lacak_otomatis)
@@ -12052,8 +12128,7 @@ class HisabWinApp(tk.Tk):
                                  command=_on_simpan_frame, style="Aksen.TButton")
         btn_simpan.pack(side="left")
 
-        self._tab_peta[nama_tab if (nama_tab := "live_view_kamera") else None]["on_rebuild"] = \
-            self._hentikan_live_view
+        self._tab_peta["live_view_kamera"]["on_rebuild"] = self._hentikan_live_view
         self.notebook.select(frame)
         _mulai_exposure_berikutnya()
 
