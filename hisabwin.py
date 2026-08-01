@@ -3748,6 +3748,87 @@ def masehi_ke_hijriyah_kriteria(tahun, bulan, hari, kriteria, ts, eph, mode="rin
                       "menurut kriteria terpilih.")
 
 
+def masehi_ke_hijriyah_kriteria_bulan(tahun, bulan, kriteria, ts, eph, mode="ringan",
+                                       progress_cb=lambda msg: None):
+    """Versi HEMAT dari masehi_ke_hijriyah_kriteria() utk SATU BULAN Masehi
+    penuh sekaligus (dipakai buat_pdf_almanak_bulanan utk kolom Hijriyah
+    kalau kriteria dipilih 'mabims'/'khgt', BUKAN 'urfi').
+
+    Kalau naif memanggil masehi_ke_hijriyah_kriteria() 28-31x (sekali per
+    hari), tiap panggilan akan re-scan ijtimak & RE-EVALUASI kriteria
+    hilal astronomis dari nol lewat _tentukan_awal_bulan() -- padahal
+    hasilnya SAMA PERSIS utk semua hari dlm satu bulan Hijriyah yg sama
+    (mayoritas hari dlm satu bulan Masehi). Di sini _tentukan_awal_bulan()
+    (fungsi asli, TIDAK diubah) di-cache per index ijtimak, jadi cuma
+    dieksekusi ulang pas ketemu TRANSISI bulan Hijriyah (biasanya 1-3x per
+    bulan Masehi, krn bulan Hijriyah 29-30 hari vs Masehi 28-31 hari),
+    bukan 28-31x. Algoritma pencarian per-hari SENGAJA dibuat identik dgn
+    masehi_ke_hijriyah_kriteria() (idx acuan + coba idx_acuan-1/idx_acuan/
+    idx_acuan+1) supaya hasilnya konsisten dgn versi per-tanggal itu.
+
+    Return dict {hari (1..n_hari): (tahun_h, bulan_h, nama_bulan_h, hari_h)}.
+    Raises ValueError kalau ada hari yg gagal dikonversi menurut kriteria
+    terpilih (kasus tepi ekstrem, semestinya nyaris tidak pernah terjadi
+    dlm praktik)."""
+    n_hari = calendar.monthrange(tahun, bulan)[1]
+    ijtimak_semua = _cari_ijtimak_sekitar_tanggal(datetime(tahun, bulan, 1))
+
+    cache_awal = {}
+
+    def _awal_cached(i):
+        if i not in cache_awal:
+            if not (0 <= i < len(ijtimak_semua)):
+                cache_awal[i] = None
+            else:
+                waktu_ij = ijtimak_semua[i]
+                tanggal_ij = datetime(waktu_ij.year, waktu_ij.month, waktu_ij.day)
+                progress_cb(f"Menghitung awal bulan Hijriyah (ijtimak "
+                            f"{waktu_ij.strftime('%d %b %Y')})...")
+                cache_awal[i] = _tentukan_awal_bulan(
+                    tanggal_ij, waktu_ij, kriteria, ts, eph, mode=mode)
+        return cache_awal[i]
+
+    hasil = {}
+    for hari in range(1, n_hari + 1):
+        target = datetime(tahun, bulan, hari)
+
+        idx_acuan = None
+        for i, waktu_ij in enumerate(ijtimak_semua):
+            if datetime(waktu_ij.year, waktu_ij.month, waktu_ij.day) <= target:
+                idx_acuan = i
+            else:
+                break
+        if idx_acuan is None:
+            raise ValueError(f"Tidak ada ijtimak yang ditemukan sebelum {target:%d-%m-%Y}.")
+
+        ditemukan = False
+        for i in (idx_acuan, idx_acuan - 1, idx_acuan + 1):
+            if not (0 <= i < len(ijtimak_semua)):
+                continue
+            awal = _awal_cached(i)
+            if awal is None:
+                continue
+            akhir = _awal_cached(i + 1) if i + 1 < len(ijtimak_semua) else None
+            if awal <= target and (akhir is None or target < akhir):
+                waktu_ij = ijtimak_semua[i]
+                jd_ij = julian_day(
+                    waktu_ij.year, waktu_ij.month,
+                    waktu_ij.day + (waktu_ij.hour + waktu_ij.minute / 60.0
+                                     + waktu_ij.second / 3600.0) / 24.0)
+                jd_ij = float(np.asarray(jd_ij).reshape(()))
+                tahun_h, bulan_h = _cari_label_hijriyah_urfi(jd_ij)
+                hasil[hari] = (tahun_h, bulan_h, _NAMA_BULAN_HIJRIYAH[bulan_h - 1],
+                               (target - awal).days + 1)
+                ditemukan = True
+                break
+        if not ditemukan:
+            raise ValueError(
+                f"Tanggal {target:%d-%m-%Y} tidak ditemukan bulan Hijriyah-nya "
+                "menurut kriteria terpilih.")
+
+    return hasil
+
+
 def hijriyah_kriteria_ke_masehi(tahun_h, bulan_h, hari_h, kriteria, ts, eph, mode="ringan",
                                  progress_cb=lambda msg: None):
     """Kebalikan dari masehi_ke_hijriyah_kriteria(): tanggal Hijriyah (tahun_h,
@@ -5020,6 +5101,142 @@ def hitung_waktu_sholat_otomatis(tanggal, lat_deg, lon_deg, zona_offset_jam, mod
         return hitung_waktu_sholat_skyfield(tanggal, lat_deg, lon_deg, zona_offset_jam,
                                              ts, eph, **kwargs)
     return hitung_waktu_sholat(tanggal, lat_deg, lon_deg, zona_offset_jam, **kwargs)
+
+
+def buat_pdf_almanak_bulanan(tahun, bulan, lat_deg, lon_deg, zona_offset_jam, path_output,
+                              elevasi_m=0.0, mode="ringan", ts=None, eph=None,
+                              sudut_fajar=-20.0, sudut_isya=-18.0, mazhab_ashar="syafii",
+                              nama_lokasi=None, kriteria_hijriyah="urfi",
+                              progress_cb=lambda msg: None):
+    """Cetak almanak/jadwal waktu sholat + tanggal Hijriyah SATU BULAN
+    Masehi penuh ke PDF -- satu halaman tabel (landscape A4), dirender
+    lewat matplotlib.backends.backend_pdf.PdfPages. matplotlib SUDAH jadi
+    dependency WAJIB app ini (semua grafik lain pakai), jadi ini TIDAK
+    nambah library baru (reportlab/fpdf2/dll) -- konsisten dgn filosofi
+    minim-dependency yg sama yg bikin scipy di-exclude dari build
+    PyInstaller (lihat catatan di hitung_profil_cakrawala).
+
+    Kolom per hari: Tanggal, Hari, Tanggal Hijriyah, Imsak, Subuh, Terbit,
+    Dzuhur, Ashar, Maghrib, Isya, Fase Bulan (% iluminasi, sample tengah
+    hari lokal lewat hitung_tabel_efemeris_ringan -- selalu VSOP87/ELP2000
+    spy cepat & konsisten, TIDAK ikut parameter mode spt waktu sholat, krn
+    nilainya cuma indikator kasar di tabel ini, bukan angka kritis spt
+    waktu sholat).
+
+    kriteria_hijriyah: 'urfi' (default, kalender tabular instan -- lihat
+    catatan masehi_ke_hijriyah_urfi, BUKAN hasil rukyat/hisab hakiki),
+    'mabims' (kriteria MABIMS Indonesia), atau 'khgt' (KHGT Muhammadiyah)
+    -- dua yg terakhir memakai hisab ijtimak & evaluasi kriteria hilal
+    ASLI lewat masehi_ke_hijriyah_kriteria_bulan() (versi hemat, dihitung
+    SEKALI di depan utk seluruh bulan, bukan per hari -- lihat docstring
+    fungsi itu), butuh ts/eph & mode yg sama dgn perhitungan waktu sholat.
+
+    Return path_output kalau berhasil."""
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    n_hari = calendar.monthrange(tahun, bulan)[1]
+
+    # Kolom Hijriyah kriteria MABIMS/KHGT: hitung SEKALI di depan utk
+    # seluruh bulan (bukan di dalam loop per-hari di bawah) -- lihat
+    # docstring masehi_ke_hijriyah_kriteria_bulan() knp ini penting utk
+    # performa (evaluasi kriteria hilal astronomis cuma dijalankan ulang
+    # pas transisi bulan Hijriyah, bukan 28-31x).
+    tabel_hijriyah_kriteria = None
+    if kriteria_hijriyah in ("mabims", "khgt"):
+        tabel_hijriyah_kriteria = masehi_ke_hijriyah_kriteria_bulan(
+            tahun, bulan, kriteria_hijriyah, ts, eph, mode=mode, progress_cb=progress_cb)
+
+    baris_tabel = []
+    for hari in range(1, n_hari + 1):
+        progress_cb(f"Menghitung {hari:02d}/{bulan:02d}/{tahun}...")
+        tgl = datetime(tahun, bulan, hari)
+        sholat = hitung_waktu_sholat_otomatis(
+            tgl, lat_deg, lon_deg, zona_offset_jam, mode=mode, ts=ts, eph=eph,
+            elevasi_m=elevasi_m, sudut_fajar=sudut_fajar, sudut_isya=sudut_isya,
+            mazhab_ashar=mazhab_ashar)
+        # Nama hari dari kalender Masehi murni (Zeller-spt via .weekday())
+        # -- TIDAK butuh julian_day/astronomi krn nama hari itu urusan
+        # kalender sipil, bukan hasil pengamatan; HARI_ID[0]="Minggu",
+        # Python .weekday() Senin=0 -- makanya +1 sblm %7.
+        nama_hari = HARI_ID[(datetime(tahun, bulan, hari).weekday() + 1) % 7]
+        if tabel_hijriyah_kriteria is not None:
+            th, bh, nama_bh, hh = tabel_hijriyah_kriteria[hari]
+            label_hijriyah = f"{hh} {nama_bh} {th}"
+        else:
+            th, bh, hh = masehi_ke_hijriyah_urfi(tahun, bulan, hari)
+            label_hijriyah = f"{hh} {_NAMA_BULAN_HIJRIYAH[bh - 1]} {th}"
+
+        def _j(kunci):
+            v = sholat.get(kunci)
+            return _label_jam_dari_desimal(v) if v is not None else "-"
+
+        try:
+            tabel_hari = hitung_tabel_efemeris_ringan(
+                tgl, lat_deg, lon_deg, zona_offset_jam, interval_menit=720,
+                elevasi_m=elevasi_m)
+            label_fase = f"{tabel_hari[1]['fraksi_iluminasi_persen']:.0f}%"
+        except Exception:
+            label_fase = "-"
+
+        baris_tabel.append([
+            f"{hari:02d}", nama_hari, label_hijriyah,
+            _j("imsak"), _j("subuh"), _j("terbit"), _j("dzuhur"),
+            _j("ashar"), _j("maghrib"), _j("isya"), label_fase,
+        ])
+
+    progress_cb("Menggambar PDF...")
+    fig, ax = plt.subplots(figsize=(11.69, 8.27))  # A4 landscape, inci
+    ax.axis("off")
+
+    label_kriteria_hijriyah = {
+        "urfi": "Urfi/Tabular", "mabims": "MABIMS", "khgt": "KHGT Muhammadiyah",
+    }[kriteria_hijriyah]
+
+    judul = f"ALMANAK / JADWAL WAKTU SHOLAT — {BULAN_ID[bulan - 1]} {tahun}"
+    label_mazhab = "Hanafi" if mazhab_ashar == "hanafi" else "Syafi'i"
+    sub = (f"Lokasi: {nama_lokasi or f'{lat_deg:.4f}, {lon_deg:.4f}'}   |   "
+           f"Zona UTC{zona_offset_jam:+.1f}   |   "
+           f"Mazhab Ashar: {label_mazhab}   |   "
+           f"Sudut Fajar/Isya: {sudut_fajar:.0f}°/{sudut_isya:.0f}°   |   "
+           f"Kriteria Hijriyah: {label_kriteria_hijriyah}")
+    fig.text(0.5, 0.97, judul, ha="center", fontsize=15, fontweight="bold")
+    fig.text(0.5, 0.945, sub, ha="center", fontsize=8.5, color="#444444")
+
+    kolom = ["Tgl", "Hari", "Hijriyah", "Imsak", "Subuh", "Terbit", "Dzuhur",
+             "Ashar", "Maghrib", "Isya", "Fase"]
+    tabel = ax.table(cellText=baris_tabel, colLabels=kolom, loc="center",
+                      cellLoc="center", bbox=[0.02, 0.03, 0.96, 0.88])
+    tabel.auto_set_font_size(False)
+    tabel.set_fontsize(8)
+    # WAJIB -- tanpa ini, kolom "Hijriyah" (isi terpanjang: "17 Rabiul
+    # Awal 1448") kepotong/numpuk visual ke kolom "Imsak" di sebelahnya
+    # krn ax.table() defaultnya bagi lebar kolom RATA, bukan menurut isi
+    # -- kebukti pas dites (ekstraksi teks PDF nunjukin "1448" nyampur
+    # sama "04:28" milik kolom sebelah).
+    tabel.auto_set_column_width(col=list(range(len(kolom))))
+    for (r, c), cell in tabel.get_celld().items():
+        if r == 0:
+            cell.set_facecolor("#1D4ED8")
+            cell.set_text_props(color="white", fontweight="bold")
+        elif r % 2 == 0:
+            cell.set_facecolor("#F1F5F9")
+
+    if kriteria_hijriyah == "urfi":
+        catatan_hijriyah = "tanggal Hijriyah tabular (urfi), BUKAN hasil rukyat/hisab hakiki"
+    else:
+        catatan_hijriyah = (f"tanggal Hijriyah dari hisab ijtimak & kriteria hilal "
+                             f"{label_kriteria_hijriyah} (bukan kalender tabular/urfi)")
+    fig.text(0.02, 0.012,
+              f"Dibuat via HisabWin, {datetime.now().strftime('%d %B %Y %H:%M')} -- "
+              f"{catatan_hijriyah}; fase bulan = iluminasi tengah hari lokal.",
+              fontsize=6.5, color="#888888")
+
+    with PdfPages(path_output) as pdf:
+        pdf.savefig(fig)
+    plt.close(fig)
+    progress_cb(f"Selesai: {path_output}")
+    return path_output
 
 
 def _label_jam_dari_desimal(jam_desimal):
@@ -8819,7 +9036,7 @@ class HisabWinApp(tk.Tk):
                                   self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter(),
                                   self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit(),
                                   self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal(),
-                                  self._tutup_akordeon_teleskop()))
+                                  self._tutup_akordeon_teleskop(), self._tutup_akordeon_almanak()))
         frame0 = ttk.LabelFrame(body_hilal, text="0. Mode Perhitungan")
         frame0.pack(fill="x", **pad)
 
@@ -8923,7 +9140,7 @@ class HisabWinApp(tk.Tk):
                                   self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter(),
                                   self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit(),
                                   self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal(),
-                                  self._tutup_akordeon_teleskop()))
+                                  self._tutup_akordeon_teleskop(), self._tutup_akordeon_almanak()))
 
         # --- Tab tambahan: Waktu Sholat & Arah Kiblat (permanen, selalu ada) ---
         self._bangun_tab_sholat()
@@ -8941,7 +9158,7 @@ class HisabWinApp(tk.Tk):
                                   self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter(),
                                   self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit(),
                                   self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal(),
-                                  self._tutup_akordeon_teleskop()))
+                                  self._tutup_akordeon_teleskop(), self._tutup_akordeon_almanak()))
         self._bangun_akordeon_gerhana(self._body_akordeon_gerhana, pad)
 
         # --- Bagian akordeon ke-4: Perbandingan Kalender MABIMS vs KHGT
@@ -8958,7 +9175,7 @@ class HisabWinApp(tk.Tk):
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_konverter(),
                                   self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit(),
                                   self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal(),
-                                  self._tutup_akordeon_teleskop()))
+                                  self._tutup_akordeon_teleskop(), self._tutup_akordeon_almanak()))
         self._bangun_akordeon_kalbanding(self._body_akordeon_kalbanding, pad)
 
         # --- Tab hasil perbandingan (permanen, sama seperti tab Waktu
@@ -8984,7 +9201,7 @@ class HisabWinApp(tk.Tk):
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
                                   self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit(),
                                   self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal(),
-                                  self._tutup_akordeon_teleskop()))
+                                  self._tutup_akordeon_teleskop(), self._tutup_akordeon_almanak()))
         self._bangun_akordeon_konverter(self._body_akordeon_konverter, pad)
 
         # --- Bagian akordeon ke-6: Tabel Efemeris (posisi Matahari & Bulan
@@ -9001,7 +9218,7 @@ class HisabWinApp(tk.Tk):
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
                                   self._tutup_akordeon_konverter(), self._tutup_akordeon_peta_langit(),
                                   self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal(),
-                                  self._tutup_akordeon_teleskop()))
+                                  self._tutup_akordeon_teleskop(), self._tutup_akordeon_almanak()))
         self._bangun_akordeon_efemeris(self._body_akordeon_efemeris, pad)
         self._bangun_tab_efemeris()
 
@@ -9022,7 +9239,7 @@ class HisabWinApp(tk.Tk):
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
                                   self._tutup_akordeon_konverter(), self._tutup_akordeon_efemeris(),
                                   self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal(),
-                                  self._tutup_akordeon_teleskop()))
+                                  self._tutup_akordeon_teleskop(), self._tutup_akordeon_almanak()))
         self._bangun_akordeon_peta_langit(self._body_akordeon_peta_langit, pad)
 
         # --- Bagian akordeon ke-8: Profil Cakrawala (elevasi horizon 360
@@ -9043,7 +9260,7 @@ class HisabWinApp(tk.Tk):
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
                                   self._tutup_akordeon_konverter(), self._tutup_akordeon_efemeris(),
                                   self._tutup_akordeon_peta_langit(), self._tutup_akordeon_simulasi_hilal(),
-                                  self._tutup_akordeon_teleskop()))
+                                  self._tutup_akordeon_teleskop(), self._tutup_akordeon_almanak()))
         self._bangun_akordeon_cakrawala(self._body_akordeon_cakrawala, pad)
 
         # --- Bagian akordeon ke-9: Simulasi Hilal -- membandingkan posisi
@@ -9061,7 +9278,7 @@ class HisabWinApp(tk.Tk):
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
                                   self._tutup_akordeon_konverter(), self._tutup_akordeon_efemeris(),
                                   self._tutup_akordeon_peta_langit(), self._tutup_akordeon_cakrawala(),
-                                  self._tutup_akordeon_teleskop()))
+                                  self._tutup_akordeon_teleskop(), self._tutup_akordeon_almanak()))
         self._bangun_akordeon_simulasi_hilal(self._body_akordeon_simulasi_hilal, pad)
 
         # --- Bagian akordeon ke-10: Kontrol Teleskop -- kirim posisi hilal
@@ -9083,8 +9300,22 @@ class HisabWinApp(tk.Tk):
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
                                   self._tutup_akordeon_konverter(), self._tutup_akordeon_efemeris(),
                                   self._tutup_akordeon_peta_langit(), self._tutup_akordeon_cakrawala(),
-                                  self._tutup_akordeon_simulasi_hilal()))
+                                  self._tutup_akordeon_simulasi_hilal(), self._tutup_akordeon_almanak()))
         self._bangun_akordeon_teleskop(self._body_akordeon_teleskop, pad)
+
+        # --- Bagian akordeon ke-11: Cetak Almanak (PDF jadwal sholat +
+        #     tanggal Hijriyah SATU BULAN penuh, lihat buat_pdf_almanak_
+        #     bulanan()). ---
+        self._body_akordeon_almanak, self._buka_akordeon_almanak, self._tutup_akordeon_almanak = \
+            self._buat_bagian_akordeon(
+                tab_kontrol, "🗓️ Cetak Almanak",
+                buka_awal=False,
+                on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
+                                  self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
+                                  self._tutup_akordeon_konverter(), self._tutup_akordeon_efemeris(),
+                                  self._tutup_akordeon_peta_langit(), self._tutup_akordeon_cakrawala(),
+                                  self._tutup_akordeon_simulasi_hilal(), self._tutup_akordeon_teleskop()))
+        self._bangun_akordeon_almanak(self._body_akordeon_almanak, pad)
 
     def _on_ganti_tab_notebook(self, event=None):
         """Dipanggil tiap kali tab notebook kanan (peta/Waktu Sholat)
@@ -12142,6 +12373,132 @@ class HisabWinApp(tk.Tk):
                 pass
             state["after_id"] = None
 
+    # ---------------------------------------------------------------
+    # CETAK ALMANAK -- jadwal sholat + tanggal Hijriyah satu bulan, PDF
+    # ---------------------------------------------------------------
+    def _bangun_akordeon_almanak(self, body, pad):
+        """Isi badan akordeon "🗓️ Cetak Almanak". SENGAJA TIDAK bikin input
+        lokasi/zona/elevasi/mazhab/sudut sendiri -- pakai APA ADANYA yg
+        SUDAH diisi user di akordeon 🕌 Waktu Sholat & Kiblat (_ambil_
+        koordinat_sholat, _ambil_zona_offset_sholat, self.entry_elevasi,
+        self.var_mazhab_ashar, self.var_preset_sudut, self.mode_sholat) --
+        almanak pd dasarnya cuma jadwal sholat sebulan penuh, jadi masuk
+        akal pakai pengaturan yg sama, drpd duplikasi seluruh form input
+        koordinat (desimal/DMS) yg sudah ada di situ."""
+        ttk.Label(
+            body,
+            text="Cetak PDF jadwal sholat + tanggal Hijriyah SATU BULAN "
+                 "penuh. Pakai lokasi & pengaturan yg SAMA dgn 🕌 Waktu "
+                 "Sholat & Kiblat -- buka & isi bagian itu dulu kalau "
+                 "belum diatur.",
+            font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left", wraplength=280,
+        ).pack(fill="x", padx=10, pady=(6, 6))
+
+        frame_periode = ttk.LabelFrame(body, text="1. Periode")
+        frame_periode.pack(fill="x", **pad)
+        now = datetime.now()
+
+        ttk.Label(frame_periode, text="Bulan:").grid(row=0, column=0, padx=6, pady=6, sticky="w")
+        self.var_almanak_bulan = tk.StringVar(value=BULAN_ID[now.month - 1])
+        combo_bulan = ttk.Combobox(
+            frame_periode, textvariable=self.var_almanak_bulan, state="readonly",
+            width=12, values=BULAN_ID)
+        combo_bulan.grid(row=0, column=1, padx=6, pady=6)
+
+        ttk.Label(frame_periode, text="Tahun:").grid(
+            row=1, column=0, padx=6, pady=(0, 6), sticky="w")
+        self.entry_almanak_tahun = ttk.Entry(frame_periode, width=8)
+        self.entry_almanak_tahun.insert(0, str(now.year))
+        self.entry_almanak_tahun.grid(row=1, column=1, padx=6, pady=(0, 6), sticky="w")
+
+        # --- Kriteria tanggal Hijriyah -- sama 3 pilihan spt akordeon
+        #     🔄 Konverter Kalender (urfi/mabims/khgt), lihat catatan
+        #     kriteria_hijriyah di buat_pdf_almanak_bulanan(). ---
+        self.kriteria_almanak = tk.StringVar(value="urfi")
+        frame_kriteria = ttk.LabelFrame(body, text="2. Kriteria Tanggal Hijriyah")
+        frame_kriteria.pack(fill="x", **pad)
+        ttk.Radiobutton(
+            frame_kriteria, text="Urfi / Tabular (cepat, perkiraan)", value="urfi",
+            variable=self.kriteria_almanak,
+        ).grid(row=0, column=0, padx=10, pady=4, sticky="w")
+        ttk.Radiobutton(
+            frame_kriteria, text="MABIMS (Indonesia)", value="mabims",
+            variable=self.kriteria_almanak,
+        ).grid(row=1, column=0, padx=10, pady=4, sticky="w")
+        ttk.Radiobutton(
+            frame_kriteria, text="KHGT (Muhammadiyah)", value="khgt",
+            variable=self.kriteria_almanak,
+        ).grid(row=2, column=0, padx=10, pady=4, sticky="w")
+        ttk.Label(
+            frame_kriteria,
+            text="MABIMS/KHGT memakai hisab ijtimak & kriteria hilal ASLI "
+                 "(sama spt 🔄 Konverter Kalender) -- perlu waktu hitung "
+                 "lebih lama drpd Urfi, apalagi di Mode Presisi.",
+            font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left",
+            wraplength=280,
+        ).grid(row=3, column=0, padx=10, pady=(0, 4), sticky="w")
+
+        self.btn_cetak_almanak = ttk.Button(
+            body, text="🖨️ Buat PDF Almanak", command=self._on_cetak_almanak,
+            style="Aksen.TButton")
+        self.btn_cetak_almanak.pack(fill="x", padx=10, pady=(6, 4))
+
+        self.label_status_almanak = ttk.Label(
+            body, text="", font=FONT_KECIL, foreground=WARNA_TEKS_MUTED,
+            justify="left", wraplength=280)
+        self.label_status_almanak.pack(fill="x", padx=10, pady=(0, 10))
+
+    def _on_cetak_almanak(self):
+        try:
+            lat, lon = self._ambil_koordinat_sholat()
+            zona = self._ambil_zona_offset_sholat()
+            elevasi = float(self.entry_elevasi.get().strip().replace(",", ".") or "0")
+        except ValueError as e:
+            messagebox.showerror(
+                "Input tidak valid",
+                f"{e}\n\n(Isian ini dari akordeon 🕌 Waktu Sholat & Kiblat -- "
+                "buka bagian itu utk memperbaikinya.)")
+            return
+
+        bulan = BULAN_ID.index(self.var_almanak_bulan.get()) + 1
+        try:
+            tahun = int(self.entry_almanak_tahun.get())
+        except ValueError:
+            messagebox.showerror("Input tidak valid", "Tahun harus berupa angka.")
+            return
+
+        sudut_fajar, sudut_isya = PRESET_SUDUT[self.var_preset_sudut.get()]
+        mazhab = self.var_mazhab_ashar.get()
+        mode_hisab = self.mode_sholat.get()
+        if mode_hisab == "jpl" and self.eph is None:
+            mode_hisab = "ringan"  # sama spt _on_hitung_sholat -- fallback diam2, bukan blokir
+
+        kriteria_hijriyah = self.kriteria_almanak.get()
+        sufiks_kriteria = {"urfi": "Urfi", "mabims": "MABIMS", "khgt": "KHGT"}[kriteria_hijriyah]
+        nama_default = f"Almanak_{self.var_almanak_bulan.get()}_{tahun}_{sufiks_kriteria}.pdf"
+        path = filedialog.asksaveasfilename(
+            title="Simpan Almanak PDF", defaultextension=".pdf",
+            initialfile=nama_default, filetypes=[("File PDF", "*.pdf")])
+        if not path:
+            return
+
+        self.btn_cetak_almanak.config(state="disabled")
+        self.label_status_almanak.config(text="Menyiapkan...")
+
+        def _kerja():
+            try:
+                buat_pdf_almanak_bulanan(
+                    tahun, bulan, lat, lon, zona, path, elevasi_m=elevasi,
+                    mode=mode_hisab, ts=self.ts, eph=self.eph,
+                    sudut_fajar=sudut_fajar, sudut_isya=sudut_isya, mazhab_ashar=mazhab,
+                    kriteria_hijriyah=kriteria_hijriyah,
+                    progress_cb=lambda msg: self.antrian.put(("almanak_progres", msg)))
+                self.antrian.put(("almanak_ok", path))
+            except Exception as e:
+                self.antrian.put(("almanak_error", str(e)))
+
+        threading.Thread(target=_kerja, daemon=True).start()
+
     def _perbarui_status_profil_simulasi_hilal(self):
         """Sinkronkan label status profil di akordeon Simulasi Hilal dgn
         self._hasil_cakrawala_terakhir -- state yg DIBAGI BERSAMA dgn
@@ -13410,6 +13767,30 @@ class HisabWinApp(tk.Tk):
                     self.btn_sambung_teleskop.config(state="normal")
                     self.label_status_teleskop.config(text=f"Gagal menyambung: {payload}")
                     messagebox.showerror("Gagal menyambung ke mount", payload)
+
+                elif jenis == "almanak_progres":
+                    self.label_status_almanak.config(text=payload)
+
+                elif jenis == "almanak_ok":
+                    self.btn_cetak_almanak.config(state="normal")
+                    self.label_status_almanak.config(text=f"Tersimpan: {payload}")
+                    self._log(f"Almanak PDF dibuat: {payload}")
+                    if messagebox.askyesno("Selesai", f"Almanak tersimpan di:\n{payload}\n\nBuka sekarang?"):
+                        try:
+                            if sys.platform == "win32":
+                                os.startfile(payload)
+                            elif sys.platform == "darwin":
+                                subprocess.run(["open", payload], check=False)
+                            else:
+                                subprocess.run(["xdg-open", payload], check=False)
+                        except Exception as e:
+                            messagebox.showerror("Gagal membuka file", str(e))
+
+                elif jenis == "almanak_error":
+                    self.btn_cetak_almanak.config(state="normal")
+                    self.label_status_almanak.config(text=f"Gagal: {payload}")
+                    self._log(f"ERROR cetak almanak: {payload}")
+                    messagebox.showerror("Gagal membuat almanak", payload)
 
                 elif jenis == "kamera_sambung_ok":
                     kk, info = payload
