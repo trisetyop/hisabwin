@@ -9158,7 +9158,7 @@ class HisabWinApp(tk.Tk):
                                   self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter(),
                                   self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit(),
                                   self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal(),
-                                  self._tutup_akordeon_teleskop(), self._tutup_akordeon_almanak()))
+                                  self._tutup_akordeon_teleskop(), self._tutup_akordeon_almanak(), self._tutup_akordeon_skrip()))
         frame0 = ttk.LabelFrame(body_hilal, text="0. Mode Perhitungan")
         frame0.pack(fill="x", **pad)
 
@@ -9262,7 +9262,7 @@ class HisabWinApp(tk.Tk):
                                   self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter(),
                                   self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit(),
                                   self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal(),
-                                  self._tutup_akordeon_teleskop(), self._tutup_akordeon_almanak()))
+                                  self._tutup_akordeon_teleskop(), self._tutup_akordeon_almanak(), self._tutup_akordeon_skrip()))
 
         # --- Tab tambahan: Waktu Sholat & Arah Kiblat (permanen, selalu ada) ---
         self._bangun_tab_sholat()
@@ -9274,13 +9274,13 @@ class HisabWinApp(tk.Tk):
         #     sebaliknya -- supaya bilah kiri tetap ringkas. ---
         self._body_akordeon_gerhana, self._buka_akordeon_gerhana, self._tutup_akordeon_gerhana = \
             self._buat_bagian_akordeon(
-                tab_kontrol, "☀️ Gerhana",
+                tab_kontrol, "☀️Gerhana",
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter(),
                                   self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit(),
                                   self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal(),
-                                  self._tutup_akordeon_teleskop(), self._tutup_akordeon_almanak()))
+                                  self._tutup_akordeon_teleskop(), self._tutup_akordeon_almanak(), self._tutup_akordeon_skrip()))
         self._bangun_akordeon_gerhana(self._body_akordeon_gerhana, pad)
 
         # --- Bagian akordeon ke-4: Perbandingan Kalender MABIMS vs KHGT
@@ -9297,7 +9297,7 @@ class HisabWinApp(tk.Tk):
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_konverter(),
                                   self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit(),
                                   self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal(),
-                                  self._tutup_akordeon_teleskop(), self._tutup_akordeon_almanak()))
+                                  self._tutup_akordeon_teleskop(), self._tutup_akordeon_almanak(), self._tutup_akordeon_skrip()))
         self._bangun_akordeon_kalbanding(self._body_akordeon_kalbanding, pad)
 
         # --- Tab hasil perbandingan (permanen, sama seperti tab Waktu
@@ -9323,7 +9323,7 @@ class HisabWinApp(tk.Tk):
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
                                   self._tutup_akordeon_efemeris(), self._tutup_akordeon_peta_langit(),
                                   self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal(),
-                                  self._tutup_akordeon_teleskop(), self._tutup_akordeon_almanak()))
+                                  self._tutup_akordeon_teleskop(), self._tutup_akordeon_almanak(), self._tutup_akordeon_skrip()))
         self._bangun_akordeon_konverter(self._body_akordeon_konverter, pad)
 
         # --- Bagian akordeon ke-6: Tabel Efemeris (posisi Matahari & Bulan
@@ -9340,7 +9340,7 @@ class HisabWinApp(tk.Tk):
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
                                   self._tutup_akordeon_konverter(), self._tutup_akordeon_peta_langit(),
                                   self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal(),
-                                  self._tutup_akordeon_teleskop(), self._tutup_akordeon_almanak()))
+                                  self._tutup_akordeon_teleskop(), self._tutup_akordeon_almanak(), self._tutup_akordeon_skrip()))
         self._bangun_akordeon_efemeris(self._body_akordeon_efemeris, pad)
         self._bangun_tab_efemeris()
 
@@ -9361,7 +9361,7 @@ class HisabWinApp(tk.Tk):
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
                                   self._tutup_akordeon_konverter(), self._tutup_akordeon_efemeris(),
                                   self._tutup_akordeon_cakrawala(), self._tutup_akordeon_simulasi_hilal(),
-                                  self._tutup_akordeon_teleskop(), self._tutup_akordeon_almanak()))
+                                  self._tutup_akordeon_teleskop(), self._tutup_akordeon_almanak(), self._tutup_akordeon_skrip()))
         self._bangun_akordeon_peta_langit(self._body_akordeon_peta_langit, pad)
 
         # --- Bagian akordeon ke-8: Profil Cakrawala (elevasi horizon 360
@@ -9382,7 +9382,7 @@ class HisabWinApp(tk.Tk):
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
                                   self._tutup_akordeon_konverter(), self._tutup_akordeon_efemeris(),
                                   self._tutup_akordeon_peta_langit(), self._tutup_akordeon_simulasi_hilal(),
-                                  self._tutup_akordeon_teleskop(), self._tutup_akordeon_almanak()))
+                                  self._tutup_akordeon_teleskop(), self._tutup_akordeon_almanak(), self._tutup_akordeon_skrip()))
         self._bangun_akordeon_cakrawala(self._body_akordeon_cakrawala, pad)
 
         # --- Bagian akordeon ke-9: Simulasi Hilal -- membandingkan posisi
@@ -9400,7 +9400,7 @@ class HisabWinApp(tk.Tk):
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
                                   self._tutup_akordeon_konverter(), self._tutup_akordeon_efemeris(),
                                   self._tutup_akordeon_peta_langit(), self._tutup_akordeon_cakrawala(),
-                                  self._tutup_akordeon_teleskop(), self._tutup_akordeon_almanak()))
+                                  self._tutup_akordeon_teleskop(), self._tutup_akordeon_almanak(), self._tutup_akordeon_skrip()))
         self._bangun_akordeon_simulasi_hilal(self._body_akordeon_simulasi_hilal, pad)
 
         # --- Bagian akordeon ke-10: Kontrol Teleskop -- kirim posisi hilal
@@ -9422,7 +9422,7 @@ class HisabWinApp(tk.Tk):
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
                                   self._tutup_akordeon_konverter(), self._tutup_akordeon_efemeris(),
                                   self._tutup_akordeon_peta_langit(), self._tutup_akordeon_cakrawala(),
-                                  self._tutup_akordeon_simulasi_hilal(), self._tutup_akordeon_almanak()))
+                                  self._tutup_akordeon_simulasi_hilal(), self._tutup_akordeon_almanak(), self._tutup_akordeon_skrip()))
         self._bangun_akordeon_teleskop(self._body_akordeon_teleskop, pad)
 
         # --- Bagian akordeon ke-11: Cetak Almanak (PDF jadwal sholat +
@@ -9430,14 +9430,28 @@ class HisabWinApp(tk.Tk):
         #     bulanan()). ---
         self._body_akordeon_almanak, self._buka_akordeon_almanak, self._tutup_akordeon_almanak = \
             self._buat_bagian_akordeon(
-                tab_kontrol, "🗓️ Cetak Almanak",
+                tab_kontrol, "🗓️Cetak Almanak",
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
                                   self._tutup_akordeon_konverter(), self._tutup_akordeon_efemeris(),
                                   self._tutup_akordeon_peta_langit(), self._tutup_akordeon_cakrawala(),
-                                  self._tutup_akordeon_simulasi_hilal(), self._tutup_akordeon_teleskop()))
+                                  self._tutup_akordeon_simulasi_hilal(), self._tutup_akordeon_teleskop(), self._tutup_akordeon_skrip()))
         self._bangun_akordeon_almanak(self._body_akordeon_almanak, pad)
+
+        # --- Bagian akordeon ke-12: Skrip Python (pro user, lihat
+        #     hisabwin_api.py & _bangun_akordeon_skrip). ---
+        self._body_akordeon_skrip, self._buka_akordeon_skrip, self._tutup_akordeon_skrip = \
+            self._buat_bagian_akordeon(
+                tab_kontrol, "🐍 Skrip Python",
+                buka_awal=False,
+                on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
+                                  self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
+                                  self._tutup_akordeon_konverter(), self._tutup_akordeon_efemeris(),
+                                  self._tutup_akordeon_peta_langit(), self._tutup_akordeon_cakrawala(),
+                                  self._tutup_akordeon_simulasi_hilal(), self._tutup_akordeon_teleskop(),
+                                  self._tutup_akordeon_almanak()))
+        self._bangun_akordeon_skrip(self._body_akordeon_skrip, pad)
 
     def _on_ganti_tab_notebook(self, event=None):
         """Dipanggil tiap kali tab notebook kanan (peta/Waktu Sholat)
@@ -11447,7 +11461,7 @@ class HisabWinApp(tk.Tk):
     #  Akordeon ke-8: Profil Cakrawala
     # =====================================================
     def _bangun_akordeon_cakrawala(self, body, pad):
-        """Isi badan akordeon "🏔️ Profil Cakrawala": hitung elevasi horizon
+        """Isi badan akordeon "🏔️Profil Cakrawala": hitung elevasi horizon
         360 derajat dari 1 titik pengamat (mirip heywhatsthat.com), lewat
         hitung_profil_cakrawala() -- murni fungsi baru, TIDAK menyentuh
         logika hisab hilal manapun. Hasilnya bisa disimpan ke .txt
@@ -12642,6 +12656,144 @@ class HisabWinApp(tk.Tk):
                 self.antrian.put(("almanak_error", str(e)))
 
         threading.Thread(target=_kerja, daemon=True).start()
+
+    # ---------------------------------------------------------------
+    # SKRIP PYTHON -- konsol scripting pro-user (lihat hisabwin_api.py)
+    # ---------------------------------------------------------------
+    _SKRIP_CONTOH = '''\
+# Contoh -- coba jalankan langsung, lalu edit sesuka hati.
+# `hisabwin` = API stabil (hisabwin_api.py); `app` = jembatan ke state
+# GUI yg SEDANG JALAN (profil cakrawala aktif, koneksi teleskop, kernel).
+
+print("Posisi Bulan sekarang:", hisabwin.posisi_realtime(-6.5831, 106.6312))
+
+if app.profil_cakrawala:
+    print("Profil cakrawala aktif:", app.profil_cakrawala["lat"], app.profil_cakrawala["lon"])
+else:
+    print("Belum ada Profil Cakrawala aktif -- hitung/muat dulu di akordeon 🏔️")
+
+# Contoh loop: waktu Maghrib 7 hari ke depan
+from datetime import datetime, timedelta
+hari_ini = datetime.now()
+for i in range(7):
+    tgl = hari_ini + timedelta(days=i)
+    sholat = hisabwin.hitung_sholat((tgl.year, tgl.month, tgl.day), -6.5831, 106.6312, 7.0)
+    print(tgl.strftime("%d-%m-%Y"), "Maghrib:", round(sholat["maghrib"], 3))
+'''
+
+    def _bangun_akordeon_skrip(self, body, pad):
+        """Isi badan akordeon "🐍 Skrip Python" -- editor skrip + konsol
+        output, dieksekusi di thread terpisah (pola sama spt fitur berat
+        lain di app ini) supaya GUI tidak freeze selama skrip jalan.
+        `print()` di dalam skrip DIALIHKAN ke konsol output di bawah
+        (lihat _jalankan_skrip_di_thread) -- BUKAN via redirect sys.stdout
+        global (itu proses-lebar & bisa bentrok kalau GUI sendiri nulis ke
+        stdout sementara skrip thread lain jalan); sebagai gantinya
+        `print` di-override LANGSUNG di namespace exec-nya, jadi aman."""
+        ttk.Label(
+            body,
+            text="Jalankan skrip Python dgn akses ke fungsi2 inti app "
+                 "(hisabwin_api.py) & state GUI yg sedang jalan (`app`) -- "
+                 "TANPA sandbox, skrip py biasa dgn akses penuh. Cocok utk "
+                 "batch/automasi yg tidak dicakup GUI.",
+            font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left", wraplength=280,
+        ).pack(fill="x", padx=10, pady=(6, 6))
+
+        frame_tombol = ttk.Frame(body)
+        frame_tombol.pack(fill="x", padx=10, pady=(0, 6))
+        self.btn_jalankan_skrip = ttk.Button(
+            frame_tombol, text="▶ Jalankan", command=self._on_jalankan_skrip,
+            style="Aksen.TButton")
+        self.btn_jalankan_skrip.pack(side="left")
+        ttk.Button(frame_tombol, text="📂 Buka", command=self._on_buka_skrip,
+                   width=8).pack(side="left", padx=(6, 0))
+        ttk.Button(frame_tombol, text="💾 Simpan", command=self._on_simpan_skrip,
+                   width=8).pack(side="left", padx=(6, 0))
+
+        ttk.Label(body, text="Skrip:", font=FONT_KECIL).pack(anchor="w", padx=10)
+        self.text_skrip = tk.Text(body, height=14, width=34, font=("Consolas", 9),
+                                   wrap="none", undo=True)
+        self.text_skrip.insert("1.0", self._SKRIP_CONTOH)
+        self.text_skrip.pack(fill="both", padx=10, pady=(2, 6), expand=False)
+
+        ttk.Label(body, text="Output:", font=FONT_KECIL).pack(anchor="w", padx=10)
+        self.console_skrip = tk.Text(body, height=10, width=34, font=("Consolas", 9),
+                                      wrap="word", state="disabled",
+                                      background="#111827", foreground="#D1D5DB")
+        self.console_skrip.pack(fill="both", padx=10, pady=(2, 10), expand=False)
+
+    def _tulis_konsol_skrip(self, teks):
+        self.console_skrip.config(state="normal")
+        self.console_skrip.insert("end", teks)
+        self.console_skrip.see("end")
+        self.console_skrip.config(state="disabled")
+
+    def _on_jalankan_skrip(self):
+        kode = self.text_skrip.get("1.0", "end-1c")
+        self.console_skrip.config(state="normal")
+        self.console_skrip.delete("1.0", "end")
+        self.console_skrip.config(state="disabled")
+        self.btn_jalankan_skrip.config(state="disabled")
+        threading.Thread(target=self._jalankan_skrip_di_thread, args=(kode,), daemon=True).start()
+
+    def _jalankan_skrip_di_thread(self, kode):
+        """Jalan di thread terpisah (BUKAN main/Tkinter thread) -- exec()
+        skrip user bisa lama (mis. panggil profil_cakrawala() yg unduh
+        tile dari internet, atau hitung_hijriyah kriteria='khgt' yg berat)
+        & TIDAK boleh nge-freeze GUI selama itu, sama spt fitur berat lain
+        di app ini (cakrawala/simulasi hilal/dll -- pola thread+antrian)."""
+        import traceback
+        try:
+            import hisabwin_api
+        except ImportError as e:
+            self.antrian.put(("skrip_output", f"Gagal import hisabwin_api.py: {e}\n"))
+            self.antrian.put(("skrip_selesai", None))
+            return
+
+        def _print_skrip(*args, sep=" ", end="\n", **_kwargs):
+            # Override `print` LANGSUNG di namespace exec (bukan sys.stdout
+            # global) -- lihat catatan di _bangun_akordeon_skrip knp ini
+            # lebih aman utk eksekusi di background thread.
+            self.antrian.put(("skrip_output", sep.join(str(a) for a in args) + end))
+
+        namespace = {
+            "hisabwin": hisabwin_api,
+            "app": hisabwin_api.Aplikasi(self),
+            "print": _print_skrip,
+            "__name__": "__main__",
+        }
+        try:
+            exec(compile(kode, "<skrip Python HisabWin>", "exec"), namespace)
+        except Exception:
+            self.antrian.put(("skrip_output", "\n" + traceback.format_exc()))
+        finally:
+            self.antrian.put(("skrip_selesai", None))
+
+    def _on_buka_skrip(self):
+        path = filedialog.askopenfilename(
+            title="Buka skrip Python", filetypes=[("Python", "*.py"), ("Semua file", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                isi = f.read()
+        except Exception as e:
+            messagebox.showerror("Gagal membuka file", str(e))
+            return
+        self.text_skrip.delete("1.0", "end")
+        self.text_skrip.insert("1.0", isi)
+
+    def _on_simpan_skrip(self):
+        path = filedialog.asksaveasfilename(
+            title="Simpan skrip Python", defaultextension=".py",
+            filetypes=[("Python", "*.py")])
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self.text_skrip.get("1.0", "end-1c"))
+        except Exception as e:
+            messagebox.showerror("Gagal menyimpan file", str(e))
 
     def _perbarui_status_profil_simulasi_hilal(self):
         """Sinkronkan label status profil di akordeon Simulasi Hilal dgn
@@ -14100,6 +14252,20 @@ class HisabWinApp(tk.Tk):
                     self._tugas_peta_tersisa = max(0, getattr(self, "_tugas_peta_tersisa", 1) - 1)
                     if self._tugas_peta_tersisa == 0:
                         self.btn_proses.config(state="normal")
+
+                elif jenis == "skrip_output":
+                    # print() dari dalam skrip user (lihat _print_skrip di
+                    # _jalankan_skrip_di_thread) -- tulis apa adanya ke
+                    # konsol output akordeon 🐍 Skrip Python.
+                    self._tulis_konsol_skrip(payload)
+
+                elif jenis == "skrip_selesai":
+                    # Thread eksekusi skrip sudah berhenti (sukses ATAU
+                    # exception -- traceback-nya sendiri sudah dikirim lewat
+                    # "skrip_output" sebelum ini oleh _jalankan_skrip_di_thread).
+                    # Aktifkan lagi tombol Jalankan supaya user bisa
+                    # menjalankan skrip berikutnya tanpa restart app.
+                    self.btn_jalankan_skrip.config(state="normal")
 
         except queue.Empty:
             pass
