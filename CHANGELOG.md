@@ -3,6 +3,49 @@
 Semua perubahan penting pada proyek ini didokumentasikan di berkas ini.
 Format mengacu pada [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), dan proyek ini mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [1.1.0] - 2026-08-03
+
+Rilis **v1.1.0** membawa lompatan fitur besar untuk HisabWin, mengubah aplikasi dari sekadar pemeta visibilitas hilal menjadi suite astronomi & falakiah komprehensif. Rilis ini memperkenalkan mode Planetarium interaktif, Simulasi Hilal visual dengan profil cakrawala (ridgeline horizon), integrasi kontrol teleskop ASCOM/Alpaca dengan Live View kamera, generator PDF Almanak Falakiah bulanan, konsol scripting Python internal, antarmuka Web App responsif (serverless), serta migrasi installer Windows ke NSIS.
+
+### Ditambahkan
+- **Mode Planetarium Interaktif** (`starmap.py`): visualisasi peta langit stereografik/alt-azimuth interaktif lengkap dengan garis rasi bintang (`rasi_garis.csv`), katalog bintang terang (`bintang_terang.csv`), dan objek langit real-time.
+- **Simulasi Hilal Visual & Profil Cakrawala (3D Ridgeline Horizon)**:
+  - Visualisasi terbenamnya Hilal & Matahari yang teranimasi.
+  - Perbandingan 3 jenis horizon: Geometrik/Ideotoped, Refraksi Standar, dan Ridgeline Horizon Topografi Pegunungan.
+  - Database lokal puncak gunung Indonesia (`gunung_indonesia.csv`) untuk pencarian lokasi observasi secara offline tanpa ketergantungan API eksternal.
+  - Perhitungan visibilitas yang memperhitungkan semi-diameter Matahari, jarak Matahari, serta tepi (limb) Matahari.
+  - Pencarian ijtimak otomatis dan pemilih profil cepat pada dialog Simulasi Hilal.
+- **Integrasi Teleskop ASCOM/Alpaca & Live View**:
+  - Modul kontrol teleskop (`kontrol_teleskop.py`) mendukung standar ASCOM/Alpaca.
+  - Built-in **Alpaca Mock Server** (`alpaca_mock_server.py`) dan modul kamera mock untuk pengujian tanpa perangkat keras fisik.
+  - Fitur **Live View** kamera untuk memantau citra simulasi teleskop secara real-time.
+  - Pelacakan dan pengarahan teleskop ke objek pilihan dari antarmuka GUI.
+- **Ekspor Almanak Bulanan (PDF)**:
+  - Generator PDF dokumen Almanak Falakiah bulanan dengan format kalender grid.
+  - Menyajikan jadwal sholat, waktu ijtimak, awal bulan Hijriah, dan parameter astronomi penting.
+- **Panel Konsol Scripting Python & API Internal**:
+  - Konsol eksekusi skrip Python interaktif langsung di dalam GUI aplikasi desktop.
+  - Modul `hisabwin_api.py` yang menyediakan API programmatic Python untuk mengakses fungsi-fungsi hisab HisabWin.
+- **Web Application & Deployment Serverless**:
+  - Antarmuka Web responsif berbasis Flask (`server.py`, `index.html`) untuk penggunaan di peramban web dan perangkat seluler.
+  - Peta gerhana interaktif dengan dukungan mode Globe 3D dan penyesuaian kontainer seluler.
+  - Konfigurasi deployment serverless Vercel (`vercel.json`).
+- **Migrasi Installer Windows ke NSIS** (`installer.nsi`):
+  - Menggantikan mekanisme PyInstaller onefile + 7z lama dengan installer NSIS berbasis kompresi LZMA bawaan, menghilangkan masalah ekstraksi `7z.dll` atau kegagalan bootloader PyInstaller.
+
+### Diubah
+- **Pencarian Puncak Gunung**: Migrasi penuh dari Overpass API (OpenStreetMap) daring ke basis data CSV lokal `gunung_indonesia.csv` untuk respon pencarian instan dan fungsionalitas 100% offline.
+- **Penyempurnaan Perhitungan KHGT**:
+  - Implementasi aturan PKG1 (Peluang Kalender Global 1) refinement dan PKG2 quick check untuk pengujian kasus-kasus batas (edge cases).
+  - Pembaharuan koordinat wilayah batas khusus Pasifik (Pulau Unimak dan Vancouver Island).
+- **Model Delta-T & Astronomi**: Integrasi perhitungan Delta-T berbasis Skyfield serta perbaikan penentuan waktu fajar/subuh untuk koordinat lintang tinggi/ekstrem (seperti Selandia Baru).
+- **Splash Screen**: Penggunaan splash screen kustom lintas platform dengan perbaikan error handling pada sistem operasi Linux.
+
+### Diperbaiki
+- Penyesuaian aspect ratio peta kontur dan batas zoom minimum pada tampilan seluler/layar sempit.
+- Bug penanganan Tk root default pada lingkungan build CI.
+- Bug terkait ukuran container peta landscape pada resolusi tertentu.
+
 ## [1.0.1] - 2026-07-19
 
 Rilis ini merangkum seluruh pekerjaan sejak `v1.0.0` (rilis perdana) hingga commit terakhir di `main`. Dibandingkan versi pertama, HisabWin kini jauh lebih lengkap: dari sekadar peta visibilitas hilal, aplikasi ini bertambah dukungan gerhana matahari/bulan, konverter & pembanding kalender, manajemen kernel JPL, objek langit tambahan, serta banyak perbaikan performa dan tampilan.

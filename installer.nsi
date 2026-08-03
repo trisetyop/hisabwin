@@ -25,7 +25,7 @@
 !define APP_EXE "HisabWin.exe"
 
 !ifndef PRODUCT_VERSION
-  !define PRODUCT_VERSION "1.0.1"
+  !define PRODUCT_VERSION "1.1.0"
 !endif
 
 ; Folder sumber hasil build PyInstaller --onedir. Bisa dioverride lewat

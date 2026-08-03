@@ -9,7 +9,7 @@ Di era modern ini, HisabWin hadir membawa semangat WinHisab ke dalam arsitektur 
 1. **Kriteria MABIMS Baru** (tinggi 3°, elongasi 6,4°)
 2. **Kriteria KHGT** (Kalender Hijriah Global Tunggal) Muhammadiyah
 
-> **Versi saat ini:** v1.0.1
+> **Versi saat ini:** v1.1.0
 
 ---
 
@@ -21,27 +21,37 @@ Di era modern ini, HisabWin hadir membawa semangat WinHisab ke dalam arsitektur 
 - Dua mode perhitungan: **Presisi** (Skyfield + JPL DE421, dapat ditingkatkan ke DE440/DE441) dan **Ringan** (VSOP87 + ELP2000, cepat & offline).
 - Pilihan kriteria yang bisa dihitung secara independen: MABIMS, KHGT, ketinggian lokal, dan elongasi lokal.
 
-### Gerhana
-- Deteksi dan visualisasi **gerhana matahari** (perhitungan umbra/penumbra, jalur gerhana, waktu kontak) di peta dunia.
-- Deteksi dan visualisasi **gerhana bulan** (P1/U1/U2/U3/U4/P4) beserta peta wilayah yang bisa menyaksikannya.
-- Pencarian gerhana berbasis tahun dengan panel akordeon di GUI.
+### Simulasi Hilal & Profil Cakrawala (3D Ridgeline Horizon)
+- Visualisasi animasi terbenamnya Hilal & Matahari terhadap profil horizon topografi.
+- **Perbandingan 3 Horizon**: Ideotoped/Geometrik, Refraksi Standar, dan Profil Ridgeline Pegunungan.
+- Pencarian nama puncak gunung & bukit lokal di Indonesia berbasis database offline CSV (`gunung_indonesia.csv`).
+- Kalkulasi akurat memperhitungkan limb (tepi) & semi-diameter Matahari, jarak Matahari, serta refraksi atmosferik.
 
-### Kalender & Konversi
-- Konverter kalender **Masehi ↔ Hijriah**, mendukung metode urfi (tabular), MABIMS, dan KHGT.
+### Planetarium Interaktif & Teleskop
+- Mode **Planetarium Interaktif** (`starmap.py`) dengan proyeksi langit malam, katalog bintang terang (`bintang_terang.csv`), dan rasi bintang (`rasi_garis.csv`).
+- Integrasi kontrol teleskop via protokol **ASCOM / Alpaca** (`kontrol_teleskop.py`) beserta built-in mock server untuk simulasi.
+- Modul kamera mock & tayangan **Live View** langsung di dalam aplikasi.
+- Seleksi & pelacakan objek langit real-time untuk pengarahan teleskop.
+
+### Almanak & Ekspor Dokumen
+- Generator **Almanak Falakiah Bulanan (PDF)** lengkap dengan tampilan kalender grid, info ijtimak, awal bulan Hijriah, dan waktu astronomi/sholat.
+- Konverter kalender **Masehi ↔ Hijriah**, mendukung metode urfi (tabular), MABIMS, dan KHGT (termasuk penyempurnaan kriteria PKG1 & PKG2).
 - Perbandingan awal bulan Hijriah antara kriteria **MABIMS vs KHGT** di titik-titik sampel pesisir Indonesia, lengkap dengan ekspor CSV.
 
-### Efemeris & Objek Langit
-- Tabel efemeris (azimuth/altitude/deklinasi) untuk Matahari, Bulan, dan planet Merkurius–Pluto.
-- Dukungan objek kustom JPL Horizons (asteroid, wahana antariksa, dll.) via pencarian daring.
-- Manajemen kernel JPL (DE421 dibundel, DE440/DE441 dapat diunduh sesuai kebutuhan presisi).
+### Scripting & Web API
+- Panel **Konsol Scripting Python** interaktif di GUI untuk eksekusi skrip falak mandiri.
+- Modul `hisabwin_api.py` untuk penggunaan fungsi astronomi HisabWin secara programmatic.
+- Web Application & backend Flask (`server.py`, `index.html`, `vercel.json`) dengan peta gerhana interaktif 3D Globe dan waktu sholat serverless.
 
-### Waktu Sholat & Kiblat
-- Kalkulator waktu sholat beserta arah kiblat.
+### Gerhana & Efemeris
+- Deteksi dan visualisasi **gerhana matahari** (umbra/penumbra, jalur gerhana, waktu kontak) dan **gerhana bulan** (P1/U1/U2/U3/U4/P4).
+- Tabel efemeris Matahari, Bulan, dan planet Merkurius–Pluto serta objek kustom JPL Horizons.
+- Manajemen kernel JPL (DE421 dibundel, DE440/DE441 opsional).
 
 ### Antarmuka & Kemudahan Pakai
-- GUI modern berbasis Tkinter/ttkbootstrap dengan tab membulat, bayangan kartu lembut, dan overlay splash saat startup.
-- Bekerja **sepenuhnya offline** (data Natural Earth 110m dan ephemeris DE421 dibundel ke dalam installer).
-- Instalasi Windows mandiri (installer/uninstaller) serta build portabel Linux.
+- GUI modern berbasis Tkinter/ttkbootstrap dengan tab membulat, bayangan kartu lembut, dan splash screen kustom lintas platform.
+- Bekerja **sepenuhnya offline** (data Natural Earth 110m, catalog bintang, database gunung, dan ephemeris DE421 dibundel).
+- Installer Windows modern berbasis **NSIS** serta build portabel Linux.
 - Continuous Integration (GitHub Actions) untuk build otomatis Windows & Linux.
 
 ---
