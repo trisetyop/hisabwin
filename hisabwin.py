@@ -5239,6 +5239,128 @@ def buat_pdf_almanak_bulanan(tahun, bulan, lat_deg, lon_deg, zona_offset_jam, pa
     return path_output
 
 
+def buat_pdf_kalender_bulanan(tahun, bulan, lat_deg, lon_deg, zona_offset_jam, path_output,
+                               elevasi_m=0.0, mode="ringan", ts=None, eph=None,
+                               sudut_fajar=-20.0, sudut_isya=-18.0, mazhab_ashar="syafii",
+                               nama_lokasi=None, kriteria_hijriyah="urfi",
+                               progress_cb=lambda msg: None):
+    """FORMAT KEDUA almanak -- kalender grid tradisional (7 kolom
+    Minggu..Sabtu x sampai 6 baris minggu), BEDA dari buat_pdf_almanak_
+    bulanan() yg formatnya tabel jadwal sholat (satu baris per hari,
+    banyak kolom waktu). Di sini tiap SEL cuma tunjukkan: tanggal Masehi
+    (besar), tanggal Hijriyah (kecil di bawahnya), waktu Maghrib (SATU
+    waktu paling relevan buat pandangan sekilas kalender -- bukan
+    keenamnya, itu urusan format tabel), & fase bulan (%).
+
+    Perhitungan per-hari REUSE PERSIS dari fungsi tabel (hitung_waktu_
+    sholat_otomatis, masehi_ke_hijriyah_kriteria_bulan/masehi_ke_
+    hijriyah_urfi, hitung_tabel_efemeris_ringan utk fase) -- kalau nanti
+    ada bug di salah satu perhitungan itu, cukup diperbaiki SATU tempat,
+    otomatis kepakai di kedua format PDF (tabel & kalender).
+
+    Return path_output kalau berhasil."""
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    n_hari = calendar.monthrange(tahun, bulan)[1]
+    # Python .weekday(): Senin=0..Minggu=6. Kalender di sini kolom pertama
+    # = Minggu (konvensi umum kalender Indonesia) -- geser +1 lalu %7 spy
+    # Minggu=0..Sabtu=6, sama pola pergeseran yg dipakai nama_hari di
+    # buat_pdf_almanak_bulanan().
+    kolom_hari_pertama = (datetime(tahun, bulan, 1).weekday() + 1) % 7
+
+    tabel_hijriyah_kriteria = None
+    if kriteria_hijriyah in ("mabims", "khgt"):
+        tabel_hijriyah_kriteria = masehi_ke_hijriyah_kriteria_bulan(
+            tahun, bulan, kriteria_hijriyah, ts, eph, mode=mode, progress_cb=progress_cb)
+
+    data_hari = {}
+    for hari in range(1, n_hari + 1):
+        progress_cb(f"Menghitung {hari:02d}/{bulan:02d}/{tahun}...")
+        tgl = datetime(tahun, bulan, hari)
+        sholat = hitung_waktu_sholat_otomatis(
+            tgl, lat_deg, lon_deg, zona_offset_jam, mode=mode, ts=ts, eph=eph,
+            elevasi_m=elevasi_m, sudut_fajar=sudut_fajar, sudut_isya=sudut_isya,
+            mazhab_ashar=mazhab_ashar)
+        if tabel_hijriyah_kriteria is not None:
+            th, bh, nama_bh, hh = tabel_hijriyah_kriteria[hari]
+        else:
+            th, bh, hh = masehi_ke_hijriyah_urfi(tahun, bulan, hari)
+            nama_bh = _NAMA_BULAN_HIJRIYAH[bh - 1]
+        try:
+            tabel_hari = hitung_tabel_efemeris_ringan(
+                tgl, lat_deg, lon_deg, zona_offset_jam, interval_menit=720,
+                elevasi_m=elevasi_m)
+            fraksi = tabel_hari[1]["fraksi_iluminasi_persen"]
+        except Exception:
+            fraksi = None
+        maghrib = sholat.get("maghrib")
+        data_hari[hari] = {
+            "tahun_h": th, "hijriyah": f"{hh} {nama_bh}", "fase": fraksi,
+            "maghrib": _label_jam_dari_desimal(maghrib) if maghrib is not None else "-",
+        }
+
+    progress_cb("Menggambar kalender...")
+    n_minggu = -(-(kolom_hari_pertama + n_hari) // 7)  # ceil division
+    fig, ax = plt.subplots(figsize=(11.69, 8.27))  # A4 landscape, inci
+    ax.set_xlim(0, 7)
+    ax.set_ylim(0, n_minggu + 1.3)
+    ax.invert_yaxis()
+    ax.axis("off")
+
+    label_kriteria_hijriyah = {
+        "urfi": "Urfi/Tabular", "mabims": "MABIMS", "khgt": "KHGT Muhammadiyah",
+    }[kriteria_hijriyah]
+    th_awal, th_akhir = data_hari[1]["tahun_h"], data_hari[n_hari]["tahun_h"]
+    label_tahun_h = f"{th_awal} H" if th_awal == th_akhir else f"{th_awal}–{th_akhir} H"
+
+    ax.text(3.5, -0.18, f"{BULAN_ID[bulan - 1].upper()} {tahun}",
+            ha="center", fontsize=22, fontweight="bold")
+    ax.text(3.5, 0.28,
+            f"{nama_lokasi or f'{lat_deg:.4f}, {lon_deg:.4f}'}   ·   "
+            f"Hijriyah ({label_kriteria_hijriyah}): {label_tahun_h}",
+            ha="center", fontsize=8.5, color="#555555")
+
+    nama_hari_pendek = ["Minggu", "Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu"]
+    for i, nm in enumerate(nama_hari_pendek):
+        warna = "#DC2626" if i in (0, 5) else "#1D4ED8"  # Minggu & Jumat ditonjolkan
+        ax.text(i + 0.5, 0.85, nm, ha="center", va="center", fontsize=10.5,
+                fontweight="bold", color=warna)
+
+    hari = 1
+    for minggu in range(n_minggu):
+        for kolom in range(7):
+            idx_sel = minggu * 7 + kolom
+            y0 = 1.1 + minggu
+            ax.add_patch(mpatches.Rectangle(
+                (kolom, y0), 1, 1, facecolor="white", edgecolor="#CBD5E1", linewidth=0.8))
+            if idx_sel < kolom_hari_pertama or hari > n_hari:
+                continue
+            d = data_hari[hari]
+            warna_tgl = "#DC2626" if kolom in (0, 5) else "#111111"
+            ax.text(kolom + 0.08, y0 + 0.30, f"{hari}", fontsize=14, fontweight="bold",
+                    color=warna_tgl, va="top")
+            ax.text(kolom + 0.08, y0 + 0.58, d["hijriyah"], fontsize=7, color="#374151")
+            ax.text(kolom + 0.08, y0 + 0.80, f"Maghrib {d['maghrib']}", fontsize=6.5,
+                    color="#6B7280")
+            if d["fase"] is not None:
+                ax.text(kolom + 0.92, y0 + 0.14, f"{d['fase']:.0f}%", fontsize=6,
+                        color="#9CA3AF", ha="right")
+            hari += 1
+
+    fig.text(0.02, 0.012,
+              f"Dibuat via HisabWin, {datetime.now().strftime('%d %B %Y %H:%M')} -- "
+              f"angka kanan-atas tiap sel = fase bulan (iluminasi tengah hari lokal).",
+              fontsize=6.5, color="#888888")
+
+    with PdfPages(path_output) as pdf:
+        pdf.savefig(fig)
+    plt.close(fig)
+    progress_cb(f"Selesai: {path_output}")
+    return path_output
+
+
 def _label_jam_dari_desimal(jam_desimal):
     """'HH:MM' dari jam desimal (0-24), dibulatkan ke menit terdekat."""
     jl = jam_desimal % 24.0
@@ -12394,7 +12516,25 @@ class HisabWinApp(tk.Tk):
             font=FONT_KECIL, foreground=WARNA_TEKS_MUTED, justify="left", wraplength=280,
         ).pack(fill="x", padx=10, pady=(6, 6))
 
-        frame_periode = ttk.LabelFrame(body, text="1. Periode")
+        # --- Format keluaran -- BEDA tujuan, bukan cuma beda gaya: Jadwal
+        #     Sholat (tabel, buat_pdf_almanak_bulanan) fokus ke enam waktu
+        #     sholat per hari; Kalender Bulanan (grid, buat_pdf_kalender_
+        #     bulanan) fokus ke tampilan kalender sekilas (cuma Maghrib +
+        #     tanggal Hijriyah + fase bulan per sel) -- dua use-case beda,
+        #     bukan satu fitur yg "ditambah opsi tampilan" doang. ---
+        self.format_almanak = tk.StringVar(value="jadwal")
+        frame_format = ttk.LabelFrame(body, text="1. Format")
+        frame_format.pack(fill="x", **pad)
+        ttk.Radiobutton(
+            frame_format, text="📋 Jadwal Sholat (tabel, 6 waktu/hari)", value="jadwal",
+            variable=self.format_almanak,
+        ).grid(row=0, column=0, padx=10, pady=4, sticky="w")
+        ttk.Radiobutton(
+            frame_format, text="📅 Kalender Bulanan (grid Minggu–Sabtu)", value="kalender",
+            variable=self.format_almanak,
+        ).grid(row=1, column=0, padx=10, pady=(0, 6), sticky="w")
+
+        frame_periode = ttk.LabelFrame(body, text="2. Periode")
         frame_periode.pack(fill="x", **pad)
         now = datetime.now()
 
@@ -12415,7 +12555,7 @@ class HisabWinApp(tk.Tk):
         #     🔄 Konverter Kalender (urfi/mabims/khgt), lihat catatan
         #     kriteria_hijriyah di buat_pdf_almanak_bulanan(). ---
         self.kriteria_almanak = tk.StringVar(value="urfi")
-        frame_kriteria = ttk.LabelFrame(body, text="2. Kriteria Tanggal Hijriyah")
+        frame_kriteria = ttk.LabelFrame(body, text="3. Kriteria Tanggal Hijriyah")
         frame_kriteria.pack(fill="x", **pad)
         ttk.Radiobutton(
             frame_kriteria, text="Urfi / Tabular (cepat, perkiraan)", value="urfi",
@@ -12475,7 +12615,9 @@ class HisabWinApp(tk.Tk):
 
         kriteria_hijriyah = self.kriteria_almanak.get()
         sufiks_kriteria = {"urfi": "Urfi", "mabims": "MABIMS", "khgt": "KHGT"}[kriteria_hijriyah]
-        nama_default = f"Almanak_{self.var_almanak_bulan.get()}_{tahun}_{sufiks_kriteria}.pdf"
+        format_almanak = self.format_almanak.get()
+        sufiks_format = "Jadwal" if format_almanak == "jadwal" else "Kalender"
+        nama_default = f"Almanak_{sufiks_format}_{self.var_almanak_bulan.get()}_{tahun}_{sufiks_kriteria}.pdf"
         path = filedialog.asksaveasfilename(
             title="Simpan Almanak PDF", defaultextension=".pdf",
             initialfile=nama_default, filetypes=[("File PDF", "*.pdf")])
@@ -12487,7 +12629,9 @@ class HisabWinApp(tk.Tk):
 
         def _kerja():
             try:
-                buat_pdf_almanak_bulanan(
+                fungsi = (buat_pdf_almanak_bulanan if format_almanak == "jadwal"
+                          else buat_pdf_kalender_bulanan)
+                fungsi(
                     tahun, bulan, lat, lon, zona, path, elevasi_m=elevasi,
                     mode=mode_hisab, ts=self.ts, eph=self.eph,
                     sudut_fajar=sudut_fajar, sudut_isya=sudut_isya, mazhab_ashar=mazhab,
