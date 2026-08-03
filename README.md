@@ -56,6 +56,23 @@ Di era modern ini, HisabWin hadir membawa semangat WinHisab ke dalam arsitektur 
 
 ---
 
+## 🖼️ Tangkapan Layar
+
+| Halaman Utama & Status Ephemeris JPL | Peta Visibilitas Hilal KHGT Global |
+| :---: | :---: |
+| ![Beranda HisabWin](docs/images/showcase_home.png) | ![Peta Visibilitas KHGT](docs/images/showcase_peta_khgt.png) |
+
+| Profil Cakrawala (3D Ridgeline Horizon) | Simulasi Hilal & Kontrol Teleskop |
+| :---: | :---: |
+| ![Profil Cakrawala](docs/images/showcase_profil_cakrawala.png) | ![Simulasi Hilal & Teleskop](docs/images/showcase_simulasi_hilal.png) |
+
+<p align="center">
+  <b>Peta Jalur Gerhana Matahari — Mode Globe 3D</b><br>
+  <img src="docs/images/showcase_gerhana_globe.png" alt="Gerhana Matahari Mode Globe 3D" width="85%">
+</p>
+
+---
+
 ## 🖥️ Kebutuhan Sistem & Penggunaan
 
 ### Untuk pengguna akhir (end-user)
