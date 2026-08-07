@@ -7985,6 +7985,27 @@ def _label_jam_hhmm(jam_desimal):
     return f"{h:02d}:{m:02d}"
 
 
+def _fmt_dms(val, dengan_tanda=True):
+    """Format nilai derajat desimal ke DMS (Derajat° Menit′ Detik″).
+    Misal +7.66° -> '+7° 39′ 36″'."""
+    if val is None or np.isnan(val):
+        return "—"
+    tanda = "+" if val >= 0 else "-"
+    val_abs = abs(val)
+    d = int(val_abs)
+    m_full = (val_abs - d) * 60.0
+    m = int(m_full)
+    s = int(round((m_full - m) * 60.0))
+    if s >= 60:
+        s = 0
+        m += 1
+    if m >= 60:
+        m = 0
+        d += 1
+    tanda_str = (tanda if dengan_tanda else ("-" if val < 0 else ""))
+    return f"{tanda_str}{d}° {m:02d}′ {s:02d}″"
+
+
 
 # Gaya visual (warna) tiap definisi ufuk -- dipakai konsisten di garis
 # horizontal ufuk itu sendiri MAUPUN penanda Matahari/Bulan yang mengacu
@@ -8177,8 +8198,8 @@ def buat_figure_simulasi_hilal(profil, hasil):
     # Bagian 2: tabel DATA ghurub — informatif, di bawah plot pakai fig.text().
     # Disusun sbg tabel 7 kolom: Ufuk | Ghurub | Tinggi Hilal | DAZ | ArcV |
     # ArcL | Iluminasi — 1 baris header + 3 baris data (astro/dip/topo).
-    kolom_x = [0.04, 0.22, 0.36, 0.49, 0.60, 0.71, 0.82]
-    header = ["Definisi Ufuk", "Ghurub", "Tinggi Hilal", "DAZ", "ArcV", "ArcL", "Iluminasi"]
+    kolom_x = [0.04, 0.19, 0.30, 0.47, 0.58, 0.69, 0.80]
+    header = ["Definisi Ufuk", "Ghurub", "Tinggi Hilal (DMS)", "DAZ", "ArcV", "ArcL", "Iluminasi"]
     y_header = 0.155
     y_step = 0.028
 
@@ -8204,7 +8225,7 @@ def buat_figure_simulasi_hilal(profil, hasil):
         vals = [
             nama_ufuk,
             _label_jam_hhmm(g["jam_ghurub"]),
-            f"{g['tinggi_hilal']:+.2f}°",
+            _fmt_dms(g["tinggi_hilal"]),
             f"{g['daz']:+.2f}°",
             f"{g['arcv']:+.2f}°",
             f"{g['arcl']:.2f}°",
@@ -14226,7 +14247,7 @@ for i in range(7):
                             f"  Ghurub: {_label_jam_hhmm(g['jam_ghurub'])}   |   "
                             f"Bulan terbenam: {_label_jam_hhmm(g['jam_terbenam_bulan'])}   |   "
                             f"Lag: {_fmt(g['lag_menit'], ' menit', 1)}\n"
-                            f"  Tinggi hilal: {_fmt(g['tinggi_hilal'])}   |   "
+                            f"  Tinggi hilal: {_fmt_dms(g['tinggi_hilal'])} ({_fmt(g['tinggi_hilal'])})   |   "
                             f"DAZ: {_fmt(g['daz'], tanda=True)}   |   "
                             f"ArcV: {_fmt(g['arcv'], tanda=True)}   |   "
                             f"ArcL: {_fmt(g['arcl'])}   |   "
