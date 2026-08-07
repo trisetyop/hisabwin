@@ -7414,8 +7414,28 @@ def hitung_profil_cakrawala(lat, lon, tinggi_mata=2.0, radius_km=30, n_azimuth=1
             jarak_horizon[az_idx] = d
             elevasi_horizon[az_idx] = elev_target
 
+    # -- Clamp: ufuk topografi TIDAK BOLEH lebih rendah dari dip --
+    # Di dataran tinggi (pengamat di gunung/bukit), radius DEM yg terbatas
+    # bisa membuat semua titik sampel LEBIH RENDAH dari pengamat, sehingga
+    # sudut_horizon jatuh sangat negatif — padahal secara fisika, di arah
+    # tanpa penghalang (gunung/bukit), pengamat TETAP melihat ufuk laut/rata
+    # yg kerendahannya = dip (0.0293*sqrt(h), formula nautical/Meeus dgn
+    # refraksi). Clamp diterapkan HANYA pada sudut_horizon (skyline), BUKAN
+    # pada matriks_sudut (lapisan ridgeline), supaya kontur/puncak di bawah
+    # dip tetap tergambar visual — hanya garis horizon efektif yg dijaga
+    # tidak jatuh di bawah dip.
+    dip_derajat = 0.0293 * math.sqrt(max(tinggi_pengamat, 0.0))
+    # Simpan skyline MENTAH sebelum clamp -- dipakai utk deteksi puncak
+    # (supaya puncak yg di bawah dip tetap terdeteksi \u0026 dilabeli) dan utk
+    # posisi label (supaya label muncul di ketinggian visual aslinya, bukan
+    # di garis datar clamp).
+    sudut_horizon_mentah = sudut_horizon.copy()
+    sudut_horizon = np.maximum(sudut_horizon, -dip_derajat)
+
     progress_cb("Mendeteksi puncak pada kurva horizon...")
-    idx_puncak = _deteksi_puncak_horizon_numpy(sudut_horizon, prominence_min=prominence_min)
+    # Deteksi puncak pada skyline MENTAH (belum di-clamp), supaya puncak
+    # yg ada di bawah dip tetap ditemukan \u0026 diberi nama.
+    idx_puncak = _deteksi_puncak_horizon_numpy(sudut_horizon_mentah, prominence_min=prominence_min)
     progress_cb(f"Ditemukan {len(idx_puncak)} kandidat puncak.")
 
     progress_cb("Mencari nama gunung/puncak dari database lokal...")
@@ -7432,7 +7452,9 @@ def hitung_profil_cakrawala(lat, lon, tinggi_mata=2.0, radius_km=30, n_azimuth=1
             if d < jarak_terbaik:
                 jarak_terbaik, nama_terbaik = d, nama
         if nama_terbaik:
-            puncak_berlabel.append((float(azimuth[i]), float(sudut_horizon[i]), nama_terbaik))
+            # Pakai sudut MENTAH (belum di-clamp) supaya label muncul di
+            # posisi visual asli puncak, bukan di garis datar clamp.
+            puncak_berlabel.append((float(azimuth[i]), float(sudut_horizon_mentah[i]), nama_terbaik))
 
     progress_cb(f"{len(puncak_berlabel)} dari {len(idx_puncak)} kandidat puncak berhasil diberi nama.")
 
@@ -7535,13 +7557,20 @@ def muat_profil_cakrawala_txt(path):
         baris_layer.sort(key=lambda t: t[0])
         matriks_sudut = np.array([nilai for _, nilai in baris_layer])
 
+    # -- Clamp sudut_horizon: minimal = -dip (sama spt hitung_profil_cakrawala) --
+    # Profil lama yg tersimpan sebelum fix ini bisa punya nilai di bawah dip;
+    # di-clamp saat muat supaya konsisten.
+    tinggi_pengamat_val = tinggi_mata + elev_tanah
+    dip_derajat_muat = 0.0293 * math.sqrt(max(tinggi_pengamat_val, 0.0))
+    arr_sudut_horizon = np.maximum(np.array(sudut_horizon), -dip_derajat_muat)
+
     return {
         "lat": float(meta.get("lat", 0.0)), "lon": float(meta.get("lon", 0.0)),
         "tinggi_mata": tinggi_mata, "elev_tanah": elev_tanah,
-        "tinggi_pengamat": tinggi_mata + elev_tanah,
+        "tinggi_pengamat": tinggi_pengamat_val,
         "_elev_tanah_dari_file": elev_tanah_dari_file,
         "radius_km": float(meta.get("radius_km", 0.0)),
-        "azimuth": np.array(azimuth), "sudut_horizon": np.array(sudut_horizon),
+        "azimuth": np.array(azimuth), "sudut_horizon": arr_sudut_horizon,
         "jarak_horizon_km": np.array(jarak_horizon_km),
         "elevasi_titik_m": np.array(elevasi_titik_m),
         "puncak_berlabel": puncak_berlabel,
@@ -7598,7 +7627,15 @@ def buat_figure_profil_cakrawala(profil):
     sudut_horizon = profil["sudut_horizon"]
     puncak_berlabel = profil["puncak_berlabel"]
 
-    y_min = np.floor(sudut_horizon.min()) - 1
+    # y_min: kalau ada matriks_sudut (belum di-clamp), pakai skyline mentah
+    # supaya area isian terrain tetap proporsional (sudut_horizon sudah
+    # di-clamp ke -dip, bisa terlalu dangkal utk y_min).
+    matriks_sudut_pf = profil.get("matriks_sudut")
+    if matriks_sudut_pf is not None:
+        skyline_mentah_min = float(matriks_sudut_pf.max(axis=1).min())
+        y_min = np.floor(min(sudut_horizon.min(), skyline_mentah_min)) - 1
+    else:
+        y_min = np.floor(sudut_horizon.min()) - 1
     y_max = np.ceil(sudut_horizon.max()) + 1 + (8 if puncak_berlabel else 0)
 
     fig, ax = plt.subplots(figsize=(10, 4.5))
@@ -7667,7 +7704,11 @@ def buat_figure_ridgeline_cakrawala(profil):
     n_sample = matriks_sudut.shape[1]
 
     y_floor = matriks_sudut.min() - 5.0
-    y_min = np.floor(sudut_horizon.min()) - 1
+    # y_min pakai skyline MENTAH (belum di-clamp dip) dari matriks_sudut,
+    # supaya kontur/lapisan terrain di bawah dip tetap terlihat di plot --
+    # sudut_horizon sudah di-clamp ke -dip, jadi terlalu dangkal utk y_min.
+    skyline_mentah_min = float(matriks_sudut.max(axis=1).min())
+    y_min = np.floor(min(sudut_horizon.min(), skyline_mentah_min)) - 1
     y_max = np.ceil(sudut_horizon.max()) + 1 + (8 if puncak_berlabel else 0)
 
     norm = mcolors.Normalize(vmin=matriks_jarak_km.min(), vmax=matriks_jarak_km.max())
@@ -8011,8 +8052,13 @@ def buat_figure_simulasi_hilal(profil, hasil):
     # tidak cuma sepotong kecil di sekitar titik ghurub.
     lebar_zoom = 45.0
     az_min, az_max = az_tengah - lebar_zoom, az_tengah + lebar_zoom
-
-    y_min = min(np.floor(sudut_horizon.min()) - 1, np.floor(-dip_derajat) - 1)
+    # y_min: pertimbangkan skyline MENTAH (belum di-clamp dip) dari matriks_sudut
+    # supaya kontur lapisan ridgeline di bawah dip tetap terlihat.
+    kandidat_y_min = [np.floor(sudut_horizon.min()) - 1, np.floor(-dip_derajat) - 1]
+    matriks_sudut_sim = profil.get("matriks_sudut")
+    if matriks_sudut_sim is not None:
+        kandidat_y_min.append(np.floor(float(matriks_sudut_sim.max(axis=1).min())) - 1)
+    y_min = min(kandidat_y_min)
     y_max_kandidat = [sudut_horizon.max()]
     if len(alt_moon_w):
         y_max_kandidat.append(np.nanmax(alt_moon_w))
@@ -8081,24 +8127,31 @@ def buat_figure_simulasi_hilal(profil, hasil):
     h_lintas_bulan, = ax.plot(az_moon_w, alt_moon_w, color="#1D4ED8", linewidth=1.4, alpha=0.8,
                                zorder=4, label="Lintasan Bulan (hilal)")
 
-    # Handle & label penanda ☉ (Matahari) dan ☾ (Bulan/hilal) DIPISAH ke dua
-    # daftar sendiri (bukan digabung urut per kunci ufuk spt sebelumnya)
-    # supaya nanti bisa dikelompokkan jadi kolom legenda sendiri2: satu
-    # kolom khusus Matahari, satu kolom khusus Bulan -- tidak lagi
-    # berselang-seling/acak spt sebelumnya.
+    # Handle & label penanda Matahari ☀ dan Bulan ☽ -- pakai ax.text()
+    # (Unicode langsung, bukan mathtext $..$ yg di-render jadi bintang) dan
+    # lingkaran kecil (plot "o") sebagai backing/handle utk legenda.
     handles_matahari, handles_bulan = [], []
     for kunci in ("astro", "dip", "topo"):
         g = ghurub[kunci]
         if g["jam_ghurub"] is None:
             continue
         warna_tepi = _GAYA_UFUK[kunci]["warna"]
-        h_sun, = ax.plot(g["az_matahari"], g["alt_matahari"], "o", color="#D97706", markersize=9,
-                          markeredgecolor=warna_tepi, markeredgewidth=1.8, zorder=5,
-                          label=f"☉ {g['label']} — ghurub {_label_jam_hhmm(g['jam_ghurub'])}")
-        h_moon, = ax.plot(g["az_bulan"], g["alt_bulan"], "o", color="#F8FAFC", markersize=9,
-                           markeredgecolor=warna_tepi, markeredgewidth=1.8, zorder=6,
-                           label=f"☾ {g['label']} — tinggi hilal {g['tinggi_hilal']:.2f}°, "
-                                 f"DAZ {g['daz']:+.2f}°, ArcV {g['arcv']:+.2f}°, ArcL {g['arcl']:.2f}°")
+        # Lingkaran kecil sbg "backing" + handle legenda (terlihat di plot
+        # & bisa dimasukkan ke legend); simbol Unicode ditempel di atasnya.
+        h_sun, = ax.plot(g["az_matahari"], g["alt_matahari"], "o",
+                          color="#F59E0B", markersize=10,
+                          markeredgecolor=warna_tepi, markeredgewidth=2.0,
+                          zorder=5, label=f"☉ {g['label']}")
+        ax.text(g["az_matahari"], g["alt_matahari"], "☀", fontsize=9,
+                ha="center", va="center", color="#92400E", zorder=7,
+                fontweight="bold")
+        h_moon, = ax.plot(g["az_bulan"], g["alt_bulan"], "o",
+                           color="#E5E7EB", markersize=10,
+                           markeredgecolor=warna_tepi, markeredgewidth=2.0,
+                           zorder=5, label=f"☽ {g['label']}")
+        ax.text(g["az_bulan"], g["alt_bulan"], "☽", fontsize=11,
+                ha="center", va="center", color="#374151", zorder=7,
+                fontweight="bold")
         handles_matahari.append(h_sun)
         handles_bulan.append(h_moon)
 
@@ -8112,45 +8165,58 @@ def buat_figure_simulasi_hilal(profil, hasil):
     tgl = hasil["tanggal"]
     ax.set_title(f"Simulasi Hilal — {tgl.day:02d}-{tgl.month:02d}-{tgl.year} — "
                  f"({profil['lat']:.4f}, {profil['lon']:.4f})")
-    # Legenda dipindah ke BAWAH plot (horizontal, 3 kolom) -- sebelumnya di
-    # kanan (bbox_to_anchor=(1.01,1.0)) yg memaksa area plot dipangkas jadi
-    # cuma 66% lebar figure (lihat tight_layout lama). Dgn legenda di bawah,
-    # seluruh lebar figure yg sudah landscape dipakai penuh utk area plot,
-    # jadi kontur cakrawala kelihatan lebih luas sbg patokan.
-    # --- Legenda disusun MANUAL jadi 3 kolom berkelompok -------------------
-    # Sebelumnya ax.legend() otomatis mengambil handle sesuai urutan
-    # ax.plot()/axhline() dipanggil, lalu matplotlib mengisi legenda kolom
-    # demi kolom (bukan per kategori) -- hasilnya kolom 1/2/3 isinya
-    # campur-aduk ufuk, Matahari, & Bulan tidak beraturan, susah dibaca.
-    # Di bawah ini kita paksa 3 kolom yg masing2 SATU KATEGORI penuh:
-    #   kolom 1 = garis ufuk & lintasan (referensi)
-    #   kolom 2 = semua penanda ☉ Matahari
-    #   kolom 3 = semua penanda ☾ Bulan/hilal
-    # dgn baris "placeholder" kosong (handle tak-tampak) sbg penyeimbang
-    # tinggi kolom, krn ax.legend() mengisi berurutan turun per-kolom dulu
-    # baru pindah ke kolom berikutnya -- jadi ukuran tiap grup HARUS sama
-    # panjang supaya jatuh persis satu kolom, tidak nyerempet ke kolom lain.
+
+    # === LEGENDA: garis referensi (ringkas) + tabel data ghurub (informatif) ===
+    # Bagian 1: legenda GARIS saja (ufuk, lintasan) — ringkas, di dalam plot.
     from matplotlib.lines import Line2D
+    handles_garis = [h_topo, h_astro0, h_dip0, h_lintas_matahari, h_lintas_bulan]
+    labels_garis = [h.get_label() for h in handles_garis]
+    ax.legend(handles=handles_garis, labels=labels_garis, loc="upper right",
+              fontsize=7, framealpha=0.85, borderpad=0.5, handletextpad=0.4)
 
-    def _placeholder(label=""):
-        return Line2D([], [], color="none", label=label)
+    # Bagian 2: tabel DATA ghurub — informatif, di bawah plot pakai fig.text().
+    # Disusun sbg tabel 7 kolom: Ufuk | Ghurub | Tinggi Hilal | DAZ | ArcV |
+    # ArcL | Iluminasi — 1 baris header + 3 baris data (astro/dip/topo).
+    kolom_x = [0.04, 0.22, 0.36, 0.49, 0.60, 0.71, 0.82]
+    header = ["Definisi Ufuk", "Ghurub", "Tinggi Hilal", "DAZ", "ArcV", "ArcL", "Iluminasi"]
+    y_header = 0.155
+    y_step = 0.028
 
-    kolom_ufuk = [h_topo, h_astro0, h_dip0, h_lintas_matahari, h_lintas_bulan]
-    kolom_matahari = list(handles_matahari)
-    kolom_bulan = list(handles_bulan)
+    for ci, txt in enumerate(header):
+        fig.text(kolom_x[ci], y_header, txt, fontsize=7.5, fontweight="bold",
+                 va="top", ha="left", family="monospace")
+    # Garis pemisah header
+    fig.text(0.04, y_header - 0.010, "─" * 105, fontsize=6, va="top",
+             ha="left", color="#9CA3AF", family="monospace")
 
-    tinggi_kolom = max(len(kolom_ufuk), len(kolom_matahari), len(kolom_bulan))
-    for kolom in (kolom_ufuk, kolom_matahari, kolom_bulan):
-        while len(kolom) < tinggi_kolom:
-            kolom.append(_placeholder())
+    baris_ufuk = [("astro", "Astronomis (0°)"), ("dip", f"Dip ({dip_derajat:.2f}°)"),
+                  ("topo", "Topografi (nyata)")]
+    for bi, (kunci, nama_ufuk) in enumerate(baris_ufuk):
+        g = ghurub[kunci]
+        y_baris = y_header - 0.018 - bi * y_step
+        warna = _GAYA_UFUK[kunci]["warna"]
+        if g["jam_ghurub"] is None:
+            fig.text(kolom_x[0], y_baris, nama_ufuk, fontsize=7, va="top",
+                     ha="left", color=warna, fontweight="bold")
+            fig.text(kolom_x[1], y_baris, "— tidak terbenam —", fontsize=7,
+                     va="top", ha="left", color="#6B7280")
+            continue
+        vals = [
+            nama_ufuk,
+            _label_jam_hhmm(g["jam_ghurub"]),
+            f"{g['tinggi_hilal']:+.2f}°",
+            f"{g['daz']:+.2f}°",
+            f"{g['arcv']:+.2f}°",
+            f"{g['arcl']:.2f}°",
+            f"{g['fraksi_iluminasi']:.1f}%" if g.get("fraksi_iluminasi") is not None else "—",
+        ]
+        for ci, txt in enumerate(vals):
+            fw = "bold" if ci == 0 else "normal"
+            clr = warna if ci == 0 else "#1F2937"
+            fig.text(kolom_x[ci], y_baris, txt, fontsize=7, va="top",
+                     ha="left", color=clr, fontweight=fw, family="monospace")
 
-    handles_urut = kolom_ufuk + kolom_matahari + kolom_bulan
-    labels_urut = [h.get_label() for h in handles_urut]
-
-    ax.legend(handles=handles_urut, labels=labels_urut, loc="upper center",
-              bbox_to_anchor=(0.5, -0.14), ncol=3, fontsize=7.5,
-              borderaxespad=0, frameon=True, handletextpad=0.6, columnspacing=1.4)
-    fig.tight_layout(rect=(0.0, 0.20, 1.0, 1.0))
+    fig.tight_layout(rect=(0.0, 0.22, 1.0, 1.0))
     # info_animasi -- dipakai _tampilkan_simulasi_hilal_animasi() utk
     # menggambar penanda "posisi saat ini" yg bisa digeser slider/diputar,
     # DI ATAS gambar statis ini (garis lintasan & 3 penanda ghurub tetap
@@ -9457,48 +9523,26 @@ class HisabWinApp(tk.Tk):
         """Dipanggil tiap kali tab notebook kanan (peta/Waktu Sholat)
         berganti. Bagian akordeon di bilah kiri yang relevan dengan tab
         yang sedang dilihat otomatis dibuka, bagian yang lain otomatis
-        dilipat -- supaya bilah kiri tetap ringkas, bukan 2 panel penuh
-        berdampingan seperti sebelumnya."""
+        dilipat -- supaya bilah kiri tetap ringkas."""
         try:
             tab_terpilih = self.notebook.tab(self.notebook.select(), "text")
         except tk.TclError:
             return
         if "Sholat" in tab_terpilih or "Kiblat" in tab_terpilih:
             self._buka_akordeon_sholat()
-            self._tutup_akordeon_hilal()
-            self._tutup_akordeon_gerhana()
-            self._tutup_akordeon_kalbanding()
         elif "Gerhana" in tab_terpilih:
             self._buka_akordeon_gerhana()
-            self._tutup_akordeon_hilal()
-            self._tutup_akordeon_sholat()
-            self._tutup_akordeon_kalbanding()
         elif "Perbandingan" in tab_terpilih:
             self._buka_akordeon_kalbanding()
-            self._tutup_akordeon_hilal()
-            self._tutup_akordeon_sholat()
-            self._tutup_akordeon_gerhana()
-            self._tutup_akordeon_efemeris()
         elif "Efemeris" in tab_terpilih:
             self._buka_akordeon_efemeris()
-            self._tutup_akordeon_hilal()
-            self._tutup_akordeon_sholat()
-            self._tutup_akordeon_gerhana()
-            self._tutup_akordeon_kalbanding()
-        elif "Cakrawala" in tab_terpilih:
+        elif "Simulasi" in tab_terpilih:
+            self._buka_akordeon_simulasi_hilal()
+        elif "Cakrawala" in tab_terpilih or "Ridge" in tab_terpilih:
             self._buka_akordeon_cakrawala()
-            self._tutup_akordeon_hilal()
-            self._tutup_akordeon_sholat()
-            self._tutup_akordeon_gerhana()
-            self._tutup_akordeon_kalbanding()
-            self._tutup_akordeon_efemeris()
         else:
             # Tab peta Hilal (MABIMS, Muhammadiyah, Indonesia, dll)
             self._buka_akordeon_hilal()
-            self._tutup_akordeon_sholat()
-            self._tutup_akordeon_gerhana()
-            self._tutup_akordeon_kalbanding()
-            self._tutup_akordeon_efemeris()
 
     def _on_tab_notebook_ditutup(self, event=None):
         """Dipanggil begitu user klik tombol × di salah satu tab notebook
@@ -9717,15 +9761,21 @@ class HisabWinApp(tk.Tk):
         frame_kontrol.pack(side="bottom", fill="x", padx=8, pady=(2, 6))
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-        # Penanda "posisi saat ini" -- bintang besar, beda gaya dari
-        # penanda ghurub statis (lingkaran) biar gampang dibedakan sbg
-        # kepala pemutar, bukan salah satu dari 3 titik ghurub per-ufuk.
-        (penanda_sun,) = ax.plot([az_sun[0]], [alt_sun[0]], marker="*", color="#F59E0B",
-                                  markersize=20, markeredgecolor="black", markeredgewidth=1.0,
+        # Penanda "posisi saat ini" -- lingkaran + simbol Unicode ☀/☽
+        # (konsisten dgn penanda ghurub statis), beda ukuran/tebal supaya
+        # gampang dibedakan sbg "kepala pemutar" animasi.
+        (penanda_sun,) = ax.plot([az_sun[0]], [alt_sun[0]], "o", color="#F59E0B",
+                                  markersize=14, markeredgecolor="black", markeredgewidth=1.2,
                                   zorder=10, linestyle="none")
-        (penanda_moon,) = ax.plot([az_moon[0]], [alt_moon[0]], marker="*", color="#93C5FD",
-                                   markersize=20, markeredgecolor="black", markeredgewidth=1.0,
+        teks_sun = ax.text(az_sun[0], alt_sun[0], "☀", fontsize=10,
+                           ha="center", va="center", color="#92400E", zorder=11,
+                           fontweight="bold")
+        (penanda_moon,) = ax.plot([az_moon[0]], [alt_moon[0]], "o", color="#BFDBFE",
+                                   markersize=14, markeredgecolor="black", markeredgewidth=1.2,
                                    zorder=10, linestyle="none")
+        teks_moon = ax.text(az_moon[0], alt_moon[0], "☽", fontsize=12,
+                            ha="center", va="center", color="#1E3A5F", zorder=11,
+                            fontweight="bold")
 
         label_waktu = ttk.Label(frame_kontrol, text=_label_jam_hhmm(float(jam_arr[0])),
                                  font=FONT_UTAMA_BOLD, width=9, anchor="center")
@@ -9741,7 +9791,9 @@ class HisabWinApp(tk.Tk):
             az_b = float(np.interp(jam_target, jam_arr, az_moon))
             al_b = float(np.interp(jam_target, jam_arr, alt_moon))
             penanda_sun.set_data([az_s], [al_s])
+            teks_sun.set_position((az_s, al_s))
             penanda_moon.set_data([az_b], [al_b])
+            teks_moon.set_position((az_b, al_b))
             label_waktu.config(text=_label_jam_hhmm(jam_target))
             canvas.draw_idle()
 
@@ -11578,7 +11630,7 @@ class HisabWinApp(tk.Tk):
 
         self.btn_ridge_cakrawala = ttk.Button(
             frame_tombol_hasil, text="⛰️ Tampilkan Ridge Line",
-            command=self._on_tampilkan_ridge_cakrawala, state="disabled")
+            command=lambda: self._on_tampilkan_ridge_cakrawala(sumber="cakrawala"), state="disabled")
         self.btn_ridge_cakrawala.pack(fill="x")
 
         self._hasil_cakrawala_terakhir = None  # diisi dict hitung_profil_cakrawala() begitu selesai
@@ -11716,7 +11768,7 @@ class HisabWinApp(tk.Tk):
             self._log(f"(Grafik cakrawala gagal ditampilkan, tapi data tetap termuat: {e})")
             messagebox.showerror("Gagal menampilkan grafik", str(e))
 
-    def _on_tampilkan_ridge_cakrawala(self):
+    def _on_tampilkan_ridge_cakrawala(self, sumber="cakrawala"):
         """Tombol '⛰️ Tampilkan Ridge Line' -- gambar profil["matriks_sudut"]
         yg SUDAH ADA di self._hasil_cakrawala_terakhir (TANPA hitung ulang/
         internet). Kalau profil itu dari .txt lama yg belum punya data
@@ -11730,8 +11782,14 @@ class HisabWinApp(tk.Tk):
         try:
             fig_ridge = buat_figure_ridgeline_cakrawala(profil)
             tgl_label = f"({profil['lat']:.3f}, {profil['lon']:.3f})"
+            if sumber == "simulasi_hilal":
+                judul_tab = f"⛰️ Ridge Line Simulasi — {tgl_label}"
+                nama_tab = "simulasi_hilal_ridge"
+            else:
+                judul_tab = f"⛰️ Ridge Line Cakrawala — {tgl_label}"
+                nama_tab = "cakrawala_ridge"
             frame_ridge = self._tampilkan_peta(
-                "cakrawala_ridge", f"⛰️ Ridge Line — {tgl_label}", fig_ridge)
+                nama_tab, judul_tab, fig_ridge)
             self.notebook.select(frame_ridge)
         except ValueError as e:
             messagebox.showinfo("Perlu hitung ulang", str(e))
@@ -11877,7 +11935,7 @@ class HisabWinApp(tk.Tk):
         # aktif di sini bisa dilihat langsung tanpa pindah akordeon.
         self.btn_ridge_simulasi_hilal = ttk.Button(
             frame_profil, text="⛰️ Tampilkan Ridge Line Profil Ini",
-            command=self._on_tampilkan_ridge_cakrawala, state="disabled")
+            command=lambda: self._on_tampilkan_ridge_cakrawala(sumber="simulasi_hilal"), state="disabled")
         self.btn_ridge_simulasi_hilal.pack(fill="x", padx=10, pady=(0, 10))
 
         frame_tgl = ttk.LabelFrame(body, text="2. Tanggal (dari Ijtimak) & Zona Waktu")
