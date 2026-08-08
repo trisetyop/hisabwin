@@ -94,13 +94,18 @@ except ImportError:
 
     filedialog_dummy = types.ModuleType("tkinter.filedialog")
     messagebox_dummy = types.ModuleType("tkinter.messagebox")
+    simpledialog_dummy = types.ModuleType("tkinter.simpledialog")
+    simpledialog_dummy.askstring = lambda *a, **k: None
+    simpledialog_dummy.Dialog = _DummyTkWidget
     tk_dummy.filedialog = filedialog_dummy
     tk_dummy.messagebox = messagebox_dummy
+    tk_dummy.simpledialog = simpledialog_dummy
 
     sys.modules["tkinter"] = tk_dummy
     sys.modules["tkinter.ttk"] = ttk_dummy
     sys.modules["tkinter.filedialog"] = filedialog_dummy
     sys.modules["tkinter.messagebox"] = messagebox_dummy
+    sys.modules["tkinter.simpledialog"] = simpledialog_dummy
 
 # hisabwin.py otomatis memanggil _tampilkan_splash_awal() di level modul
 # (baris 151-152 di hisabwin.py) - ini untuk GUI Tkinter aslinya, supaya
