@@ -381,6 +381,40 @@
   .tabel-sholat tr:hover { background: #eef2f6; }
   .tabel-sholat tr.hari-ini { background: #d1e7dd; font-weight: bold; color: #0f5132; }
   
+  /* Profil Cakrawala & Ridge Line */
+  .pil.info{ color:#004085; border-color:#b8daff; background:#cce5ff; }
+  .cakrawala-ringkas{ display:flex; gap:10px; flex-wrap:wrap; margin:10px 0 16px; }
+  .cakrawala-svg-wrap{ border:1px solid var(--portal-border); border-radius:4px; overflow:hidden; background:#fff; }
+  .cakrawala-svg-wrap svg{ display:block; }
+  .cakrawala-daftar{ margin-top:12px; display:flex; flex-direction:column; gap:8px; }
+  .cakrawala-item{
+    border:1px solid var(--portal-border); border-radius:4px; padding:10px 12px;
+    display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;
+    background:#f8f9fa;
+  }
+  .cakrawala-item .info{ font-size:.86rem; line-height:1.5; color: var(--teks-utama); }
+  .cakrawala-item .aksi{ display:flex; gap:6px; flex-wrap:wrap; }
+  .cakrawala-item .aksi button{ font-size:.76rem; padding:5px 10px; }
+  .cakrawala-catatan-simpan{
+    font-size:.8rem; color: var(--teks-redup); background:#eef2f6; border:1px solid var(--portal-border-light);
+    border-radius:4px; padding:8px 12px; margin-top:10px; line-height:1.5;
+  }
+  .cakrawala-toolbar-view {
+    display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px;
+  }
+  .btn-toggle-group {
+    display: inline-flex; background: #eef2f6; border-radius: 6px; padding: 3px; border: 1px solid var(--portal-border);
+  }
+  .btn-toggle {
+    font-size: 0.78rem; font-weight: 600; padding: 5px 12px; border-radius: 4px; border: none;
+    background: transparent; color: var(--teks-redup); cursor: pointer; transition: all 0.15s ease;
+    display: inline-flex; align-items: center; gap: 4px; font-family: var(--font-body);
+  }
+  .btn-toggle:hover { color: var(--teks-utama); }
+  .btn-toggle.aktif {
+    background: #ffffff; color: var(--teks-utama); box-shadow: 0 1px 3px rgba(0,0,0,0.12); font-weight: 700;
+  }
+
   .next-prayer-banner {
     background: #e6f4f1; border: 1px solid var(--aksen-desktop);
     border-radius: 4px; padding: 10px 16px; margin-bottom: 14px;
@@ -415,6 +449,8 @@
   <button id="nav-hilal" class="nav-btn aktif"><span class="material-symbols-outlined">nights_stay</span> Visibilitas Hilal &amp; Peta</button>
   <button id="nav-sholat" class="nav-btn"><span class="material-symbols-outlined">mosque</span> Waktu Sholat &amp; Kiblat</button>
   <button id="nav-gerhana" class="nav-btn"><span class="material-symbols-outlined">brightness_3</span> Gerhana</button>
+  <button id="nav-cakrawala" class="nav-btn"><span class="material-symbols-outlined">terrain</span> Profil Cakrawala</button>
+  <button id="nav-simulasi" class="nav-btn"><span class="material-symbols-outlined">wb_twilight</span> Simulasi Hilal</button>
 </nav>
 
 <main>
@@ -676,6 +712,164 @@
         <div id="peta-gerhana-globe" style="display:none;"></div>
       </div>
       <div class="catatan" id="catatan-gerhana"></div>
+    </section>
+  </div>
+
+  <!-- VIEW 4: PROFIL CAKRAWALA -->
+  <div id="view-cakrawala" style="display:none;">
+    <section class="kartu">
+      <div class="langkah"><span class="no"><span class="material-symbols-outlined" style="font-size:1.1rem;color:#1a1003;">terrain</span></span><h2>Profil Cakrawala (Horizon 360°)</h2></div>
+      <div class="catatan" style="margin-top:-6px; margin-bottom:14px;">
+        Hitung ketinggian sudut horizon (skyline) topografi 360° di sekitar lokasi pengamat, memakai data elevasi medan global (AWS Terrain Tiles — diunduh LANGSUNG oleh browser Anda, bukan lewat server HisabWin) &amp; database nama puncak gunung Indonesia. Berguna untuk memperkirakan penghalang pegunungan/bukit saat rukyat hilal.
+      </div>
+
+      <div class="baris" style="margin-bottom:14px;">
+        <div style="flex:none;">
+          <button id="btn-cakrawala-lokasi-saya" type="button"><span class="material-symbols-outlined">my_location</span> Lokasi Saya</button>
+        </div>
+      </div>
+
+      <div class="baris">
+        <div>
+          <label for="cakrawala-lat">Lintang (Lat °)</label>
+          <input type="text" id="cakrawala-lat" value="-6.1751">
+        </div>
+        <div>
+          <label for="cakrawala-lon">Bujur (Lon °)</label>
+          <input type="text" id="cakrawala-lon" value="106.8272">
+        </div>
+        <div>
+          <label for="cakrawala-tinggi-mata">Tinggi Mata (m)</label>
+          <input type="text" id="cakrawala-tinggi-mata" value="2.0">
+        </div>
+        <div>
+          <label for="cakrawala-radius">Radius Amatan (km)</label>
+          <input type="text" id="cakrawala-radius" value="20">
+        </div>
+      </div>
+
+      <div class="baris" style="margin-top:14px;">
+        <div>
+          <label for="cakrawala-resolusi">Resolusi Arah (Azimuth)</label>
+          <select id="cakrawala-resolusi">
+            <option value="36">Kasar — Cepat (36 arah / 10°)</option>
+            <option value="72" selected>Sedang — Disarankan (72 arah / 5°)</option>
+            <option value="120">Detail (120 arah / 3°)</option>
+            <option value="180">Sangat Detail — Lambat (180 arah / 2°)</option>
+          </select>
+        </div>
+        <div>
+          <label for="cakrawala-sample">Kerapatan Sampel Jarak</label>
+          <select id="cakrawala-sample">
+            <option value="12">Cepat (12 titik)</option>
+            <option value="20" selected>Standar (20 titik)</option>
+            <option value="30">Detail (30 titik)</option>
+          </select>
+        </div>
+      </div>
+
+      <div style="margin-top:20px;">
+        <button id="btn-hitung-cakrawala" class="btn-aksen-teal"><span class="material-symbols-outlined">landscape</span> Hitung Profil Cakrawala</button>
+      </div>
+
+      <div id="status-cakrawala" class="status"></div>
+    </section>
+
+    <!-- HASIL PROFIL CAKRAWALA -->
+    <section class="kartu hasil" id="kartu-hasil-cakrawala" style="display:none;">
+      <div class="cakrawala-toolbar-view">
+        <div class="langkah" style="margin:0;"><span class="no"><span class="material-symbols-outlined" style="font-size:1.1rem;color:#1a1003;">check</span></span><h2>Hasil Profil Cakrawala</h2></div>
+        <div class="btn-toggle-group" id="toggle-view-cakrawala">
+          <button type="button" class="btn-toggle aktif" data-mode="siluet"><span class="material-symbols-outlined" style="font-size:0.95rem;">show_chart</span> Siluet Horizon</button>
+          <button type="button" class="btn-toggle" data-mode="ridge"><span class="material-symbols-outlined" style="font-size:0.95rem;">filter_hdr</span> Ridge Line (Berlapis)</button>
+        </div>
+      </div>
+
+      <div class="cakrawala-ringkas" id="cakrawala-ringkas"></div>
+
+      <div class="cakrawala-svg-wrap" id="cakrawala-svg-wrap"></div>
+
+      <div class="catatan">Sumbu-X: azimuth (U=Utara, T=Timur, S=Selatan, B=Barat). Sumbu-Y: sudut elevasi horizon (°). Garis biru putus-putus = horizon datar geometris (0°). Garis merah putus-putus tipis = "dip" horizon akibat tinggi pengamat. Mode Ridge Line menampilkan lapisan elevasi medan bertumpuk dari jarak terdekat hingga batas radius.</div>
+
+      <div class="baris" style="margin-top:18px;">
+        <div style="flex:2; min-width:220px;">
+          <label for="cakrawala-nama-simpan">Nama Profil (utk disimpan)</label>
+          <input type="text" id="cakrawala-nama-simpan" placeholder="mis. Pantai Anyer - Menara Pandang">
+        </div>
+        <div style="flex:none; display:flex; gap:8px; flex-wrap:wrap;">
+          <button id="btn-simpan-cakrawala" class="btn-aksen-teal" type="button"><span class="material-symbols-outlined">save</span> Simpan ke Perangkat</button>
+          <button id="btn-unduh-cakrawala" type="button"><span class="material-symbols-outlined">download</span> Unduh .txt</button>
+        </div>
+      </div>
+      <div class="cakrawala-catatan-simpan"><span class="material-symbols-outlined" style="font-size:1rem; vertical-align:-3px;">lock</span> Profil yang disimpan HANYA tersimpan secara lokal di <b>IndexedDB browser Anda</b> — tidak pernah dikirim atau disimpan ke server HisabWin.</div>
+    </section>
+
+    <!-- DAFTAR PROFIL TERSIMPAN (INDEXEDDB) -->
+    <section class="kartu" id="kartu-daftar-cakrawala">
+      <div class="langkah"><span class="no"><span class="material-symbols-outlined" style="font-size:1.1rem;color:#1a1003;">folder_open</span></span><h2>Profil Tersimpan di Perangkat Ini</h2></div>
+      <div id="cakrawala-daftar-kosong" class="catatan">Belum ada profil cakrawala yang disimpan di perangkat ini.</div>
+      <div class="cakrawala-daftar" id="cakrawala-daftar"></div>
+    </section>
+  </div>
+
+  <!-- VIEW 5: SIMULASI HILAL -->
+  <div id="view-simulasi" style="display:none;">
+    <section class="kartu">
+      <div class="langkah"><span class="no"><span class="material-symbols-outlined" style="font-size:1.1rem;color:#1a1003;">wb_twilight</span></span><h2>Simulasi Hilal — 3 Definisi Ufuk</h2></div>
+      <div class="catatan" style="margin-top:-6px; margin-bottom:14px;">
+        Bandingkan posisi Matahari &amp; Bulan saat ghurub terhadap TIGA definisi ufuk sekaligus: ufuk astronomis datar (0°), ufuk dip (kerendahan ufuk akibat tinggi pengamat), dan ufuk topografi NYATA dari Profil Cakrawala. Posisi Matahari/Bulan dihitung di server (data astronomi umum, sama seperti tab lain) — tapi profil cakrawala Anda &amp; seluruh perbandingan terhadapnya dihitung LANGSUNG di browser, dari data yang tersimpan di IndexedDB perangkat ini.
+      </div>
+
+      <div id="simulasi-tanpa-profil" class="cakrawala-catatan-simpan" style="display:none;">
+        Anda belum punya Profil Cakrawala tersimpan. Buka tab <b>"Profil Cakrawala"</b>, hitung profil untuk lokasi pengamatan Anda, lalu simpan ke perangkat ini dulu sebelum menjalankan Simulasi Hilal.
+      </div>
+
+      <div class="baris">
+        <div style="flex:2; min-width:220px;">
+          <label for="simulasi-pilih-profil">Profil Cakrawala Tersimpan</label>
+          <select id="simulasi-pilih-profil"></select>
+        </div>
+        <div>
+          <label for="simulasi-tanggal">Tanggal</label>
+          <input type="date" id="simulasi-tanggal">
+        </div>
+        <div>
+          <label for="simulasi-zona">Zona Waktu (Jam UTC)</label>
+          <input type="text" id="simulasi-zona" value="7.0">
+        </div>
+      </div>
+
+      <div class="baris" style="margin-top:14px;">
+        <div>
+          <label for="simulasi-tahun-ijtimak">Cari Ijtimak Tahun (opsional)</label>
+          <input type="text" id="simulasi-tahun-ijtimak" placeholder="mis. 2026" maxlength="4" inputmode="numeric">
+        </div>
+        <div style="flex:none; align-self:flex-end;"><button id="btn-simulasi-cari-ijtimak" type="button">Cari Ijtimak</button></div>
+      </div>
+      <div id="simulasi-daftar-ijtimak" class="daftar-ijtimak" style="display:none; margin-top:8px;"></div>
+
+      <div style="margin-top:20px;">
+        <button id="btn-jalankan-simulasi" class="btn-aksen-teal" disabled type="button"><span class="material-symbols-outlined">play_circle</span> Jalankan Simulasi Hilal</button>
+      </div>
+
+      <div id="status-simulasi" class="status"></div>
+    </section>
+
+    <section class="kartu hasil" id="kartu-hasil-simulasi" style="display:none;">
+      <div class="langkah"><span class="no"><span class="material-symbols-outlined" style="font-size:1.1rem;color:#1a1003;">check</span></span><h2>Hasil Simulasi Hilal</h2></div>
+      <div class="tabel-wrapper" id="simulasi-ringkasan-tabel-wrap"></div>
+      <div class="cakrawala-toolbar-view" style="margin-top:18px;">
+        <div style="font-weight:700; font-size:0.95rem; display:flex; align-items:center; gap:6px;">
+          <span class="material-symbols-outlined" style="font-size:1.1rem; color:var(--aksen-desktop);">panorama</span> Grafik Panorama &amp; Simulasi Hilal
+        </div>
+        <div class="btn-toggle-group" id="toggle-view-simulasi">
+          <button type="button" class="btn-toggle aktif" data-mode="siluet"><span class="material-symbols-outlined" style="font-size:0.95rem;">show_chart</span> Siluet Horizon</button>
+          <button type="button" class="btn-toggle" data-mode="ridge"><span class="material-symbols-outlined" style="font-size:0.95rem;">filter_hdr</span> Ridge Line (Berlapis)</button>
+        </div>
+      </div>
+      <div class="cakrawala-svg-wrap" id="simulasi-svg-wrap"></div>
+      <div class="catatan">☀ = Matahari, ☾ = Bulan, ditandai persis pada saat ghurub menurut tiap definisi ufuk (warna penanda cocok dgn warna baris tabel di atas). Garis oranye/biru tipis = lintasan Matahari/Bulan pada rentang waktu yang digambar.</div>
+      <div class="cakrawala-catatan-simpan"><span class="material-symbols-outlined" style="font-size:1rem; vertical-align:-3px;">lock</span> Perhitungan ini memakai Profil Cakrawala yang tersimpan lokal di perangkat Anda (IndexedDB) — data itu tidak pernah dikirim ke server. Hanya posisi Matahari/Bulan (data astronomi umum) yang diminta dari server.</div>
     </section>
   </div>
 </main>
@@ -1136,14 +1330,20 @@ inputTahun.addEventListener('keydown', (e) => { if(e.key === 'Enter') btnCari.cl
 const navHilal = $('#nav-hilal');
 const navSholat = $('#nav-sholat');
 const navGerhana = $('#nav-gerhana');
+const navCakrawala = $('#nav-cakrawala');
+const navSimulasi = $('#nav-simulasi');
 const viewHilal = $('#view-hilal');
 const viewSholat = $('#view-sholat');
 const viewGerhana = $('#view-gerhana');
+const viewCakrawala = $('#view-cakrawala');
+const viewSimulasi = $('#view-simulasi');
 
 const SEMUA_NAV = [
   { btn: navHilal, view: viewHilal },
   { btn: navSholat, view: viewSholat },
   { btn: navGerhana, view: viewGerhana },
+  { btn: navCakrawala, view: viewCakrawala },
+  { btn: navSimulasi, view: viewSimulasi },
 ];
 
 function pindahNav(navAktif){
@@ -1160,11 +1360,19 @@ function pindahNav(navAktif){
   if(navAktif.btn === navGerhana && typeof petaGerhana !== 'undefined'){
     setTimeout(() => petaGerhana.invalidateSize(), 50);
   }
+  // Muat ulang dropdown "Profil Cakrawala Tersimpan" tiap kali tab
+  // Simulasi Hilal dibuka -- profil baru bisa saja baru saja disimpan di
+  // tab Profil Cakrawala sebelum pindah ke sini.
+  if(navAktif.btn === navSimulasi && typeof muatDaftarProfilKeDropdownSimulasi === 'function'){
+    muatDaftarProfilKeDropdownSimulasi();
+  }
 }
 
 navHilal.addEventListener('click', () => pindahNav(SEMUA_NAV[0]));
 navSholat.addEventListener('click', () => pindahNav(SEMUA_NAV[1]));
 navGerhana.addEventListener('click', () => pindahNav(SEMUA_NAV[2]));
+navCakrawala.addEventListener('click', () => pindahNav(SEMUA_NAV[3]));
+navSimulasi.addEventListener('click', () => pindahNav(SEMUA_NAV[4]));
 
 // Preset Tanggal Hari Ini
 const sholatTanggalInput = $('#sholat-tanggal');
@@ -1978,6 +2186,1151 @@ function gambarGarisPeta(mapInstance, layerGroup, geojson, warna, putus, rendere
     style: { color: warna, weight: 2, dashArray: putus ? '6 5' : null }
   }).addTo(layerGroup);
 }
+
+// =======================================================================
+// PROFIL CAKRAWALA (Horizon 360°)
+// -----------------------------------------------------------------------
+// Semua perhitungan (elevasi medan, deteksi puncak, dsb) dilakukan
+// LANGSUNG di browser (portir dari hitung_profil_cakrawala() versi
+// desktop hisabwin.py) -- server HisabWin (server.py) TIDAK dilibatkan
+// sama sekali & TIDAK diberi endpoint baru utk fitur ini. Data elevasi
+// diambil langsung dari AWS Terrain Tiles (bucket publik, gratis, tanpa
+// API key). Profil yang disimpan pengguna TERSIMPAN LOKAL di IndexedDB
+// browser (lihat blok "Penyimpanan IndexedDB" di bawah) -- BUKAN dikirim
+// atau disimpan ke server.
+// =======================================================================
+
+// ---- Konstanta geometri (sama persis dgn versi Python) ----
+const R_BUMI_CAKRAWALA = 6371000.0;      // jari-jari Bumi (meter)
+const REFRAKSI_CAKRAWALA = 0.13;         // koefisien refraksi atmosfer standar
+const CAKRAWALA_TILE_ZOOM = 12;          // detail DEM
+const CAKRAWALA_URL_TILE = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
+
+function escapeXml(s){
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ---- Konversi lat/lon <-> tile/piksel (Web Mercator, skema Slippy Map) ----
+function cakrawalaLatLonKeTile(lat, lon, zoom){
+  const latRad = lat * Math.PI / 180;
+  const n = Math.pow(2, zoom);
+  const x = (lon + 180) / 360 * n;
+  const y = (1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n;
+  const xtile = Math.floor(x), ytile = Math.floor(y);
+  const px = Math.min(255, Math.floor((x - xtile) * 256));
+  const py = Math.min(255, Math.floor((y - ytile) * 256));
+  return { xtile, ytile, px, py };
+}
+
+// ---- Titik tujuan dari bearing & jarak (forward geodesic, bola) ----
+function cakrawalaTitikTujuan(lat, lon, bearingDeg, jarakM){
+  const brng = bearingDeg * Math.PI / 180;
+  const lat1 = lat * Math.PI / 180, lon1 = lon * Math.PI / 180;
+  const dR = jarakM / R_BUMI_CAKRAWALA;
+  const lat2 = Math.asin(Math.sin(lat1) * Math.cos(dR) + Math.cos(lat1) * Math.sin(dR) * Math.cos(brng));
+  const lon2 = lon1 + Math.atan2(Math.sin(brng) * Math.sin(dR) * Math.cos(lat1), Math.cos(dR) - Math.sin(lat1) * Math.sin(lat2));
+  return { lat: lat2 * 180 / Math.PI, lon: lon2 * 180 / Math.PI };
+}
+
+function cakrawalaHaversineKm(lat1, lon1, lat2, lon2){
+  const R = 6371.0;
+  const dLat = (lat2 - lat1) * Math.PI / 180, dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+// ---- Unduh & decode 1 tile Terrarium PNG (256x256, RGB -> elevasi meter) ----
+// Cache in-memory per sesi (Map) -- tile yg sama dipakai ulang tanpa unduh lagi.
+const cakrawalaTileCache = new Map();
+function cakrawalaAmbilTile(xtile, ytile, zoom){
+  const key = `${zoom}/${xtile}/${ytile}`;
+  if(cakrawalaTileCache.has(key)) return cakrawalaTileCache.get(key);
+  const url = CAKRAWALA_URL_TILE.replace('{z}', zoom).replace('{x}', xtile).replace('{y}', ytile);
+  const p = new Promise((resolve) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = 256; canvas.height = 256;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+        resolve(ctx.getImageData(0, 0, 256, 256));
+      } catch(e){ resolve(null); } // tile ada tapi gagal dibaca (mis. CORS) -- anggap elevasi 0
+    };
+    img.onerror = () => resolve(null); // tile tidak ada (mis. laut lepas) -- tetap valid, elevasi 0
+    img.src = url;
+  });
+  cakrawalaTileCache.set(key, p);
+  return p;
+}
+
+// titikLatLon: [[lat,lon], ...] -> Promise<[elevasi_m, ...]>
+async function cakrawalaAmbilElevasiBanyak(titikLatLon, onProgress){
+  const metaList = titikLatLon.map(([lat, lon]) => cakrawalaLatLonKeTile(lat, lon, CAKRAWALA_TILE_ZOOM));
+  const tileKeySet = new Set(metaList.map(t => `${t.xtile}|${t.ytile}`));
+  const uniqueTiles = [...tileKeySet].map(k => { const [x, y] = k.split('|').map(Number); return { xtile: x, ytile: y }; });
+  let selesai = 0;
+  const imgDataArr = await Promise.all(uniqueTiles.map(t =>
+    cakrawalaAmbilTile(t.xtile, t.ytile, CAKRAWALA_TILE_ZOOM).then(d => {
+      selesai++;
+      if(onProgress) onProgress(selesai, uniqueTiles.length);
+      return d;
+    })
+  ));
+  const imgMap = new Map();
+  uniqueTiles.forEach((t, i) => imgMap.set(`${t.xtile}|${t.ytile}`, imgDataArr[i]));
+  return metaList.map(t => {
+    const imgData = imgMap.get(`${t.xtile}|${t.ytile}`);
+    if(!imgData) return 0.0;
+    const p = (t.py * 256 + t.px) * 4;
+    const r = imgData.data[p], g = imgData.data[p + 1], b = imgData.data[p + 2];
+    return (r * 256 + g + b / 256) - 32768; // encoding Terrarium
+  });
+}
+
+// ---- Database nama puncak gunung Indonesia (aset statis .csv, offline) ----
+let _cakrawalaGunungCache = null;
+async function muatGunungIndonesiaCsv(){
+  if(_cakrawalaGunungCache) return _cakrawalaGunungCache;
+  const data = [];
+  try {
+    const res = await fetch('gunung_indonesia.csv');
+    const teks = await res.text();
+    const baris = teks.split('\n');
+    for(let i = 1; i < baris.length; i++){
+      const l = baris[i].trim();
+      if(!l) continue;
+      const kol = l.split(',');
+      if(kol.length < 3) continue;
+      const nama = kol[0].trim(), lat = parseFloat(kol[1]), lon = parseFloat(kol[2]);
+      if(!nama || isNaN(lat) || isNaN(lon)) continue;
+      data.push({ nama, lat, lon });
+    }
+  } catch(e){ /* database tidak ketemu -- lanjut TANPA label nama, bukan error fatal */ }
+  _cakrawalaGunungCache = data;
+  return data;
+}
+
+async function cakrawalaCariNamaPuncakLokal(lat, lon, radiusM){
+  const data = await muatGunungIndonesiaCsv();
+  const hasil = [];
+  for(const pk of data){
+    if(cakrawalaHaversineKm(lat, lon, pk.lat, pk.lon) * 1000 <= radiusM) hasil.push(pk);
+  }
+  return hasil;
+}
+
+// ---- Deteksi puncak lokal pada kurva horizon (melingkar, dgn prominence) ----
+function cakrawalaDeteksiPuncak(sudutArr, prominenceMin = 0.3){
+  const n = sudutArr.length;
+  if(n < 3) return [];
+  const kandidat = [];
+  for(let i = 0; i < n; i++){
+    const kiri = sudutArr[(i - 1 + n) % n], kanan = sudutArr[(i + 1) % n];
+    if(sudutArr[i] > kiri && sudutArr[i] > kanan) kandidat.push(i);
+  }
+  const hasil = [];
+  for(const i of kandidat){
+    const tinggi = sudutArr[i];
+    let lembahKiri = tinggi, j = (i - 1 + n) % n, langkah = 0;
+    while(langkah < n){
+      if(sudutArr[j] >= tinggi) break;
+      lembahKiri = Math.min(lembahKiri, sudutArr[j]);
+      j = (j - 1 + n) % n; langkah++;
+    }
+    let lembahKanan = tinggi; j = (i + 1) % n; langkah = 0;
+    while(langkah < n){
+      if(sudutArr[j] >= tinggi) break;
+      lembahKanan = Math.min(lembahKanan, sudutArr[j]);
+      j = (j + 1) % n; langkah++;
+    }
+    if(tinggi - Math.max(lembahKiri, lembahKanan) >= prominenceMin) hasil.push(i);
+  }
+  return hasil;
+}
+
+// ---- Fungsi utama: hitung profil elevasi horizon 360° dari (lat,lon) ----
+async function hitungProfilCakrawala({ lat, lon, tinggiMata = 2.0, radiusKm = 20, nAzimuth = 72, nSample = 20, prominenceMin = 0.3, jarakMaksLabelKm = 3.0 }, onProgress = () => {}){
+  onProgress('Mengambil elevasi lokasi pengamat...');
+  const [elevTanah] = await cakrawalaAmbilElevasiBanyak([[lat, lon]]);
+  const tinggiPengamat = elevTanah + tinggiMata;
+  onProgress(`Elevasi tanah: ${elevTanah.toFixed(1)} m, tinggi mata: ${tinggiPengamat.toFixed(1)} m`);
+
+  const azimuth = Array.from({ length: nAzimuth }, (_, i) => i * 360 / nAzimuth);
+  const jarakArr = Array.from({ length: nSample }, (_, i) => (i + 1) * radiusKm * 1000 / nSample);
+
+  const semuaTitik = [];
+  for(let azIdx = 0; azIdx < nAzimuth; azIdx++){
+    for(let sIdx = 0; sIdx < nSample; sIdx++){
+      const d = jarakArr[sIdx];
+      const { lat: plat, lon: plon } = cakrawalaTitikTujuan(lat, lon, azimuth[azIdx], d);
+      semuaTitik.push({ azIdx, sIdx, d, lat: plat, lon: plon });
+    }
+  }
+  onProgress(`Menyiapkan ${semuaTitik.length} titik sampel (${nAzimuth} arah x ${nSample} jarak)...`);
+  const koordinat = semuaTitik.map(p => [p.lat, p.lon]);
+  const elevasi = await cakrawalaAmbilElevasiBanyak(koordinat, (done, total) =>
+    onProgress(`Mengunduh data elevasi medan: ${done}/${total} tile...`));
+  onProgress('Selesai mengambil elevasi. Menghitung sudut horizon...');
+
+  const sudutHorizon = new Array(nAzimuth).fill(-90);
+  const jarakHorizon = new Array(nAzimuth).fill(0);
+  const elevasiHorizon = new Array(nAzimuth).fill(0);
+  const matriksSudut = Array.from({ length: nAzimuth }, () => new Array(nSample).fill(-90));
+  const rEfektif = R_BUMI_CAKRAWALA / (1 - REFRAKSI_CAKRAWALA);
+
+  semuaTitik.forEach((p, idx) => {
+    const elevTarget = elevasi[idx];
+    const penurunanLengkung = (p.d ** 2) / (2 * rEfektif);
+    const sudut = Math.atan((elevTarget - tinggiPengamat - penurunanLengkung) / p.d) * 180 / Math.PI;
+    matriksSudut[p.azIdx][p.sIdx] = sudut;
+    if(sudut > sudutHorizon[p.azIdx]){
+      sudutHorizon[p.azIdx] = sudut;
+      jarakHorizon[p.azIdx] = p.d;
+      elevasiHorizon[p.azIdx] = elevTarget;
+    }
+  });
+
+  // Clamp: ufuk topografi tidak boleh lebih rendah dari dip (ufuk laut/rata)
+  const dipDerajat = 0.0293 * Math.sqrt(Math.max(tinggiPengamat, 0));
+  const sudutHorizonMentah = sudutHorizon.slice();
+  const sudutHorizonClamped = sudutHorizon.map(v => Math.max(v, -dipDerajat));
+
+  onProgress('Mendeteksi puncak pada kurva horizon...');
+  const idxPuncak = cakrawalaDeteksiPuncak(sudutHorizonMentah, prominenceMin);
+
+  onProgress('Mencari nama gunung/puncak dari database lokal...');
+  const puncakLokal = await cakrawalaCariNamaPuncakLokal(lat, lon, radiusKm * 1000);
+
+  const puncakBerlabel = [];
+  for(const i of idxPuncak){
+    if(jarakHorizon[i] <= 0) continue;
+    const { lat: plat, lon: plon } = cakrawalaTitikTujuan(lat, lon, azimuth[i], jarakHorizon[i]);
+    let namaTerbaik = null, jarakTerbaik = 5.0; // toleransi 5 km utk kecocokan puncak
+    for(const pk of puncakLokal){
+      const d = cakrawalaHaversineKm(plat, plon, pk.lat, pk.lon);
+      if(d < jarakTerbaik){ jarakTerbaik = d; namaTerbaik = pk.nama; }
+    }
+    if(namaTerbaik) puncakBerlabel.push({ az: azimuth[i], sudut: sudutHorizonMentah[i], nama: namaTerbaik });
+  }
+  onProgress(`${puncakBerlabel.length} puncak berhasil diberi nama.`);
+
+  return {
+    lat, lon, tinggiMata, radiusKm, elevTanah, tinggiPengamat, dipDerajat,
+    azimuth, sudutHorizon: sudutHorizonClamped,
+    jarakHorizonKm: jarakHorizon.map(d => d / 1000), elevasiTitikM: elevasiHorizon,
+    puncakBerlabel, dibuat: new Date().toISOString(),
+    matriksSudut, matriksJarakKm: jarakArr.map(d => d / 1000)
+  };
+}
+
+// Gradien warna matplotlib copper_r: nearest (t=0) = light copper tan, farthest (t=1) = dark charcoal black
+function getCopperRColor(t){
+  const u = 1 - t;
+  const r = Math.round(Math.min(1.0, 1.25 * u) * 255);
+  const g = Math.round(0.7812 * u * 255);
+  const b = Math.round(0.4975 * u * 255);
+  return `rgb(${r},${g},${b})`;
+}
+
+// ---- Render panorama horizon sbg SVG (garis + isian + label puncak + mode Ridge Line) ----
+function renderProfilCakrawalaSvg(profil, modeView = 'siluet'){
+  const W = 900, H = 380, padL = 44, padR = 14, padT = 65, padB = 34;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const azimuth = profil.azimuth, sudut = profil.sudutHorizon;
+  const hasLayers = Boolean(profil.matriksSudut && profil.matriksJarakKm && profil.matriksSudut.length > 0);
+
+  const maxPeakSudut = (profil.puncakBerlabel && profil.puncakBerlabel.length > 0)
+    ? Math.max(...profil.puncakBerlabel.map(p => p.sudut), ...sudut)
+    : Math.max(...sudut);
+
+  const skylineMentah = hasLayers ? profil.matriksSudut.map(row => Math.max(...row)) : sudut;
+  const skylineMentahMin = Math.min(...skylineMentah);
+
+  let yMin = Math.floor(Math.min(...sudut, skylineMentahMin)) - 1;
+  let yMax = Math.ceil(maxPeakSudut) + (profil.puncakBerlabel.length ? 7 : 3);
+  if(yMax - yMin < 6) yMax = yMin + 6;
+
+  const xScale = az => padL + (az / 360) * plotW;
+  const yScale = s => padT + (1 - (s - yMin) / (yMax - yMin)) * plotH;
+
+  const ptsLineArr = azimuth.map((az, i) => `${xScale(az).toFixed(1)},${yScale(sudut[i]).toFixed(1)}`);
+  ptsLineArr.push(`${xScale(360).toFixed(1)},${yScale(sudut[0]).toFixed(1)}`);
+  const ptsLine = ptsLineArr.join(' ');
+  const ptsArea = ptsLine + ` ${xScale(360).toFixed(1)},${yScale(yMin).toFixed(1)} ${xScale(0).toFixed(1)},${yScale(yMin).toFixed(1)}`;
+
+  let terrainSvg = '';
+  let warningBanner = '';
+
+  if(modeView === 'ridge'){
+    if(!hasLayers){
+      warningBanner = `<rect x="${padL}" y="${padT + 4}" width="${plotW}" height="24" fill="#fff3cd" rx="4"/><text x="${W / 2}" y="${padT + 20}" font-size="11" fill="#856404" font-weight="600" text-anchor="middle">Profil ini belum memiliki data Ridge Line (dibuat versi lama). Hitung ulang profil untuk melihat tampilan Ridge Line.</text>`;
+      terrainSvg = `<polygon points="${ptsArea}" fill="#8B7355" opacity="0.55"/>`;
+    } else {
+      const nSample = profil.matriksJarakKm.length;
+      const nAzimuth = azimuth.length;
+      let layersHtml = '';
+      for(let sIdx = nSample - 1; sIdx >= 0; sIdx--){
+        const t = sIdx / Math.max(1, nSample - 1);
+        const color = getCopperRColor(t);
+        const ptsLayerArr = [];
+        for(let azIdx = 0; azIdx < nAzimuth; azIdx++){
+          const az = azimuth[azIdx];
+          const val = profil.matriksSudut[azIdx][sIdx];
+          ptsLayerArr.push(`${xScale(az).toFixed(1)},${yScale(val).toFixed(1)}`);
+        }
+        // Titik sambung 360° (sama persis dengan azimuth 0°):
+        const val0 = profil.matriksSudut[0][sIdx];
+        ptsLayerArr.push(`${xScale(360).toFixed(1)},${yScale(val0).toFixed(1)}`);
+
+        const linePts = ptsLayerArr.join(' ');
+        const areaPts = linePts + ` ${xScale(360).toFixed(1)},${yScale(yMin).toFixed(1)} ${xScale(0).toFixed(1)},${yScale(yMin).toFixed(1)}`;
+        layersHtml += `<polygon points="${areaPts}" fill="${color}" opacity="0.95"/>`;
+        layersHtml += `<polyline points="${linePts}" fill="none" stroke="rgba(0,0,0,0.3)" stroke-width="0.5"/>`;
+      }
+      terrainSvg = layersHtml;
+    }
+  } else {
+    terrainSvg = `<polygon points="${ptsArea}" fill="#8B7355" opacity="0.55"/>`;
+  }
+
+  const xTickLabels = { 0: 'U', 30: '30', 60: '60', 90: 'T', 120: '120', 150: '150', 180: 'S', 210: '210', 240: '240', 270: 'B', 300: '300', 330: '330', 360: 'U' };
+  let gridSvg = '';
+  for(let az = 0; az <= 360; az += 30){
+    const x = xScale(az);
+    gridSvg += `<line x1="${x}" y1="${padT}" x2="${x}" y2="${padT + plotH}" stroke="#c8ccd1" stroke-width="${az % 90 === 0 ? 1 : 0.6}" opacity="${az % 90 === 0 ? 0.6 : 0.35}"/>`;
+    gridSvg += `<text x="${x}" y="${padT + plotH + 16}" font-size="10" text-anchor="middle" fill="#54595d">${xTickLabels[az]}</text>`;
+  }
+  for(let s = Math.ceil(yMin / 5) * 5; s <= yMax; s += 5){
+    const y = yScale(s);
+    gridSvg += `<line x1="${padL}" y1="${y}" x2="${padL + plotW}" y2="${y}" stroke="#c8ccd1" stroke-width="0.6" opacity="0.35"/>`;
+    gridSvg += `<text x="${padL - 6}" y="${y + 3}" font-size="10" text-anchor="end" fill="#54595d">${s}°</text>`;
+  }
+  const y0 = yScale(0);
+  const zeroLine = `<line x1="${padL}" y1="${y0}" x2="${padL + plotW}" y2="${y0}" stroke="#005580" stroke-width="1.2" stroke-dasharray="5 4" opacity="0.85"/>`;
+  const yDip = yScale(-profil.dipDerajat);
+  const dipLine = `<line x1="${padL}" y1="${yDip}" x2="${padL + plotW}" y2="${yDip}" stroke="#842029" stroke-width="1" stroke-dasharray="2 3" opacity="0.6"/>`;
+
+  let peakSvg = '';
+  profil.puncakBerlabel.forEach(pk => {
+    const x = xScale(pk.az);
+    const y1 = yScale(pk.sudut);
+    const y2 = Math.max(padT + 10, y1 - 18);
+    peakSvg += `<line x1="${x.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="#0f172a" stroke-width="1.2" opacity="0.8"/>`;
+    peakSvg += `<text x="${x.toFixed(1)}" y="${(y2 - 3).toFixed(1)}" font-size="10" font-weight="700" fill="#0f172a" stroke="#ffffff" stroke-width="3" paint-order="stroke fill" stroke-linejoin="round" transform="rotate(-55 ${x.toFixed(1)} ${(y2 - 3).toFixed(1)})" text-anchor="start">${escapeXml(pk.nama)}</text>`;
+  });
+
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%; height:auto; display:block; background:#ffffff; overflow:visible;">
+    ${terrainSvg}
+    <polyline points="${ptsLine}" fill="none" stroke="#101418" stroke-width="1.2"/>
+    ${gridSvg}
+    ${zeroLine}
+    ${dipLine}
+    ${peakSvg}
+    ${warningBanner}
+    <rect x="${padL}" y="${padT}" width="${plotW}" height="${plotH}" fill="none" stroke="#a2a9b1" stroke-width="1"/>
+  </svg>`;
+}
+
+// =======================================================================
+// Penyimpanan IndexedDB (client-side, TIDAK dikirim ke server)
+// =======================================================================
+const CAKRAWALA_DB_NAME = 'hisabwin_profil_cakrawala';
+const CAKRAWALA_DB_VERSION = 1;
+const CAKRAWALA_STORE = 'profil';
+
+function cakrawalaDbOpen(){
+  return new Promise((resolve, reject) => {
+    if(typeof indexedDB === 'undefined'){ reject(new Error('Browser Anda tidak mendukung IndexedDB.')); return; }
+    const req = indexedDB.open(CAKRAWALA_DB_NAME, CAKRAWALA_DB_VERSION);
+    req.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if(!db.objectStoreNames.contains(CAKRAWALA_STORE)){
+        db.createObjectStore(CAKRAWALA_STORE, { keyPath: 'id', autoIncrement: true });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function cakrawalaDbSimpan(rec){
+  const db = await cakrawalaDbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(CAKRAWALA_STORE, 'readwrite');
+    const req = tx.objectStore(CAKRAWALA_STORE).add(rec);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function cakrawalaDbSemua(){
+  const db = await cakrawalaDbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(CAKRAWALA_STORE, 'readonly');
+    const req = tx.objectStore(CAKRAWALA_STORE).getAll();
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function cakrawalaDbHapus(id){
+  const db = await cakrawalaDbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(CAKRAWALA_STORE, 'readwrite');
+    const req = tx.objectStore(CAKRAWALA_STORE).delete(id);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+  });
+}
+async function cakrawalaDbRename(id, namaBaru){
+  const db = await cakrawalaDbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(CAKRAWALA_STORE, 'readwrite');
+    const store = tx.objectStore(CAKRAWALA_STORE);
+    const getReq = store.get(id);
+    getReq.onsuccess = () => {
+      const rec = getReq.result;
+      if(!rec) return resolve(null);
+      rec.nama = namaBaru;
+      const putReq = store.put(rec);
+      putReq.onsuccess = () => resolve(rec);
+      putReq.onerror = () => reject(putReq.error);
+    };
+    getReq.onerror = () => reject(getReq.error);
+  });
+}
+
+// ---- Export .txt kompatibel dgn format simpan_profil_cakrawala_txt() desktop ----
+function buatTeksTxtCakrawala(profil){
+  const baris = [];
+  baris.push('# HisabWin - Profil Cakrawala (dibuat via WebApp)');
+  baris.push(`# lat=${profil.lat.toFixed(6)}`);
+  baris.push(`# lon=${profil.lon.toFixed(6)}`);
+  baris.push(`# tinggi_mata_m=${profil.tinggiMata.toFixed(2)}`);
+  baris.push(`# elev_tanah_m=${profil.elevTanah.toFixed(2)}`);
+  baris.push(`# radius_km=${profil.radiusKm.toFixed(2)}`);
+  baris.push(`# dibuat=${profil.dibuat}`);
+  baris.push('# kolom: azimuth_deg,sudut_horizon_deg,jarak_horizon_km,elevasi_titik_m');
+  profil.azimuth.forEach((az, i) => {
+    baris.push(`${az.toFixed(2)},${profil.sudutHorizon[i].toFixed(4)},${profil.jarakHorizonKm[i].toFixed(3)},${profil.elevasiTitikM[i].toFixed(1)}`);
+  });
+  baris.push('# puncak_berlabel: azimuth_deg,sudut_horizon_deg,nama');
+  profil.puncakBerlabel.forEach(pk => {
+    baris.push(`#PUNCAK,${pk.az.toFixed(2)},${pk.sudut.toFixed(4)},${pk.nama}`);
+  });
+  if(profil.matriksSudut && profil.matriksJarakKm){
+    baris.push(`# jarak_layer_km=${profil.matriksJarakKm.map(j => j.toFixed(4)).join(',')}`);
+    baris.push('# kolom_layer: azimuth_idx,sudut_layer_1..sudut_layer_N');
+    profil.matriksSudut.forEach((layerArr, azIdx) => {
+      baris.push(`#LAYER,${azIdx},${layerArr.map(v => v.toFixed(3)).join(',')}`);
+    });
+  }
+  return baris.join('\n') + '\n';
+}
+function unduhTeksSebagaiFile(namaFile, teks){
+  const blob = new Blob([teks], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = namaFile;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+// =======================================================================
+// UI Wiring
+// =======================================================================
+let cakrawalaProfilAktif = null;
+
+function tampilkanHasilCakrawala(profil){
+  $('#cakrawala-ringkas').innerHTML = `
+    <span class="pil info">Elevasi tanah: ${profil.elevTanah.toFixed(1)} m</span>
+    <span class="pil info">Tinggi pengamat: ${profil.tinggiPengamat.toFixed(1)} m</span>
+    <span class="pil info">Dip horizon: -${profil.dipDerajat.toFixed(2)}°</span>
+    <span class="pil info">${profil.puncakBerlabel.length} puncak berlabel</span>
+  `;
+  $('#cakrawala-svg-wrap').innerHTML = renderProfilCakrawalaSvg(profil);
+  $('#cakrawala-nama-simpan').value = `Profil ${profil.lat.toFixed(4)}, ${profil.lon.toFixed(4)}`;
+  $('#kartu-hasil-cakrawala').style.display = 'block';
+}
+
+async function jalankanHitungCakrawala(){
+  const statusEl = $('#status-cakrawala');
+  const lat = parseFloat($('#cakrawala-lat').value);
+  const lon = parseFloat($('#cakrawala-lon').value);
+  const tinggiMata = parseFloat($('#cakrawala-tinggi-mata').value);
+  const radiusKm = parseFloat($('#cakrawala-radius').value);
+  const nAzimuth = parseInt($('#cakrawala-resolusi').value, 10);
+  const nSample = parseInt($('#cakrawala-sample').value, 10);
+
+  if(isNaN(lat) || isNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180){
+    setStatus(statusEl, 'Koordinat lintang/bujur tidak valid.', true);
+    return;
+  }
+  if(isNaN(radiusKm) || radiusKm <= 0 || radiusKm > 80){
+    setStatus(statusEl, 'Radius amatan harus antara 0.1 - 80 km.', true);
+    return;
+  }
+  const tinggiMataValid = isNaN(tinggiMata) ? 2.0 : tinggiMata;
+
+  const tileKm = 40075 * Math.cos(lat * Math.PI / 180) / Math.pow(2, CAKRAWALA_TILE_ZOOM);
+  const estTile = Math.ceil(((2 * radiusKm) / Math.max(tileKm, 0.5) + 2) ** 2);
+  if(estTile > 700){
+    setStatus(statusEl, `Perkiraan ${estTile} tile elevasi diperlukan untuk parameter ini -- terlalu banyak. Kecilkan radius atau resolusi arah.`, true);
+    return;
+  }
+
+  const btn = $('#btn-hitung-cakrawala');
+  btn.disabled = true;
+  $('#kartu-hasil-cakrawala').style.display = 'none';
+  try {
+    setStatus(statusEl, 'Memulai perhitungan…', false, true);
+    const profil = await hitungProfilCakrawala(
+      { lat, lon, tinggiMata: tinggiMataValid, radiusKm, nAzimuth, nSample },
+      (msg) => setStatus(statusEl, msg, false, true)
+    );
+    cakrawalaProfilAktif = profil;
+    tampilkanHasilCakrawala(profil);
+    setStatus(statusEl, `Selesai. ${profil.puncakBerlabel.length} puncak berlabel ditemukan.`);
+  } catch(err){
+    setStatus(statusEl, 'Gagal menghitung profil cakrawala: ' + err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function muatDanTampilkanDaftarCakrawala(){
+  const daftarEl = $('#cakrawala-daftar');
+  const kosongEl = $('#cakrawala-daftar-kosong');
+  try {
+    const semua = await cakrawalaDbSemua();
+    semua.sort((a, b) => new Date(b.dibuat) - new Date(a.dibuat));
+    if(semua.length === 0){
+      daftarEl.innerHTML = '';
+      kosongEl.style.display = 'block';
+      kosongEl.textContent = 'Belum ada profil cakrawala yang disimpan di perangkat ini.';
+      return;
+    }
+    kosongEl.style.display = 'none';
+    daftarEl.innerHTML = semua.map(rec => `
+      <div class="cakrawala-item">
+        <div class="info">
+          <b>${escapeXml(rec.nama)}</b><br>
+          ${rec.lat.toFixed(4)}, ${rec.lon.toFixed(4)} · radius ${rec.radiusKm.toFixed(0)} km · tinggi mata ${rec.tinggiMata.toFixed(1)} m · ${rec.puncakBerlabel.length} puncak<br>
+          <span style="opacity:.7;">Disimpan: ${new Date(rec.dibuat).toLocaleString('id-ID')}</span>
+        </div>
+        <div class="aksi">
+          <button class="btn-cakrawala-lihat" data-id="${rec.id}" type="button"><span class="material-symbols-outlined" style="font-size:1rem;">visibility</span> Lihat</button>
+          <button class="btn-cakrawala-rename" data-id="${rec.id}" type="button"><span class="material-symbols-outlined" style="font-size:1rem;">edit</span> Ganti Nama</button>
+          <button class="btn-cakrawala-unduh" data-id="${rec.id}" type="button"><span class="material-symbols-outlined" style="font-size:1rem;">download</span> .txt</button>
+          <button class="btn-cakrawala-hapus" data-id="${rec.id}" type="button"><span class="material-symbols-outlined" style="font-size:1rem;">delete</span> Hapus</button>
+        </div>
+      </div>
+    `).join('');
+
+    daftarEl.querySelectorAll('.btn-cakrawala-lihat').forEach(b => b.addEventListener('click', () => {
+      const rec = semua.find(r => r.id === Number(b.dataset.id));
+      if(rec){
+        cakrawalaProfilAktif = rec;
+        tampilkanHasilCakrawala(rec);
+        $('#kartu-hasil-cakrawala').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }));
+    daftarEl.querySelectorAll('.btn-cakrawala-unduh').forEach(b => b.addEventListener('click', () => {
+      const rec = semua.find(r => r.id === Number(b.dataset.id));
+      if(rec) unduhTeksSebagaiFile(`profil_cakrawala_${rec.lat.toFixed(4)}_${rec.lon.toFixed(4)}.txt`, buatTeksTxtCakrawala(rec));
+    }));
+    daftarEl.querySelectorAll('.btn-cakrawala-hapus').forEach(b => b.addEventListener('click', async () => {
+      const rec = semua.find(r => r.id === Number(b.dataset.id));
+      if(rec && confirm(`Hapus profil "${rec.nama}" dari penyimpanan lokal (IndexedDB) perangkat ini?`)){
+        await cakrawalaDbHapus(rec.id);
+        muatDanTampilkanDaftarCakrawala();
+      }
+    }));
+    daftarEl.querySelectorAll('.btn-cakrawala-rename').forEach(b => b.addEventListener('click', async () => {
+      const rec = semua.find(r => r.id === Number(b.dataset.id));
+      if(!rec) return;
+      const namaBaru = prompt('Nama baru untuk profil ini:', rec.nama);
+      if(namaBaru && namaBaru.trim()){
+        await cakrawalaDbRename(rec.id, namaBaru.trim());
+        muatDanTampilkanDaftarCakrawala();
+      }
+    }));
+  } catch(err){
+    daftarEl.innerHTML = '';
+    kosongEl.style.display = 'block';
+    kosongEl.textContent = 'Gagal memuat daftar profil dari IndexedDB: ' + err.message;
+  }
+}
+
+$('#btn-cakrawala-lokasi-saya').addEventListener('click', () => {
+  const statusEl = $('#status-cakrawala');
+  if(!navigator.geolocation){
+    setStatus(statusEl, 'Browser Anda tidak mendukung Geolocation.', true);
+    return;
+  }
+  setStatus(statusEl, 'Mengambil posisi koordinat lokasi Anda…', false, true);
+  navigator.geolocation.getCurrentPosition(pos => {
+    $('#cakrawala-lat').value = pos.coords.latitude.toFixed(4);
+    $('#cakrawala-lon').value = pos.coords.longitude.toFixed(4);
+    setStatus(statusEl, 'Lokasi otomatis terdeteksi: ' + pos.coords.latitude.toFixed(4) + ', ' + pos.coords.longitude.toFixed(4));
+  }, err => {
+    setStatus(statusEl, 'Gagal mengambil lokasi: ' + err.message, true);
+  });
+});
+
+$('#btn-hitung-cakrawala').addEventListener('click', jalankanHitungCakrawala);
+
+$('#btn-simpan-cakrawala').addEventListener('click', async () => {
+  const statusEl = $('#status-cakrawala');
+  if(!cakrawalaProfilAktif){
+    setStatus(statusEl, 'Hitung profil cakrawala terlebih dahulu sebelum menyimpan.', true);
+    return;
+  }
+  const nama = ($('#cakrawala-nama-simpan').value || '').trim() ||
+    `Profil ${cakrawalaProfilAktif.lat.toFixed(4)}, ${cakrawalaProfilAktif.lon.toFixed(4)}`;
+  try {
+    const { id, ...tanpaId } = cakrawalaProfilAktif; // jangan bawa id lama kalau ini hasil "Lihat" profil tersimpan
+    const rec = { ...tanpaId, nama, dibuat: new Date().toISOString() };
+    await cakrawalaDbSimpan(rec);
+    setStatus(statusEl, `Profil "${nama}" tersimpan lokal di perangkat ini (IndexedDB) — tidak dikirim ke server.`);
+    await muatDanTampilkanDaftarCakrawala();
+  } catch(err){
+    setStatus(statusEl, 'Gagal menyimpan ke IndexedDB: ' + err.message, true);
+  }
+});
+
+$('#btn-unduh-cakrawala').addEventListener('click', () => {
+  if(!cakrawalaProfilAktif) return;
+  const teks = buatTeksTxtCakrawala(cakrawalaProfilAktif);
+  const nama = `profil_cakrawala_${cakrawalaProfilAktif.lat.toFixed(4)}_${cakrawalaProfilAktif.lon.toFixed(4)}.txt`;
+  unduhTeksSebagaiFile(nama, teks);
+});
+
+// Muat daftar profil tersimpan segera saat halaman siap (view masih hidden,
+// tapi datanya sudah dimuat dari IndexedDB supaya langsung tampil saat
+// tab "Profil Cakrawala" pertama kali dibuka).
+muatDanTampilkanDaftarCakrawala();
+
+// =======================================================================
+// SIMULASI HILAL (3 definisi ufuk: Astronomis / Dip / Topografi)
+// -----------------------------------------------------------------------
+// Port dari simulasikan_hilal() versi desktop hisabwin.py. Server HANYA
+// dimintai tabel posisi Matahari & Bulan sepanjang sore/malam (endpoint
+// /api/efemeris_hari -- data astronomi umum, sama kelasnya dgn /api/sholat
+// & /api/peta, TIDAK spesifik-pengguna). Profil Cakrawala (horizon
+// topografi) dibaca dari IndexedDB lokal & SELURUH logika pembandingan
+// 3 ufuk + render panorama dilakukan di browser -- profil itu TIDAK
+// PERNAH dikirim ke server manapun.
+// =======================================================================
+
+const GAYA_UFUK = {
+  astro: { warna: '#2563EB', nama: 'Ufuk Astronomis (datar 0°)' },
+  dip:   { warna: '#7C3AED', nama: 'Ufuk Dip' },
+  topo:  { warna: '#111827', nama: 'Ufuk Topografi (cakrawala nyata)' },
+};
+
+function median(arr){
+  const s = arr.slice().sort((a, b) => a - b);
+  const n = s.length;
+  if(n === 0) return NaN;
+  return n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2;
+}
+
+// Interpolasi linear standar (array x ASCENDING), clamp di kedua ujung
+// (perilaku sama dgn numpy.interp default).
+function interpLinear(xArr, yArr, xQuery){
+  const n = xArr.length;
+  if(n === 0) return null;
+  if(xQuery <= xArr[0]) return yArr[0];
+  if(xQuery >= xArr[n - 1]) return yArr[n - 1];
+  let lo = 0, hi = n - 1;
+  while(hi - lo > 1){
+    const mid = (lo + hi) >> 1;
+    if(xArr[mid] <= xQuery) lo = mid; else hi = mid;
+  }
+  const x0 = xArr[lo], x1 = xArr[hi], y0 = yArr[lo], y1 = yArr[hi];
+  if(x1 === x0) return y0;
+  return y0 + (xQuery - x0) * (y1 - y0) / (x1 - x0);
+}
+
+// Interpolasi MELINGKAR sudut_horizon profil cakrawala pada azimuth_query
+// (derajat) -- port persis dari _interpolasi_horizon_cakrawala() Python.
+function interpolasiHorizonCakrawala(profil, azQueryArr){
+  const az = profil.azimuth, sudut = profil.sudutHorizon;
+  const n = az.length;
+  const azExt = new Array(3 * n), sudutExt = new Array(3 * n);
+  for(let i = 0; i < n; i++){
+    azExt[i] = az[i] - 360; sudutExt[i] = sudut[i];
+    azExt[n + i] = az[i]; sudutExt[n + i] = sudut[i];
+    azExt[2 * n + i] = az[i] + 360; sudutExt[2 * n + i] = sudut[i];
+  }
+  return azQueryArr.map(q => interpLinear(azExt, sudutExt, ((q % 360) + 360) % 360));
+}
+
+// Cari jam (interpolasi linear) tempat `nilai` menyeberang dari POSITIF ke
+// NEGATIF, dicari mulai jam>=12 (petang) -- port persis _cari_potong_turun_petang().
+function cariPotongTurunPetang(jamLokal, nilai){
+  let idx0 = -1;
+  for(let i = 0; i < jamLokal.length; i++){ if(jamLokal[i] >= 12.0){ idx0 = i; break; } }
+  if(idx0 === -1) return null;
+  for(let i = idx0; i < jamLokal.length - 1; i++){
+    if(nilai[i] >= 0 && nilai[i + 1] < 0){
+      const frac = nilai[i] / (nilai[i] - nilai[i + 1]);
+      return jamLokal[i] + frac * (jamLokal[i + 1] - jamLokal[i]);
+    }
+  }
+  return null;
+}
+
+function labelJamHHMM(jamDesimal){
+  if(jamDesimal == null) return '—';
+  let jd = ((jamDesimal % 24) + 24) % 24;
+  let h = Math.floor(jd);
+  let m = Math.round((jd - h) * 60);
+  if(m === 60){ m = 0; h = (h + 1) % 24; }
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+function fmtSigned(v){ return v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(2); }
+
+// ---- Fungsi utama: port dari simulasikan_hilal() ----
+function simulasikanHilal(profil, tabel, zonaOffsetJam){
+  const jamLokal = tabel.map(b => b.jam_lokal);
+  const azSun = tabel.map(b => b.az_matahari);
+  const altSun = tabel.map(b => b.alt_matahari);
+  const azMoon = tabel.map(b => b.az_bulan);
+  const altMoon = tabel.map(b => b.alt_bulan);
+  const elong = tabel.map(b => b.elongasi_deg);
+  const fracIllum = tabel.map(b => b.fraksi_iluminasi_persen);
+  const jarakMatahariAu = tabel.map(b => b.jarak_matahari_au);
+
+  const horizonSun = interpolasiHorizonCakrawala(profil, azSun);
+  const horizonMoon = interpolasiHorizonCakrawala(profil, azMoon);
+  const tinggiRelatifMoon = altMoon.map((v, i) => v - horizonMoon[i]);
+
+  const sdMatahariDeg = jarakMatahariAu.map(au => (959.63 / 3600.0) / au);
+  const altSunLimbAtas = altSun.map((v, i) => v + sdMatahariDeg[i]);
+
+  const tinggiPengamat = profil.tinggiPengamat != null ? profil.tinggiPengamat : (profil.tinggiMata || 2.0);
+  const dipDerajat = 0.0293 * Math.sqrt(Math.max(tinggiPengamat, 0));
+
+  const padaJam = (jamTarget, arr) => jamTarget == null ? null : interpLinear(jamLokal, arr, jamTarget);
+
+  function ringkasGhurub(jamG, jamTerbenamBulan, tinggiHilal, label){
+    if(jamG == null){
+      return { label, jamGhurub: null, jamTerbenamBulan: null, lagMenit: null, tinggiHilal: null,
+        sdMatahari: null, azMatahari: null, altMatahari: null, azBulan: null, altBulan: null,
+        daz: null, arcv: null, arcl: null, fraksiIluminasi: null };
+    }
+    const azS = padaJam(jamG, azSun), altS = padaJam(jamG, altSun);
+    const azB = padaJam(jamG, azMoon), altB = padaJam(jamG, altMoon);
+    const sdG = padaJam(jamG, sdMatahariDeg);
+    const lagMenit = jamTerbenamBulan != null ? (jamTerbenamBulan - jamG) * 60.0 : null;
+    return { label, jamGhurub: jamG, jamTerbenamBulan, lagMenit, tinggiHilal, sdMatahari: sdG,
+      azMatahari: azS, altMatahari: altS, azBulan: azB, altBulan: altB,
+      daz: ((azB - azS + 180.0) % 360.0) - 180.0, arcv: altB - altS,
+      arcl: padaJam(jamG, elong), fraksiIluminasi: padaJam(jamG, fracIllum) };
+  }
+
+  // 1. Ufuk astronomis (datar 0°)
+  const jamGhurubAstro = cariPotongTurunPetang(jamLokal, altSunLimbAtas);
+  const jamTerbenamBulanAstro = cariPotongTurunPetang(jamLokal, altMoon);
+  const tinggiHilalAstro = jamGhurubAstro != null ? padaJam(jamGhurubAstro, altMoon) : null;
+  const ghurubAstro = ringkasGhurub(jamGhurubAstro, jamTerbenamBulanAstro, tinggiHilalAstro, GAYA_UFUK.astro.nama);
+
+  // 2. Ufuk dip
+  const altSunLimbDip = altSunLimbAtas.map(v => v + dipDerajat);
+  const altMoonDip = altMoon.map(v => v + dipDerajat);
+  const jamGhurubDip = cariPotongTurunPetang(jamLokal, altSunLimbDip);
+  const jamTerbenamBulanDip = cariPotongTurunPetang(jamLokal, altMoonDip);
+  const tinggiHilalDip = jamGhurubDip != null ? padaJam(jamGhurubDip, altMoon) + dipDerajat : null;
+  const ghurubDip = ringkasGhurub(jamGhurubDip, jamTerbenamBulanDip, tinggiHilalDip,
+    `Ufuk Dip (kerendahan ufuk ${dipDerajat.toFixed(3)}°)`);
+
+  // 3. Ufuk topografi nyata (Profil Cakrawala)
+  const altSunTopo = altSunLimbAtas.map((v, i) => v - horizonSun[i]);
+  const jamGhurubTopo = cariPotongTurunPetang(jamLokal, altSunTopo);
+  const jamTerbenamBulanTopo = cariPotongTurunPetang(jamLokal, tinggiRelatifMoon);
+  let tinggiHilalTopo = null;
+  if(jamGhurubTopo != null){
+    tinggiHilalTopo = padaJam(jamGhurubTopo, altMoon) - padaJam(jamGhurubTopo, horizonMoon);
+  }
+  const ghurubTopo = ringkasGhurub(jamGhurubTopo, jamTerbenamBulanTopo, tinggiHilalTopo, GAYA_UFUK.topo.nama);
+
+  return {
+    lat: profil.lat, lon: profil.lon, zonaOffsetJam,
+    jamLokal, azMatahari: azSun, altMatahari: altSun, azBulan: azMoon, altBulan: altMoon,
+    horizonDiAzMatahari: horizonSun, horizonDiAzBulan: horizonMoon,
+    tinggiRelatifMatahari: altSun.map((v, i) => v - horizonSun[i]), tinggiRelatifBulan: tinggiRelatifMoon,
+    elongasi: elong, fraksiIluminasi: fracIllum, dipDerajat,
+    ghurub: { astro: ghurubAstro, dip: ghurubDip, topo: ghurubTopo },
+  };
+}
+
+function renderRingkasanGhurubHtml(hasil){
+  const urutan = [
+    ['astro', 'Astronomis (0°)'],
+    ['dip', `Dip (${hasil.dipDerajat.toFixed(2)}°)`],
+    ['topo', 'Topografi (nyata)'],
+  ];
+  let rows = '';
+  for(const [k, nama] of urutan){
+    const g = hasil.ghurub[k];
+    const warna = GAYA_UFUK[k].warna;
+    if(g.jamGhurub == null){
+      rows += `<tr><td style="color:${warna};font-weight:700;">${nama}</td><td colspan="6" style="color:#6B7280;">— tidak terbenam hari ini —</td></tr>`;
+      continue;
+    }
+    rows += `<tr>
+      <td style="color:${warna};font-weight:700;">${nama}</td>
+      <td>${labelJamHHMM(g.jamGhurub)}</td>
+      <td>${fmtSigned(g.tinggiHilal)}°</td>
+      <td>${fmtSigned(g.daz)}°</td>
+      <td>${fmtSigned(g.arcv)}°</td>
+      <td>${g.arcl != null ? g.arcl.toFixed(2) : '—'}°</td>
+      <td>${g.fraksiIluminasi != null ? g.fraksiIluminasi.toFixed(1) + '%' : '—'}</td>
+    </tr>`;
+  }
+  return `<table class="tabel-sholat">
+    <thead><tr><th>Definisi Ufuk</th><th>Ghurub</th><th>Tinggi Hilal</th><th>DAZ</th><th>ArcV</th><th>ArcL</th><th>Iluminasi</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+// ---- Render panorama SVG (versi web dari buat_figure_simulasi_hilal + mode Ridge Line) ----
+function renderSimulasiHilalSvg(profil, hasil, modeView = 'siluet'){
+  const ghurub = hasil.ghurub;
+  const dipDerajat = hasil.dipDerajat;
+
+  const jamGhurubSemua = ['astro', 'dip', 'topo'].map(k => ghurub[k].jamGhurub).filter(v => v != null);
+  const jamTerbenamSemua = ['astro', 'dip', 'topo'].map(k => ghurub[k].jamTerbenamBulan).filter(v => v != null);
+
+  const j0 = (jamGhurubSemua.length ? Math.min(...jamGhurubSemua) : 18.0) - 0.5;
+  const kandidatAkhir = jamTerbenamSemua.concat(jamGhurubSemua);
+  const j1 = (kandidatAkhir.length ? Math.max(...kandidatAkhir) : 19.0) + 0.33;
+
+  const idxWindow = [];
+  for(let i = 0; i < hasil.jamLokal.length; i++){
+    if(hasil.jamLokal[i] >= j0 && hasil.jamLokal[i] <= j1) idxWindow.push(i);
+  }
+  const azSunW = idxWindow.map(i => hasil.azMatahari[i]);
+  const altSunW = idxWindow.map(i => hasil.altMatahari[i]);
+  const azMoonW = idxWindow.map(i => hasil.azBulan[i]);
+  const altMoonW = idxWindow.map(i => hasil.altBulan[i]);
+
+  let azTengah = null;
+  for(const k of ['topo', 'dip', 'astro']){
+    if(ghurub[k].azBulan != null){ azTengah = ghurub[k].azBulan; break; }
+  }
+  if(azTengah == null) azTengah = azMoonW.length ? median(azMoonW) : 270.0;
+
+  const lebarZoom = 45.0;
+  const azMin = Math.max(0, azTengah - lebarZoom);
+  const azMax = Math.min(360, azTengah + lebarZoom);
+
+  const azimuth = profil.azimuth, sudutHorizon = profil.sudutHorizon;
+  const hasLayers = Boolean(profil.matriksSudut && profil.matriksJarakKm && profil.matriksSudut.length > 0);
+
+  const skylineMentah = hasLayers ? profil.matriksSudut.map(row => Math.max(...row)) : sudutHorizon;
+  const skylineMentahMin = Math.min(...skylineMentah);
+
+  const yMinKandidat = [Math.floor(Math.min(...sudutHorizon, skylineMentahMin)) - 1, Math.floor(-dipDerajat) - 1];
+  const yMin = Math.min(...yMinKandidat);
+  const altMoonWValid = altMoonW.filter(v => v != null && !isNaN(v));
+  const altSunWValid = altSunW.filter(v => v != null && !isNaN(v));
+  const yMaxKandidat = [Math.max(...sudutHorizon)];
+  if(altMoonWValid.length) yMaxKandidat.push(Math.max(...altMoonWValid));
+  if(altSunWValid.length) yMaxKandidat.push(Math.max(...altSunWValid));
+
+  const puncakTerlihat = (profil.puncakBerlabel || []).filter(pk => pk.az >= azMin && pk.az <= azMax);
+  if(puncakTerlihat.length){
+    yMaxKandidat.push(Math.max(...puncakTerlihat.map(p => p.sudut)));
+  }
+  const yMax = Math.ceil(Math.max(...yMaxKandidat)) + (puncakTerlihat.length ? 7 : 3);
+
+  const W = 960, H = 500, padL = 48, padR = 14, padT = 70, padB = 40;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const xScale = az => padL + ((az - azMin) / (azMax - azMin)) * plotW;
+  const yScale = s => padT + (1 - (s - yMin) / (yMax - yMin)) * plotH;
+
+  const ptsLineArr = azimuth.map((az, i) => `${xScale(az).toFixed(1)},${yScale(sudutHorizon[i]).toFixed(1)}`);
+  ptsLineArr.push(`${xScale(360).toFixed(1)},${yScale(sudutHorizon[0]).toFixed(1)}`);
+  const ptsLine = ptsLineArr.join(' ');
+  const ptsArea = ptsLine + ` ${xScale(azMax).toFixed(1)},${yScale(yMin).toFixed(1)} ${xScale(azMin).toFixed(1)},${yScale(yMin).toFixed(1)}`;
+
+  let terrainSvg = '';
+  let warningBanner = '';
+
+  if(modeView === 'ridge'){
+    if(!hasLayers){
+      warningBanner = `<rect x="${padL}" y="${padT + 4}" width="${plotW}" height="24" fill="#fff3cd" rx="4"/><text x="${W / 2}" y="${padT + 20}" font-size="11" fill="#856404" font-weight="600" text-anchor="middle">Profil ini belum memiliki data Ridge Line (dibuat versi lama). Hitung ulang profil untuk melihat Ridge Line.</text>`;
+      terrainSvg = `<polygon points="${ptsArea}" fill="#8B7355" opacity="0.55"/>`;
+    } else {
+      const nSample = profil.matriksJarakKm.length;
+      const nAzimuth = azimuth.length;
+      let layersHtml = '';
+      for(let sIdx = nSample - 1; sIdx >= 0; sIdx--){
+        const t = sIdx / Math.max(1, nSample - 1);
+        const color = getCopperRColor(t);
+        const ptsLayerArr = [];
+        for(let azIdx = 0; azIdx < nAzimuth; azIdx++){
+          const az = azimuth[azIdx];
+          const val = profil.matriksSudut[azIdx][sIdx];
+          ptsLayerArr.push(`${xScale(az).toFixed(1)},${yScale(val).toFixed(1)}`);
+        }
+        const val0 = profil.matriksSudut[0][sIdx];
+        ptsLayerArr.push(`${xScale(360).toFixed(1)},${yScale(val0).toFixed(1)}`);
+
+        const linePts = ptsLayerArr.join(' ');
+        const areaPts = linePts + ` ${xScale(azMax).toFixed(1)},${yScale(yMin).toFixed(1)} ${xScale(azMin).toFixed(1)},${yScale(yMin).toFixed(1)}`;
+        layersHtml += `<polygon points="${areaPts}" fill="${color}" opacity="0.95"/>`;
+        layersHtml += `<polyline points="${linePts}" fill="none" stroke="rgba(0,0,0,0.3)" stroke-width="0.5"/>`;
+      }
+      terrainSvg = layersHtml;
+    }
+  } else {
+    terrainSvg = `<polygon points="${ptsArea}" fill="#8B7355" opacity="0.55"/>`;
+  }
+
+  let gridSvg = '';
+  for(let az = Math.ceil(azMin / 5) * 5; az <= azMax; az += 5){
+    const x = xScale(az);
+    const mayor = (Math.round(az) % 30 === 0);
+    gridSvg += `<line x1="${x}" y1="${padT}" x2="${x}" y2="${padT + plotH}" stroke="#c8ccd1" stroke-width="${mayor ? 1 : 0.5}" opacity="${mayor ? 0.55 : 0.25}"/>`;
+    if(mayor) gridSvg += `<text x="${x}" y="${padT + plotH + 16}" font-size="10" text-anchor="middle" fill="#54595d">${((az % 360) + 360) % 360}°</text>`;
+  }
+  for(let s = Math.ceil(yMin / 2) * 2; s <= yMax; s += 2){
+    const y = yScale(s);
+    gridSvg += `<line x1="${padL}" y1="${y}" x2="${padL + plotW}" y2="${y}" stroke="#c8ccd1" stroke-width="0.5" opacity="0.25"/>`;
+    gridSvg += `<text x="${padL - 6}" y="${y + 3}" font-size="10" text-anchor="end" fill="#54595d">${s}°</text>`;
+  }
+
+  const y0 = yScale(0);
+  const zeroLine = `<line x1="${padL}" y1="${y0}" x2="${padL + plotW}" y2="${y0}" stroke="${GAYA_UFUK.astro.warna}" stroke-width="1.2" stroke-dasharray="6 4" opacity="0.85"/>`;
+  const yDip = yScale(-dipDerajat);
+  const dipLine = `<line x1="${padL}" y1="${yDip}" x2="${padL + plotW}" y2="${yDip}" stroke="${GAYA_UFUK.dip.warna}" stroke-width="1.2" stroke-dasharray="2 3" opacity="0.85"/>`;
+
+  let peakSvg = '';
+  puncakTerlihat.forEach(pk => {
+    const x = xScale(pk.az);
+    const y1 = yScale(pk.sudut);
+    const y2 = Math.max(padT + 10, y1 - 18);
+    peakSvg += `<line x1="${x.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="#0f172a" stroke-width="1.2" opacity="0.8"/>`;
+    peakSvg += `<text x="${x.toFixed(1)}" y="${(y2 - 3).toFixed(1)}" font-size="10" font-weight="700" fill="#0f172a" stroke="#ffffff" stroke-width="3" paint-order="stroke fill" stroke-linejoin="round" transform="rotate(-55 ${x.toFixed(1)} ${(y2 - 3).toFixed(1)})" text-anchor="start">${escapeXml(pk.nama)}</text>`;
+  });
+
+  function polylineFrom(azArr, altArr, warna){
+    const pts = azArr.map((az, i) => `${xScale(az).toFixed(1)},${yScale(altArr[i]).toFixed(1)}`).join(' ');
+    return `<polyline points="${pts}" fill="none" stroke="${warna}" stroke-width="1.4" opacity="0.85"/>`;
+  }
+  const lintasanSun = azSunW.length > 1 ? polylineFrom(azSunW, altSunW, '#D97706') : '';
+  const lintasanMoon = azMoonW.length > 1 ? polylineFrom(azMoonW, altMoonW, '#1D4ED8') : '';
+
+  let markerSvg = '';
+  ['astro', 'dip', 'topo'].forEach(k => {
+    const g = ghurub[k];
+    if(g.jamGhurub == null) return;
+    const warna = GAYA_UFUK[k].warna;
+    const xS = xScale(g.azMatahari), yS = yScale(g.altMatahari);
+    const xB = xScale(g.azBulan), yB = yScale(g.altBulan);
+    markerSvg += `<circle cx="${xS}" cy="${yS}" r="9" fill="#F59E0B" stroke="${warna}" stroke-width="2"/>`;
+    markerSvg += `<text x="${xS}" y="${yS}" font-size="10" text-anchor="middle" dominant-baseline="central">☀</text>`;
+    markerSvg += `<circle cx="${xB}" cy="${yB}" r="9" fill="#E5E7EB" stroke="${warna}" stroke-width="2"/>`;
+    markerSvg += `<text x="${xB}" y="${yB}" font-size="11" text-anchor="middle" dominant-baseline="central">☾</text>`;
+  });
+
+  const judul = `Simulasi Hilal — ${hasil.tanggalFormatted || ''} — (${profil.lat.toFixed(4)}, ${profil.lon.toFixed(4)})`;
+
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%; height:auto; display:block; background:#ffffff;">
+    <text x="${W / 2}" y="18" font-size="13" font-weight="700" text-anchor="middle" fill="#101418">${escapeXml(judul)}</text>
+    ${terrainSvg}
+    <polyline points="${ptsLine}" fill="none" stroke="#101418" stroke-width="1.2"/>
+    ${gridSvg}
+    ${zeroLine}
+    ${dipLine}
+    ${peakSvg}
+    ${lintasanSun}
+    ${lintasanMoon}
+    ${markerSvg}
+    ${warningBanner}
+    <rect x="${padL}" y="${padT}" width="${plotW}" height="${plotH}" fill="none" stroke="#a2a9b1" stroke-width="1"/>
+    <text x="${W / 2}" y="${H - 8}" font-size="10" text-anchor="middle" fill="#54595d">Azimuth (°, dari Utara searah jarum jam)</text>
+  </svg>`;
+}
+
+// =======================================================================
+// UI Wiring -- Simulasi Hilal & Mode View Toggle
+// =======================================================================
+let simulasiDaftarProfilCache = [];
+let simulasiHasilAktif = null;
+let cakrawalaModeView = 'siluet';
+let simulasiModeView = 'siluet';
+
+document.querySelectorAll('#toggle-view-cakrawala .btn-toggle').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#toggle-view-cakrawala .btn-toggle').forEach(b => b.classList.remove('aktif'));
+    btn.classList.add('aktif');
+    cakrawalaModeView = btn.dataset.mode;
+    if(cakrawalaProfilAktif){
+      $('#cakrawala-svg-wrap').innerHTML = renderProfilCakrawalaSvg(cakrawalaProfilAktif, cakrawalaModeView);
+    }
+  });
+});
+
+document.querySelectorAll('#toggle-view-simulasi .btn-toggle').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#toggle-view-simulasi .btn-toggle').forEach(b => b.classList.remove('aktif'));
+    btn.classList.add('aktif');
+    simulasiModeView = btn.dataset.mode;
+    if(simulasiHasilAktif){
+      $('#simulasi-svg-wrap').innerHTML = renderSimulasiHilalSvg(simulasiHasilAktif.profil, simulasiHasilAktif.hasil, simulasiModeView);
+    }
+  });
+});
+
+async function muatDaftarProfilKeDropdownSimulasi(){
+  const sel = $('#simulasi-pilih-profil');
+  const infoKosong = $('#simulasi-tanpa-profil');
+  const btnJalankan = $('#btn-jalankan-simulasi');
+  try {
+    const semua = await cakrawalaDbSemua();
+    semua.sort((a, b) => new Date(b.dibuat) - new Date(a.dibuat));
+    simulasiDaftarProfilCache = semua;
+    if(semua.length === 0){
+      sel.innerHTML = '<option value="">-- Belum ada profil tersimpan --</option>';
+      sel.disabled = true;
+      infoKosong.style.display = 'block';
+      btnJalankan.disabled = true;
+      return;
+    }
+    infoKosong.style.display = 'none';
+    sel.disabled = false;
+    btnJalankan.disabled = false;
+    sel.innerHTML = semua.map(p => `<option value="${p.id}">${escapeXml(p.nama)} (${p.lat.toFixed(4)}, ${p.lon.toFixed(4)})</option>`).join('');
+  } catch(err){
+    sel.innerHTML = '<option value="">-- Gagal memuat profil --</option>';
+    sel.disabled = true;
+    btnJalankan.disabled = true;
+  }
+}
+
+function tampilkanHasilCakrawala(profil){
+  $('#cakrawala-ringkas').innerHTML = `
+    <span class="pil info">Elevasi tanah: ${profil.elevTanah.toFixed(1)} m</span>
+    <span class="pil info">Tinggi pengamat: ${profil.tinggiPengamat.toFixed(1)} m</span>
+    <span class="pil info">Dip horizon: -${profil.dipDerajat.toFixed(2)}°</span>
+    <span class="pil info">${profil.puncakBerlabel.length} puncak berlabel</span>
+  `;
+  $('#cakrawala-svg-wrap').innerHTML = renderProfilCakrawalaSvg(profil, cakrawalaModeView);
+  $('#cakrawala-nama-simpan').value = `Profil ${profil.lat.toFixed(4)}, ${profil.lon.toFixed(4)}`;
+  $('#kartu-hasil-cakrawala').style.display = 'block';
+}
+
+function tampilkanHasilSimulasi(profil, hasil){
+  $('#simulasi-ringkasan-tabel-wrap').innerHTML = renderRingkasanGhurubHtml(hasil);
+  $('#simulasi-svg-wrap').innerHTML = renderSimulasiHilalSvg(profil, hasil, simulasiModeView);
+  $('#kartu-hasil-simulasi').style.display = 'block';
+}
+
+async function jalankanSimulasiHilal(){
+  const statusEl = $('#status-simulasi');
+  const profilId = $('#simulasi-pilih-profil').value;
+  if(!profilId){
+    setStatus(statusEl, 'Pilih Profil Cakrawala tersimpan terlebih dahulu.', true);
+    return;
+  }
+  const profil = simulasiDaftarProfilCache.find(p => String(p.id) === String(profilId));
+  if(!profil){
+    setStatus(statusEl, 'Profil tidak ditemukan (mungkin baru dihapus) -- muat ulang tab ini.', true);
+    return;
+  }
+  const tanggalStr = $('#simulasi-tanggal').value;
+  if(!tanggalStr){
+    setStatus(statusEl, 'Pilih tanggal terlebih dahulu.', true);
+    return;
+  }
+  const zona = parseFloat($('#simulasi-zona').value);
+  if(isNaN(zona)){
+    setStatus(statusEl, 'Zona waktu tidak valid.', true);
+    return;
+  }
+  const mode = $('#select-mode').value;
+
+  const btn = $('#btn-jalankan-simulasi');
+  btn.disabled = true;
+  $('#kartu-hasil-simulasi').style.display = 'none';
+  try {
+    setStatus(statusEl, 'Mengambil tabel posisi Matahari & Bulan dari server…', false, true);
+    const resp = await fetch('/api/efemeris_hari', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tanggal: tanggalStr, lat: profil.lat, lon: profil.lon, zona,
+        elevasi: 0.0, interval_menit: 2, jam_mulai: 10.0, mode
+      })
+    });
+    const data = await resp.json();
+    if(!data.ok) throw new Error(data.error || 'Gagal mengambil tabel efemeris.');
+    if(!data.tabel || data.tabel.length < 2) throw new Error('Data efemeris kosong.');
+
+    setStatus(statusEl, 'Membandingkan 3 definisi ufuk terhadap Profil Cakrawala Anda (di browser)…', false, true);
+    const hasil = simulasikanHilal(profil, data.tabel, zona);
+    hasil.tanggalFormatted = data.tanggal_formatted;
+
+    simulasiHasilAktif = { profil, hasil };
+    tampilkanHasilSimulasi(profil, hasil);
+    setStatus(statusEl, `Selesai — ${data.tanggal_formatted}.`);
+  } catch(err){
+    setStatus(statusEl, 'Gagal menjalankan simulasi: ' + err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$('#btn-jalankan-simulasi').addEventListener('click', jalankanSimulasiHilal);
+
+$('#btn-simulasi-cari-ijtimak').addEventListener('click', async () => {
+  const statusEl = $('#status-simulasi');
+  const tahun = $('#simulasi-tahun-ijtimak').value.trim();
+  if(!/^\d{4}$/.test(tahun)){
+    setStatus(statusEl, 'Masukkan tahun 4 digit, misalnya 2026.', true);
+    return;
+  }
+  const mode = $('#select-mode').value;
+  setStatus(statusEl, 'Mencari ijtimak…', false, true);
+  try {
+    const data = await fetchCached(`/api/ijtimak?tahun=${encodeURIComponent(tahun)}&mode=${encodeURIComponent(mode)}`);
+    if(!data || !data.ok) throw new Error((data && data.error) || 'Gagal mengambil data ijtimak.');
+    const daftarEl = $('#simulasi-daftar-ijtimak');
+    daftarEl.style.display = 'block';
+    daftarEl.innerHTML = data.ijtimak.map(it => `<div class="item-ijtimak" data-iso="${it.iso}">${escapeXml(it.label)}</div>`).join('');
+    daftarEl.querySelectorAll('.item-ijtimak').forEach(el => el.addEventListener('click', () => {
+      daftarEl.querySelectorAll('.item-ijtimak').forEach(x => x.classList.remove('aktif'));
+      el.classList.add('aktif');
+      const zona = parseFloat($('#simulasi-zona').value) || 7.0;
+      const dtUtc = new Date(el.dataset.iso);
+      const dtLokal = new Date(dtUtc.getTime() + zona * 3600 * 1000);
+      const yyyy = dtLokal.getUTCFullYear();
+      const mm = String(dtLokal.getUTCMonth() + 1).padStart(2, '0');
+      const dd = String(dtLokal.getUTCDate()).padStart(2, '0');
+      $('#simulasi-tanggal').value = `${yyyy}-${mm}-${dd}`;
+      setStatus(statusEl, `Tanggal diatur ke ${yyyy}-${mm}-${dd} (tanggal lokal saat ijtimak).`);
+    }));
+    setStatus(statusEl, `${data.ijtimak.length} ijtimak ditemukan tahun ${tahun}. Klik salah satu untuk mengatur tanggal.`);
+  } catch(err){
+    setStatus(statusEl, 'Gagal mencari ijtimak: ' + err.message, true);
+  }
+});
+
+// Preset tanggal hari ini utk Simulasi Hilal (sama seperti tab Sholat)
+if($('#simulasi-tanggal')){
+  const nowSim = new Date();
+  const yyyy = nowSim.getFullYear();
+  const mm = String(nowSim.getMonth() + 1).padStart(2, '0');
+  const dd = String(nowSim.getDate()).padStart(2, '0');
+  $('#simulasi-tanggal').value = `${yyyy}-${mm}-${dd}`;
+}
+
+// Muat dropdown profil segera saat halaman siap (sama alasannya dgn
+// muatDanTampilkanDaftarCakrawala() di atas).
+muatDaftarProfilKeDropdownSimulasi();
 
 </script>
 </body>

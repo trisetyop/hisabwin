@@ -808,6 +808,65 @@ def api_sholat_bulan():
         return _error_response(f"Gagal menghitung jadwal sholat bulanan: {e}", 500)
 
 
+# ---------------------------------------------------------------------------
+# Endpoint: tabel efemeris Matahari & Bulan (harian / simulasi hilal)
+# ---------------------------------------------------------------------------
+@app.route("/api/efemeris_hari", methods=["POST"])
+def api_efemeris_hari():
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        tgl_str = data.get("tanggal")
+        if tgl_str:
+            dt_parsed = datetime.fromisoformat(tgl_str)
+            tanggal = datetime(dt_parsed.year, dt_parsed.month, dt_parsed.day)
+        else:
+            now = datetime.now()
+            tanggal = datetime(now.year, now.month, now.day)
+
+        lat = float(data.get("lat", -6.1751))
+        lon = float(data.get("lon", 106.8272))
+        zona = float(data.get("zona", 7.0))
+        elevasi = float(data.get("elevasi", 0.0))
+        interval_menit = int(data.get("interval_menit", 2))
+        mode = str(data.get("mode", "jpl")).strip().lower()
+        if mode not in ("jpl", "ringan", "horizons"):
+            mode = "jpl"
+    except Exception as e:
+        return _error_response(f"Parameter input tidak valid: {e}")
+
+    def _hitung():
+        with _state_lock:
+            if mode == "jpl":
+                _pastikan_ephemeris()
+                ts_arg, eph_arg = _ts, _eph
+            else:
+                ts_arg, eph_arg = None, None
+
+            tabel = hw.hitung_tabel_efemeris(
+                tanggal, lat, lon, zona, mode=mode,
+                ts=ts_arg, eph=eph_arg, interval_menit=interval_menit,
+                elevasi_m=elevasi
+            )
+
+        return {
+            "ok": True,
+            "mode": mode,
+            "tanggal_iso": tanggal.strftime("%Y-%m-%d"),
+            "tanggal_formatted": f"{tanggal.day:02d} {hw.BULAN_ID[tanggal.month-1]} {tanggal.year}",
+            "koordinat": {
+                "lat": lat, "lon": lon, "zona": zona, "elevasi": elevasi
+            },
+            "tabel": tabel
+        }
+
+    try:
+        return _make_cached_response("/api/efemeris_hari", data, _hitung)
+    except Exception as e:
+        traceback.print_exc()
+        return _error_response(f"Gagal menghitung tabel efemeris: {e}", 500)
+
+
+
 from flask import make_response
 
 # ---------------------------------------------------------------------------
