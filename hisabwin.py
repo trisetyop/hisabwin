@@ -30,6 +30,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time as _time
 import tkinter as tk
 import urllib.error
 import urllib.request
@@ -452,29 +453,28 @@ BULAN_ID = ["Januari", "Februari", "Maret", "April", "Mei", "Juni",
 HARI_ID = ["Minggu", "Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu"]
 
 # =========================================================
-#  TEMA TAMPILAN (modern & sederhana -- flat, palet terbatas)
-#  Cuma warna & font, TIDAK ada perubahan logika apapun di bawah ini.
+#  TEMA TAMPILAN (Material Design 3 — Dynamic Teal/Emerald Theme)
 # =========================================================
-WARNA_BG = "#F4F6F8"          # latar utama jendela (abu-abu sangat terang)
-WARNA_PANEL = "#FFFFFF"       # latar kartu/kontrol/entry
-WARNA_AKSEN = "#0F6E5B"       # hijau tosca gelap -- warna aksen utama (tombol aksi, tab aktif)
-WARNA_AKSEN_HOVER = "#0B5747"
-WARNA_TEKS = "#1F2937"        # abu-abu hampir hitam
-WARNA_TEKS_MUTED = "#6B7280"  # abu-abu redup (subjudul, catatan)
-WARNA_BORDER = "#E1E5EA"
-WARNA_PERINGATAN = "#B45309"  # amber/oranye tua -- catatan "butuh internet" dsb
+WARNA_BG = "#F4FBF7"                  # MD3 Surface
+WARNA_PANEL = "#EEF5F1"               # MD3 Surface Container Low
+WARNA_KARTU_BG = "#FFFFFF"            # MD3 Surface Container Lowest
+WARNA_AKSEN = "#006A60"               # MD3 Primary Teal
+WARNA_AKSEN_HOVER = "#004D46"         # MD3 Primary Dark / Hover
+WARNA_PRIMARY_CONTAINER = "#70F7E5"   # MD3 Primary Container
+WARNA_ON_PRIMARY_CONTAINER = "#00201C" # MD3 On Primary Container
+WARNA_TEKS = "#161D1B"                # MD3 On Surface
+WARNA_TEKS_MUTED = "#3F4947"          # MD3 On Surface Variant
+WARNA_BORDER = "#BEC9C6"              # MD3 Outline Variant
+WARNA_PERINGATAN = "#B45309"          # Amber / Warning
 FONT_UTAMA = ("Segoe UI", 10)
 FONT_UTAMA_BOLD = ("Segoe UI", 10, "bold")
 FONT_JUDUL = ("Segoe UI", 18, "bold")
 FONT_KECIL = ("Segoe UI", 8)
-FONT_TAB_AKTIF = ("Segoe UI", 11, "bold")  # tab notebook yang sedang aktif -- sengaja
-                                            # dibuat lebih BESAR (bukan cuma bold), karena
-                                            # bold-saja lewat style.map tidak kelihatan
-                                            # bedanya di beberapa sistem/render font
-FONT_MONO = ("Consolas", 10)  # dipakai khusus panel Status ("terminal-like")
-WARNA_TERMINAL_BG = "#0D1117"     # nyaris hitam (gaya GitHub dark terminal)
-WARNA_TERMINAL_FG = "#39D353"     # hijau terminal klasik utk teks log
-WARNA_TERMINAL_FG_MUTED = "#3FB950"  # sedikit lebih redup, dipakai prompt/prefix
+FONT_TAB_AKTIF = ("Segoe UI", 11, "bold")
+FONT_MONO = ("Consolas", 10)
+WARNA_TERMINAL_BG = "#0D1117"
+WARNA_TERMINAL_FG = "#39D353"
+WARNA_TERMINAL_FG_MUTED = "#3FB950"
                                             # dibuat lebih BESAR (bukan cuma bold), karena
                                             # bold-saja lewat style.map tidak kelihatan
                                             # bedanya di beberapa sistem/render font
@@ -980,10 +980,28 @@ def koreksi_refraksi(alt_true_deg):
     Akurasi ~0.07' turun sampai ke horizon; wajar dipakai untuk kriteria
     hilal karena jauh lebih presisi daripada mengabaikannya sama sekali
     (refraksi di dekat horizon bisa ~0.5 derajat, signifikan dibanding
-    ambang kriteria 3-8 derajat)."""
+    ambang kriteria 3-8 derajat).
+
+    Catatan: Formula Saemundsson memiliki singularitas matematis (div by zero)
+    pada h0 = -5.11°. Di bawah h0 = -5.0°, refraksi bernilai sangat mendekati 0
+    (< 0.0004°) dan secara fisik tidak berlaku di bawah ufuk dalam. Maka untuk
+    h0 <= -5.0° refraksi dipatok 0.0 agar aman dari singularitas dan tidak
+    menimbulkan artefak kontur (garis menyon/distorsi)."""
+    is_scalar = np.isscalar(alt_true_deg)
     h0 = np.asarray(alt_true_deg, dtype=float)
-    R_arcmin = 1.02 / np.tan(np.radians(h0 + 10.3 / (h0 + 5.11)))
-    return R_arcmin / 60.0
+    nan_mask = np.isnan(h0)
+    mask = (h0 > -5.0) & (~nan_mask)
+    R_deg = np.zeros_like(h0)
+    if np.any(nan_mask):
+        R_deg[nan_mask] = np.nan
+    if np.any(mask):
+        h0_v = h0[mask]
+        R_arcmin = 1.02 / np.tan(np.radians(h0_v + 10.3 / (h0_v + 5.11)))
+        R_deg[mask] = R_arcmin / 60.0
+    if is_scalar:
+        return float(R_deg.item())
+    return R_deg
+
 
 
 def cari_ijtimak_tahun_ringan(tahun):
@@ -3385,6 +3403,189 @@ def evaluasi_pkg(grids, tanggal, waktu_ijtimak=None, ts=None, eph=None,
     }
 
 
+def _titik_pada_terminator(tanggal, lat_arr, tau_target):
+    """Untuk tiap lintang di lat_arr, cari BUJUR yg ghurub lokalnya persis
+    jatuh di jam UTC 'tau_target' (skalar atau array sepanjang lat_arr),
+    lalu kembalikan (lon, elong, geo_alt) di titik itu -- mode ringan saja
+    (VSOP87+ELP2000, cukup presisi utk penanda referensi & jauh lebih murah
+    drpd JPL/skyfield per-titik).
+
+    Tebakan awal bujur pakai relasi linier jam-ghurub~bujur yg sama dgn
+    yg dipakai hitung_grid_ringan/_hitung_titik_flat, lalu diperhalus 3x
+    iterasi Newton pakai _hitung_titik_flat (fungsi presisi yg SAMA yg
+    dipakai grid utama) supaya konsisten 1:1 dgn nilai di peta."""
+    lat_arr = np.asarray(lat_arr, dtype=float)
+    tau_target = np.broadcast_to(np.asarray(tau_target, dtype=float), lat_arr.shape).copy()
+
+    dt0 = delta_t_detik(tanggal.year, tanggal.month)
+    jd0 = julian_day(tanggal.year, tanggal.month, tanggal.day + 0.5)
+    T0 = (jd0 + dt0 / 86400.0 - 2451545.0) / 36525.0
+    _, dec_sun0, _, _ = posisi_matahari(np.array([T0]))
+    dec_rad = np.radians(dec_sun0[0])
+
+    lat_rad = np.radians(lat_arr)
+    h0_rad = np.radians(-0.8333)
+    cos_h = (np.sin(h0_rad) - np.sin(lat_rad) * np.sin(dec_rad)) / (np.cos(lat_rad) * np.cos(dec_rad))
+    valid = (cos_h >= -1.0) & (cos_h <= 1.0)
+
+    lon = np.full(lat_arr.shape, np.nan)
+    if np.any(valid):
+        h_hours = np.degrees(np.arccos(cos_h[valid])) / 15.0
+        eot_jam = equation_of_time_menit(tanggal) / 60.0
+        lon[valid] = 15.0 * (12.0 - eot_jam + h_hours - tau_target[valid])
+
+        for _ in range(3):
+            ok = ~np.isnan(lon)
+            if not np.any(ok):
+                break
+            _, _, _, jam_now = _hitung_titik_flat(
+                tanggal, None, None, lat_arr[ok], lon[ok], mode="ringan")
+            koreksi = np.where(np.isnan(jam_now), 0.0, (jam_now - tau_target[ok]) * 15.0)
+            lon[ok] = lon[ok] + koreksi
+
+    ok = ~np.isnan(lon)
+    elong = np.full(lat_arr.shape, np.nan)
+    geo_alt = np.full(lat_arr.shape, np.nan)
+    if np.any(ok):
+        elong_f, _, geo_alt_f, _ = _hitung_titik_flat(
+            tanggal, None, None, lat_arr[ok], lon[ok], mode="ringan")
+        elong[ok] = elong_f
+        geo_alt[ok] = geo_alt_f
+    return lon, elong, geo_alt
+
+
+def _cari_tau_elongasi_8(tanggal, min_utc_hour, target=8.0):
+    """Elongasi geosentris cuma fungsi WAKTU (tdk bergantung lat/lon sama
+    sekali -- lihat _altaz_matahari_bulan: cuma pakai ra/dec Matahari &
+    Bulan). Jadi momen UTC global saat elongasi menembus 'target' derajat
+    dicari lewat SATU titik acuan (lintang 0, yg selalu ada ghurubnya),
+    dgn bujurnya diatur via _titik_pada_terminator supaya ghurubnya jatuh
+    pas di jam yg sedang diuji -- dibungkus bisection di 'tau'."""
+    tau_scan = np.arange(min_utc_hour, 30.0, 0.1)
+    _, elong_scan, _ = _titik_pada_terminator(tanggal, np.zeros_like(tau_scan), tau_scan)
+    ok = ~np.isnan(elong_scan)
+    naik = np.where(ok[:-1] & ok[1:] & (elong_scan[:-1] < target) & (elong_scan[1:] >= target))[0]
+    if len(naik) == 0:
+        return None
+    i = naik[0]
+    lo, hi = tau_scan[i], tau_scan[i + 1]
+    for _ in range(25):
+        mid = 0.5 * (lo + hi)
+        _, e_mid, _ = _titik_pada_terminator(tanggal, np.array([0.0]), np.array([mid]))
+        if np.isnan(e_mid[0]) or e_mid[0] < target:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def _cari_2_titik_pertama_muhammadiyah(tanggal, min_utc_hour):
+    """Cari titik pertama secara ANALITIK: kumpulkan semua KANDIDAT titik
+    di sepanjang kurva elongasi=8° pada momen global saat elongasi
+    PERTAMA KALI menembus 8° (>= min_utc_hour) -- yaitu:
+      (a) perpotongan dgn kurva tinggi hilal=5° ("kriteria") -- biasanya
+          ada 2 (satu di lintang lbh utara, satu lbh selatan), tapi kalau
+          zona meluas ke satu arah tanpa perpotongan kedua (spt kasus 17
+          April 2026 -- tinggi hilal tdk pernah turun lagi ke bawah 5°
+          sebelum ghurub itu sendiri hilang krn siang/malam kutub), maka
+      (b) perpotongan kurva elongasi=8° dgn GARIS BATAS TIDAK-ADA-SUNSET
+          itu sendiri jg dimasukkan sbg kandidat ("batas_ghurub") --
+          BUKAN perpotongan kriteria, tapi tetap titik yg well-defined
+          (dicari via bisection presisi pd validitas ghurub, bkn snapping
+          ke grid).
+
+    Dari semua kandidat itu, yg DILAPORKAN cuma SATU: yg bujurnya PALING
+    TIMUR. Ini supaya konsisten dgn cara peta resmi Muhammadiyah
+    melaporkan "Lokasi Pertama" -- utk 14 Juli 2026 titik resmi mrk
+    (42°26'BB) persis kandidat paling timur dari 2 simpul kriteria yg ada
+    (satunya lg di 81°BB); utk 17 April 2026 titik resmi mrk (58°BB, jauh
+    lbh timur drpd simpul kriteria di 82°BB) cocok dgn kandidat
+    batas_ghurub (~2°BB), bukan simpul kriteria.
+
+    Return: list berisi SATU dict {"lat":.., "lon":.., "jam":..,
+    "jenis":"kriteria" atau "batas_ghurub"}, atau list kosong kalau tdk
+    ada kandidat sama sekali."""
+    tau_e = _cari_tau_elongasi_8(tanggal, min_utc_hour)
+    if tau_e is None:
+        return []
+
+    lat_scan = np.arange(-85.0, 85.01, 0.5)
+    _, _, geo_alt_scan = _titik_pada_terminator(tanggal, lat_scan, np.full_like(lat_scan, tau_e))
+    diff = geo_alt_scan - 5.0
+    ok = ~np.isnan(diff)
+    idx_potong = np.where(ok[:-1] & ok[1:] & (np.sign(diff[:-1]) != np.sign(diff[1:])))[0]
+
+    kandidat = []
+    arah_meluas = None
+    for i in idx_potong[:2]:
+        lo, hi = lat_scan[i], lat_scan[i + 1]
+        tanda_awal = np.sign(diff[i])
+        for _ in range(25):
+            mid = 0.5 * (lo + hi)
+            _, _, geo_mid = _titik_pada_terminator(tanggal, np.array([mid]), np.array([tau_e]))
+            tanda_mid = np.sign(geo_mid[0] - 5.0) if not np.isnan(geo_mid[0]) else tanda_awal
+            if tanda_mid == tanda_awal:
+                lo = mid
+            else:
+                hi = mid
+        lat_f = 0.5 * (lo + hi)
+        lon_f, _, _ = _titik_pada_terminator(tanggal, np.array([lat_f]), np.array([tau_e]))
+        kandidat.append({"lat": lat_f, "lon": float(lon_f[0]), "jam": tau_e, "jenis": "kriteria"})
+        # sisi mana (lintang naik / turun dari simpul ini) yg memenuhi
+        # tinggi>=5 -- itu arah zona meluas dari simpul ini.
+        arah_meluas = 1 if diff[i + 1] > 0 else -1
+
+    if len(kandidat) == 1:
+        # Cuma 1 perpotongan kriteria ketemu -- zona meluas ke SATU arah
+        # (arah_meluas: +1 = ke lintang lbh tinggi, -1 = ke lintang lbh
+        # rendah) TANPA perpotongan tinggi=5 kedua. Tambahkan kandidat
+        # perpotongan elongasi=8° dgn batas tidak-ada-sunset -- dicari
+        # via bisection pd validitas ghurub (bukan snapping ke grid
+        # lat_scan 0.5°) spy sama presisinya dgn kandidat kriteria di atas.
+        idx_valid = np.where(ok)[0]
+        i_v = idx_valid[-1] if arah_meluas > 0 else idx_valid[0]
+        if diff[i_v] > 0:
+            langkah = lat_scan[1] - lat_scan[0]
+            if arah_meluas > 0:
+                lo_v, hi_v = lat_scan[i_v], lat_scan[i_v] + langkah
+            else:
+                lo_v, hi_v = lat_scan[i_v] - langkah, lat_scan[i_v]
+            for _ in range(30):
+                mid = 0.5 * (lo_v + hi_v)
+                lon_mid, _, _ = _titik_pada_terminator(tanggal, np.array([mid]), np.array([tau_e]))
+                masih_valid = not np.isnan(lon_mid[0])
+                if masih_valid == (arah_meluas > 0):
+                    lo_v = mid
+                else:
+                    hi_v = mid
+            lat_b = lo_v if arah_meluas > 0 else hi_v
+            lon_b, _, _ = _titik_pada_terminator(tanggal, np.array([lat_b]), np.array([tau_e]))
+            kandidat.append({"lat": float(lat_b), "lon": float(lon_b[0]), "jam": tau_e,
+                             "jenis": "batas_ghurub"})
+
+    if not kandidat:
+        # --- Fallback: tinggi hilal yg mengikat, bukan elongasi -- majukan
+        # tau sampai puncak (maksimum lintang) tinggi-hilal-sepanjang-
+        # terminator pertama kali menyentuh 5°. ---
+        for tau in np.arange(tau_e, 24.0, 1.0 / 60.0):
+            _, elong_now, geo_alt_now = _titik_pada_terminator(tanggal, lat_scan, np.full_like(lat_scan, tau))
+            ok_now = (~np.isnan(geo_alt_now)) & (elong_now >= 8.0)
+            if np.any(ok_now) and np.nanmax(np.where(ok_now, geo_alt_now, np.nan)) >= 5.0:
+                i_puncak = np.nanargmax(np.where(ok_now, geo_alt_now, np.nan))
+                lat_f = lat_scan[i_puncak]
+                lon_f, _, _ = _titik_pada_terminator(tanggal, np.array([lat_f]), np.array([tau]))
+                kandidat.append({"lat": float(lat_f), "lon": float(lon_f[0]), "jam": float(tau),
+                                 "jenis": "kriteria"})
+                break
+
+    if not kandidat:
+        return []
+
+    terpilih = max(kandidat, key=lambda k: k["lon"])
+    return [terpilih]
+
+
+
 def buat_figure_muhammadiyah(grids, tanggal, evaluasi):
     lon_mesh, lat_mesh = grids["lon_mesh"], grids["lat_mesh"]
     elong_grid, geo_alt_grid, hours_utc_grid = (
@@ -3432,8 +3633,12 @@ def buat_figure_muhammadiyah(grids, tanggal, evaluasi):
                     transform=ccrs.PlateCarree())
         # Zonanya bisa sangat sempit (dekat batas ambang), jadi ditandai juga
         # dengan penanda titik supaya tetap terlihat di peta skala dunia.
-        lat_c = lat2[zona2].mean()
-        lon_c = lon2[zona2].mean()
+        # Titik acuan = paling TIMUR dlm zona (bukan centroid/mean) --
+        # konsisten dgn cara titik pertama PKG1 dipilih di atas & dgn
+        # cara peta resmi Muhammadiyah melaporkan "Lokasi Pertama".
+        idx_c = np.unravel_index(np.argmax(np.where(zona2, lon2, -np.inf)), lon2.shape)
+        lat_c = float(lat2[idx_c])
+        lon_c = float(lon2[idx_c])
         ax.plot(lon_c, lat_c, marker="*", color="darkorange", markersize=14,
                 markeredgecolor="black", transform=ccrs.PlateCarree(), zorder=5)
     else:
@@ -3449,6 +3654,54 @@ def buat_figure_muhammadiyah(grids, tanggal, evaluasi):
     ax.contour(lon_mesh, lat_mesh, hours_utc_grid, levels=[0, 24],
                colors="black", linewidths=1.8, linestyles="dashed",
                transform=ccrs.PlateCarree())
+
+    # --- Titik pertama secara global (UTC paling awal) yang memenuhi kriteria ---
+    # Dicari via perpotongan analitik (_cari_2_titik_pertama_muhammadiyah),
+    # BUKAN argmin di grid kasar spt sebelumnya -- elongasi geosentris cuma
+    # fungsi waktu, jadi argmin-di-grid tidak stabil (hasilnya bisa lompat
+    # ribuan km cuma krn beda resolusi grid/pembulatan). Fungsi itu sendiri
+    # mengumpulkan semua kandidat (simpul kriteria elongasi/tinggi, & kalau
+    # perlu simpul batas-ghurub) lalu memilih SATU yg PALING TIMUR --
+    # persis pola yg dipakai peta resmi Muhammadiyah utk "Lokasi Pertama".
+    titik_pertama_label = None
+    if pkg1_terpenuhi and np.any(zona_pkg1):
+        if waktu_ijtimak is not None:
+            offset_hours = (_ke_naif(waktu_ijtimak) - _ke_naif(tanggal)).total_seconds() / 3600.0
+            min_utc_hour_tp = max(0.0, offset_hours)
+        else:
+            min_utc_hour_tp = 0.0
+        titik_pertama_list = _cari_2_titik_pertama_muhammadiyah(tanggal, min_utc_hour_tp)
+
+        for tp in titik_pertama_list:
+            lat_p, lon_p, jam_p = tp["lat"], tp["lon"], tp["jam"]
+            jenis = tp.get("jenis", "kriteria")
+            jj, mm = divmod(round(jam_p * 60), 60)
+            arah_lat = "LU" if lat_p >= 0 else "LS"
+            arah_lon = "BT" if lon_p >= 0 else "BB"
+            if jenis == "kriteria":
+                prefix, warna, label_pojok = "Titik pertama", "yellow", "★"
+            else:
+                prefix = "Titik pertama (batas ghurub)"
+                warna, label_pojok = "lightgray", "‡"
+            teks = (f"{prefix}: {abs(lat_p):.2f}\u00b0{arah_lat}, "
+                    f"{abs(lon_p):.2f}\u00b0{arah_lon}, ghurub {jj:02d}:{mm:02d} UTC")
+            titik_pertama_label = (titik_pertama_label + "\n" + teks) if titik_pertama_label else teks
+            ax.plot(lon_p, lat_p, marker="*", color=warna, markersize=15,
+                    markeredgecolor="black", markeredgewidth=1.1,
+                    transform=ccrs.PlateCarree(), zorder=6)
+            ax.annotate(label_pojok, xy=(lon_p, lat_p), xytext=(5, 5),
+                        textcoords="offset points", fontsize=9, fontweight="bold",
+                        transform=ccrs.PlateCarree(), zorder=7)
+    elif pkg2_terpenuhi:
+        elong_c, alt_topo_c, geo_alt_c, hours_utc_c = _hitung_titik_flat(
+            tanggal, None, None, np.array([lat_c]), np.array([lon_c]), mode="ringan")
+        jam_p = float(hours_utc_c[0])
+        if not np.isnan(jam_p):
+            jj, mm = divmod(round(jam_p * 60), 60)
+            arah_lat = "LU" if lat_c >= 0 else "LS"
+            arah_lon = "BT" if lon_c >= 0 else "BB"
+            titik_pertama_label = (f"Titik acuan PKG 2:\n{abs(lat_c):.2f}\u00b0{arah_lat}, "
+                                    f"{abs(lon_c):.2f}\u00b0{arah_lon}\nGhurub {jj:02d}:{mm:02d} UTC")
 
     if pkg1_terpenuhi:
         status_teks = "PKG 1 & PKG 2 terpenuhi"
@@ -3469,6 +3722,12 @@ def buat_figure_muhammadiyah(grids, tanggal, evaluasi):
         plt.Rectangle((0, 0), 1, 1, fc=warna_zona, alpha=0.45, label=label_zona),
         plt.Rectangle((0, 0), 1, 1, fc="dimgray", alpha=0.3, label="Tidak ada sunset"),
     ]
+    if titik_pertama_label:
+        legend_elems_muh.append(
+            plt.Line2D([0], [0], marker="*", color="w", markerfacecolor="yellow",
+                       markeredgecolor="black", markersize=12, linestyle="None",
+                       label=titik_pertama_label)
+        )
     ax.legend(handles=legend_elems_muh, loc="upper left", bbox_to_anchor=(1.01, 1.0),
               borderaxespad=0, fontsize=9, framealpha=0.9)
 
@@ -8802,50 +9061,160 @@ class HisabWinApp(tk.Tk):
             pass
 
     def _buat_bagian_akordeon(self, parent, judul, buka_awal=True, on_open=None):
-        """Bikin satu 'bagian' akordeon yang bisa dilipat/dibuka dengan
-        mengklik headernya: header (panah + judul, warna aksen) dan body
-        (ttk.Frame kosong -- pemanggil memasang widget-widget isinya di
-        situ, seperti biasa memasang ke frame apapun).
-        Return (body_frame, fungsi_buka, fungsi_tutup) supaya kode lain
-        (mis. saat pindah tab notebook) bisa buka/tutup bagian ini
-        secara terprogram."""
+        """Bikin satu 'bagian' akordeon modern dengan header kartu berujung
+        membulat (Material Design 3 rounded corners, radius 12px) dan animasi
+        transisi buka-tutup yang SMOOTH menggunakan teknik Canvas viewport
+        clipping -- isi akordeon TIDAK di-relayout selama animasi berlangsung,
+        hanya tinggi viewport Canvas yang berubah (operasi sangat ringan).
+        Kurva animasi: cubic ease-out, durasi 200ms, ~60fps.
+        Return (body_content, fungsi_buka, fungsi_tutup) kompatibel penuh
+        dengan seluruh pemanggil di aplikasi ini."""
+        ANIM_DURATION = 0.20   # detik
+        ANIM_FRAME_MS = 16     # ~60fps
+
         wadah = ttk.Frame(parent)
         wadah.pack(fill="x", padx=8, pady=(0, 6))
 
-        state = {"buka": buka_awal}
+        clean_judul = judul.replace('\ufe0f', '').strip()
+        parts = clean_judul.split(' ', 1)
+        if len(parts) == 2 and parts[0] and parts[1]:
+            ikon_str, teks_str = parts[0], parts[1]
+        else:
+            ikon_str, teks_str = "", clean_judul
 
-        header = tk.Frame(wadah, bg=WARNA_AKSEN, cursor="hand2")
-        header.pack(fill="x")
-        label_panah = tk.Label(header, text=("▾" if buka_awal else "▸"), bg=WARNA_AKSEN,
-                                fg="white", font=FONT_UTAMA_BOLD, padx=8, pady=6)
-        label_panah.pack(side="left")
-        label_judul = tk.Label(header, text=judul, bg=WARNA_AKSEN, fg="white",
-                                font=FONT_UTAMA_BOLD, pady=6, anchor="w")
-        label_judul.pack(side="left", fill="x", expand=True)
+        hdr_canvas = tk.Canvas(wadah, bg=WARNA_BG, height=42, highlightthickness=0, cursor="hand2")
+        hdr_canvas.pack(fill="x")
 
-        body = ttk.Frame(wadah)
+        state = {"buka": buka_awal, "hover": False, "animating": False}
+
+        def _draw_round_rect(canvas, x1, y1, x2, y2, radius, **kwargs):
+            points = [
+                x1 + radius, y1,
+                x2 - radius, y1,
+                x2, y1,
+                x2, y1 + radius,
+                x2, y2 - radius,
+                x2, y2,
+                x2 - radius, y2,
+                x1 + radius, y2,
+                x1, y2,
+                x1, y2 - radius,
+                x1, y1 + radius,
+                x1, y1,
+            ]
+            return canvas.create_polygon(points, smooth=True, **kwargs)
+
+        def _redraw(event=None):
+            w = hdr_canvas.winfo_width()
+            h = hdr_canvas.winfo_height()
+            hdr_canvas.delete("all")
+            if w > 10 and h > 10:
+                color = WARNA_AKSEN_HOVER if state["hover"] else WARNA_AKSEN
+                r = 12
+                _draw_round_rect(hdr_canvas, 1, 1, w - 1, h - 1, radius=r, fill=color, outline="")
+                panah = "▾" if state["buka"] else "▸"
+                hdr_canvas.create_text(16, h // 2, text=panah, fill="white", font=FONT_UTAMA_BOLD, anchor="center")
+                if ikon_str:
+                    hdr_canvas.create_text(40, h // 2, text=ikon_str, fill="white", font=FONT_UTAMA_BOLD, anchor="center")
+                hdr_canvas.create_text(62, h // 2, text=teks_str, fill="white", font=FONT_UTAMA_BOLD, anchor="w")
+
+        hdr_canvas.bind("<Configure>", _redraw)
+
+        def _on_enter(e):
+            state["hover"] = True
+            _redraw()
+
+        def _on_leave(e):
+            state["hover"] = False
+            _redraw()
+
+        hdr_canvas.bind("<Enter>", _on_enter)
+        hdr_canvas.bind("<Leave>", _on_leave)
+
+        # --- Body: Canvas viewport clipping ---
+        # Isi akordeon di-embed sebagai window di dalam Canvas. Selama animasi,
+        # HANYA tinggi Canvas yg berubah (clip mask), child widget TIDAK
+        # pernah di-relayout → animasi 100% smooth tanpa stuttering.
+        body_viewport = tk.Canvas(wadah, highlightthickness=0, bg=WARNA_BG)
+        body_content = ttk.Frame(body_viewport)
+        body_viewport.create_window(0, 0, window=body_content, anchor="nw", tags="content")
+
+        def _sync_viewport_width(event):
+            body_viewport.itemconfigure("content", width=event.width)
+        body_viewport.bind("<Configure>", _sync_viewport_width)
+
+        def _sync_content_height(event=None):
+            """Auto-adjust viewport height saat konten berubah ukuran
+            (hanya saat panel terbuka dan tidak sedang animasi)."""
+            if state["buka"] and not state["animating"]:
+                h = body_content.winfo_reqheight()
+                if h > 0:
+                    body_viewport.config(height=h)
+        body_content.bind("<Configure>", _sync_content_height)
+
         if buka_awal:
-            body.pack(fill="x")
+            body_viewport.config(height=1)  # akan dikoreksi oleh _sync_content_height
+            body_viewport.pack(fill="x")
 
-        # Bayangan lembut di BAWAH kartu akordeon ini (lihat
-        # _pasang_bayangan_kartu) -- selalu di-pack_forget()+pack() ulang
-        # di _toggle() supaya tetap jadi elemen PALING BAWAH baik saat
-        # body terbuka maupun tertutup.
         bayangan = _pasang_bayangan_kartu(wadah, tinggi=6)
         bayangan.pack(fill="x")
 
+        def _ease_out_cubic(t):
+            return 1.0 - (1.0 - t) ** 3
+
+        def _animate(start_h, end_h, on_done):
+            t_start = _time.perf_counter()
+
+            def _frame():
+                elapsed = _time.perf_counter() - t_start
+                progress = min(1.0, elapsed / ANIM_DURATION)
+                eased = _ease_out_cubic(progress)
+                h = int(start_h + (end_h - start_h) * eased)
+                body_viewport.config(height=max(1, h))
+                if progress < 1.0:
+                    self.after(ANIM_FRAME_MS, _frame)
+                else:
+                    body_viewport.config(height=max(1, int(end_h)))
+                    on_done()
+
+            _frame()
+
         def _toggle(event=None):
+            if state["animating"]:
+                return
+            state["animating"] = True
+
             if state["buka"]:
-                body.pack_forget()
-                label_panah.config(text="▸")
+                # === COLLAPSE ===
+                current_h = body_viewport.winfo_height()
+                state["buka"] = False
+                _redraw()
+
+                def _collapse_done():
+                    body_viewport.pack_forget()
+                    bayangan.pack_forget()
+                    bayangan.pack(fill="x")
+                    state["animating"] = False
+
+                _animate(current_h, 0, _collapse_done)
             else:
-                body.pack(fill="x")
-                label_panah.config(text="▾")
+                # === EXPAND ===
+                state["buka"] = True
+                _redraw()
                 if on_open is not None:
                     on_open()
-            bayangan.pack_forget()
-            bayangan.pack(fill="x")
-            state["buka"] = not state["buka"]
+                body_viewport.config(height=1)
+                body_viewport.pack(fill="x")
+                bayangan.pack_forget()
+                bayangan.pack(fill="x")
+                self.update_idletasks()
+                target_h = max(20, body_content.winfo_reqheight())
+
+                def _expand_done():
+                    state["animating"] = False
+                    _sync_content_height()
+
+                _animate(1, target_h, _expand_done)
 
         def _buka():
             if not state["buka"]:
@@ -8855,10 +9224,9 @@ class HisabWinApp(tk.Tk):
             if state["buka"]:
                 _toggle()
 
-        for widget in (header, label_panah, label_judul):
-            widget.bind("<Button-1>", _toggle)
+        hdr_canvas.bind("<Button-1>", _toggle)
 
-        return body, _buka, _tutup
+        return body_content, _buka, _tutup
 
     def _pasang_scroll_mousewheel(self, canvas, handler):
         """Pasang scroll roda-mouse ke `canvas`, TAPI hanya aktif selagi
@@ -9361,7 +9729,7 @@ class HisabWinApp(tk.Tk):
         #     sebaliknya -- supaya bilah kiri tetap ringkas. ---
         self._body_akordeon_gerhana, self._buka_akordeon_gerhana, self._tutup_akordeon_gerhana = \
             self._buat_bagian_akordeon(
-                tab_kontrol, "☀️Gerhana",
+                tab_kontrol, "☀️ Gerhana",
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_kalbanding(), self._tutup_akordeon_konverter(),
@@ -9517,7 +9885,7 @@ class HisabWinApp(tk.Tk):
         #     bulanan()). ---
         self._body_akordeon_almanak, self._buka_akordeon_almanak, self._tutup_akordeon_almanak = \
             self._buat_bagian_akordeon(
-                tab_kontrol, "🗓️Cetak Almanak",
+                tab_kontrol, "🗓️ Cetak Almanak",
                 buka_awal=False,
                 on_open=lambda: (self._tutup_akordeon_hilal(), self._tutup_akordeon_sholat(),
                                   self._tutup_akordeon_gerhana(), self._tutup_akordeon_kalbanding(),
