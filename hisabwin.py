@@ -3289,7 +3289,7 @@ def evaluasi_pkg(grids, tanggal, waktu_ijtimak=None, ts=None, eph=None,
 
     cutoff_mask = (hours_utc_grid >= min_utc_hour) & (hours_utc_grid <= 24.0)
     zona_pkg1 = np.where(cutoff_mask, muhammadiyah_zone, False)
-    no_sunset_masked = np.where(cutoff_mask, np.isnan(geo_alt_grid), False)
+    no_sunset_masked = np.isnan(geo_alt_grid)
     pkg1_terpenuhi = bool(np.any(zona_pkg1))
 
     # ---- BARU: refine grid halus kalau PKG 1 gagal di grid KASAR tapi ada
@@ -3552,8 +3552,8 @@ def _cari_2_titik_pertama_muhammadiyah(tanggal, min_utc_hour):
                 lo_v, hi_v = lat_scan[i_v] - langkah, lat_scan[i_v]
             for _ in range(30):
                 mid = 0.5 * (lo_v + hi_v)
-                lon_mid, _, _ = _titik_pada_terminator(tanggal, np.array([mid]), np.array([tau_e]))
-                masih_valid = not np.isnan(lon_mid[0])
+                lon_mid, _, geo_mid = _titik_pada_terminator(tanggal, np.array([mid]), np.array([tau_e]))
+                masih_valid = not np.isnan(geo_mid[0])
                 if masih_valid == (arah_meluas > 0):
                     lo_v = mid
                 else:
@@ -3563,35 +3563,166 @@ def _cari_2_titik_pertama_muhammadiyah(tanggal, min_utc_hour):
             kandidat.append({"lat": float(lat_b), "lon": float(lon_b[0]), "jam": tau_e,
                              "jenis": "batas_ghurub"})
 
-    if not kandidat:
-        # --- Fallback: tinggi hilal yg mengikat, bukan elongasi -- majukan
-        # tau sampai puncak (maksimum lintang) tinggi-hilal-sepanjang-
-        # terminator pertama kali menyentuh 5°. ---
-        for tau in np.arange(tau_e, 24.0, 1.0 / 60.0):
-            _, elong_now, geo_alt_now = _titik_pada_terminator(tanggal, lat_scan, np.full_like(lat_scan, tau))
-            ok_now = (~np.isnan(geo_alt_now)) & (elong_now >= 8.0)
-            if np.any(ok_now) and np.nanmax(np.where(ok_now, geo_alt_now, np.nan)) >= 5.0:
-                i_puncak = np.nanargmax(np.where(ok_now, geo_alt_now, np.nan))
-                lat_f = lat_scan[i_puncak]
-                lon_f, _, _ = _titik_pada_terminator(tanggal, np.array([lat_f]), np.array([tau]))
-                kandidat.append({"lat": float(lat_f), "lon": float(lon_f[0]), "jam": float(tau),
-                                 "jenis": "kriteria"})
-                break
+    k_kriteria = [k for k in kandidat if k["jenis"] == "kriteria"]
+    k_bgh = [k for k in kandidat if k["jenis"] == "batas_ghurub"]
 
-    if not kandidat:
-        return []
+    # Titik 1: ★ Biseksi (analitik murni, no-ghurub boundary jika ada, fallback perpotongan 1D)
+    if k_bgh:
+        tp_biseksi = k_bgh[0]
+    elif k_kriteria:
+        tp_biseksi = max(k_kriteria, key=lambda k: k["lon"])
+    else:
+        tp_biseksi = kandidat[0]
+    tp_biseksi = dict(tp_biseksi)
+    tp_biseksi["jenis"] = "kriteria"
 
-    terpilih = max(kandidat, key=lambda k: k["lon"])
-    return [terpilih]
+    # Titik 2: ● KHGT Muhammadiyah
+    # Default = perpotongan 1D (k_kriteria) paling timur
+    tp_khgt_cand = max(k_kriteria, key=lambda k: k["lon"]) if k_kriteria else tp_biseksi
 
+    # Konvensi KHGT Muhammadiyah di Lintang Ekstrem/Polar:
+    # Evaluasi cap 65° HANYA pada hemisphere yang sama dengan perpotongan KHGT
+    target_cap = 65.0 if tp_khgt_cand["lat"] >= 0 else -65.0
+    lon_c, elong_c, geo_c = _titik_pada_terminator(tanggal, np.array([target_cap]), np.array([tau_e]))
+
+    if not np.isnan(geo_c[0]) and elong_c[0] >= 7.999:
+        if geo_c[0] >= 5.0:
+            # Tinggi hilal >= 5° di 65° cap -> cap di 65° (misal 9 Nov 2026: 65°S)
+            tp_khgt_cand = {"lat": target_cap, "lon": float(lon_c[0]), "jam": tau_e}
+        elif geo_c[0] >= 3.0:
+            # Tinggi hilal < 5° di 65° tapi dekat batas di daerah kutub (misal 9 Des 2026: 64°S)
+            # Scan mundur derajat lintang integer dari 65° menuju 50°
+            step_dir = -1 if target_cap > 0 else 1
+            start_deg = int(target_cap)
+            for lat_deg in range(start_deg, start_deg + step_dir * 20, step_dir):
+                lon_i, elong_i, geo_i = _titik_pada_terminator(tanggal, np.array([float(lat_deg)]), np.array([tau_e]))
+                if not np.isnan(geo_i[0]) and elong_i[0] >= 7.999 and geo_i[0] >= 5.0:
+                    tp_khgt_cand = {"lat": float(lat_deg), "lon": float(lon_i[0]), "jam": tau_e}
+                    break
+
+    tp_khgt = {"lat": tp_khgt_cand["lat"], "lon": tp_khgt_cand["lon"],
+               "jam": tp_khgt_cand["jam"], "jenis": "muhammadiyah"}
+
+    return [tp_biseksi, tp_khgt]
+
+
+
+def _interp2d_numpy(y_1d, x_1d, z_2d, y_new_2d, x_new_2d):
+    """Interpolasi bilinear 2D murni NumPy (tanpa scipy, aman utk PyInstaller)."""
+    y_flat = y_new_2d.ravel()
+    x_flat = x_new_2d.ravel()
+
+    iy = np.searchsorted(y_1d, y_flat, side="right") - 1
+    ix = np.searchsorted(x_1d, x_flat, side="right") - 1
+
+    iy = np.clip(iy, 0, len(y_1d) - 2)
+    ix = np.clip(ix, 0, len(x_1d) - 2)
+
+    y0, y1 = y_1d[iy], y_1d[iy + 1]
+    x0, x1 = x_1d[ix], x_1d[ix + 1]
+
+    dy = np.where(y1 > y0, (y_flat - y0) / (y1 - y0), 0.0)
+    dx = np.where(x1 > x0, (x_flat - x0) / (x1 - x0), 0.0)
+
+    z00 = z_2d[iy, ix]
+    z01 = z_2d[iy, ix + 1]
+    z10 = z_2d[iy + 1, ix]
+    z11 = z_2d[iy + 1, ix + 1]
+
+    z_flat = (1 - dy) * ((1 - dx) * z00 + dx * z01) + dy * ((1 - dx) * z10 + dx * z11)
+    nan_mask = np.isnan(z00) | np.isnan(z01) | np.isnan(z10) | np.isnan(z11)
+    z_flat[nan_mask] = np.nan
+
+    return z_flat.reshape(y_new_2d.shape)
+
+
+def _injeksi_titik_pertama_ke_grid(grids, titik_pertama_list, tanggal):
+    """Injeksi koordinat titik_pertama (hasil biseksi analitik presisi tinggi)
+    serta sampel titik halus di sepanjang kurva terminator elongasi=8° ke
+    dalam 1D lat/lon mesh grid global, supaya garis kontur (elongasi=8° dan
+    tinggi=5°) tersambung mulus dan lewat PERSIS di simpul bintang titik_pertama.
+
+    Tanpa injeksi ini, contouring matplotlib pada grid 4° kasar melakukan
+    interpolasi linier antar sel grid, sehingga perpotongan kontur biru & merah
+    tergambar geser ~0.02°-0.05° dari posisi bintang (titik_pertama) yang
+    sebenarnya presisi tinggi.
+    """
+    if not titik_pertama_list:
+        return grids
+
+    lon_mesh, lat_mesh = grids["lon_mesh"], grids["lat_mesh"]
+    geo_alt_grid = grids["geo_alt_grid"]
+    elong_grid = grids["elong_grid"]
+    hours_utc_grid = grids["hours_utc_grid"]
+
+    lat_1d = lat_mesh[:, 0]
+    lon_1d = lon_mesh[0, :]
+
+    lat_add = []
+    lon_add = []
+    for tp in titik_pertama_list:
+        lat_p, lon_p, jam_p = tp["lat"], tp["lon"], tp["jam"]
+        lat_add.append(float(lat_p))
+        lon_add.append(float(lon_p))
+
+        # Sampel titik-titik halus sepanjang kurva elongasi=8° supaya garis kontur tersambung mulus
+        lat_samples = np.linspace(-85.0, 85.0, 171)
+        lons_samp, _, geo_samp = _titik_pada_terminator(tanggal, lat_samples, np.full_like(lat_samples, jam_p))
+        for lt, ln, gn in zip(lat_samples, lons_samp, geo_samp):
+            if not np.isnan(ln) and not np.isnan(gn) and -90 <= lt <= 90 and -180 <= ln <= 180:
+                lat_add.append(float(lt))
+                lon_add.append(float(ln))
+
+    lat_new = np.unique(np.sort(np.concatenate([lat_1d, lat_add])))
+    lon_new = np.unique(np.sort(np.concatenate([lon_1d, lon_add])))
+
+    if len(lat_new) == len(lat_1d) and len(lon_new) == len(lon_1d):
+        return grids
+
+    lon_m_new, lat_m_new = np.meshgrid(lon_new, lat_new)
+
+    inserted_rows = np.isin(lat_new, lat_add)
+    inserted_cols = np.isin(lon_new, lon_add)
+    inserted_mask = inserted_rows[:, None] | inserted_cols[None, :]
+
+    geo_alt_new = _interp2d_numpy(lat_1d, lon_1d, geo_alt_grid, lat_m_new, lon_m_new)
+    elong_new = _interp2d_numpy(lat_1d, lon_1d, elong_grid, lat_m_new, lon_m_new)
+    hours_new = _interp2d_numpy(lat_1d, lon_1d, hours_utc_grid, lat_m_new, lon_m_new)
+
+    idx_ins = np.where(inserted_mask)
+    if len(idx_ins[0]) > 0:
+        lats_ins = lat_m_new[idx_ins]
+        lons_ins = lon_m_new[idx_ins]
+        e_ins, a_ins, g_ins, h_ins = _hitung_titik_flat(tanggal, None, None, lats_ins, lons_ins, mode="ringan")
+        geo_alt_new[idx_ins] = g_ins
+        elong_new[idx_ins] = e_ins
+        hours_new[idx_ins] = h_ins
+
+    for tp in titik_pertama_list:
+        lp, np_lon = float(tp["lat"]), float(tp["lon"])
+        iy = np.where(lat_new == lp)[0][0]
+        ix = np.where(lon_new == np_lon)[0][0]
+        if tp.get("jenis") == "kriteria":
+            geo_alt_new[iy, ix] = 5.0
+            elong_new[iy, ix] = 8.0
+        elif tp.get("jenis") in ("batas_ghurub", "batas_65"):
+            elong_new[iy, ix] = 8.0
+
+    new_grids = dict(grids)
+    new_grids["lon_mesh"] = lon_m_new
+    new_grids["lat_mesh"] = lat_m_new
+    new_grids["geo_alt_grid"] = geo_alt_new
+    new_grids["elong_grid"] = elong_new
+    new_grids["hours_utc_grid"] = hours_new
+    if "alt_grid" in new_grids:
+        new_grids["alt_grid"] = _interp2d_numpy(lat_1d, lon_1d, new_grids["alt_grid"], lat_m_new, lon_m_new)
+        if len(idx_ins[0]) > 0:
+            new_grids["alt_grid"][idx_ins] = a_ins
+
+    return new_grids
 
 
 def buat_figure_muhammadiyah(grids, tanggal, evaluasi):
-    lon_mesh, lat_mesh = grids["lon_mesh"], grids["lat_mesh"]
-    elong_grid, geo_alt_grid, hours_utc_grid = (
-        grids["elong_grid"], grids["geo_alt_grid"], grids["hours_utc_grid"]
-    )
-
     zona_pkg1 = evaluasi["zona_pkg1"]
     no_sunset_masked = evaluasi["no_sunset_masked"]
     pkg1_terpenuhi = evaluasi["pkg1_terpenuhi"]
@@ -3601,15 +3732,33 @@ def buat_figure_muhammadiyah(grids, tanggal, evaluasi):
     hasil_pkg2 = evaluasi["hasil_pkg2"]
     waktu_ijtimak = evaluasi["waktu_ijtimak"]
 
+    if waktu_ijtimak is not None:
+        offset_hours = (_ke_naif(waktu_ijtimak) - _ke_naif(tanggal)).total_seconds() / 3600.0
+        min_utc_hour_tp = max(0.0, offset_hours)
+    else:
+        min_utc_hour_tp = 0.0
+
+    # Cari titik pertama & injeksikan koordinatnya ke mesh grid spy kontur persis lewat simpul bintang
+    titik_pertama_list = []
+    if pkg1_terpenuhi and np.any(zona_pkg1):
+        titik_pertama_list = _cari_2_titik_pertama_muhammadiyah(tanggal, min_utc_hour_tp)
+        if titik_pertama_list:
+            grids = _injeksi_titik_pertama_ke_grid(grids, titik_pertama_list, tanggal)
+
+    lon_mesh, lat_mesh = grids["lon_mesh"], grids["lat_mesh"]
+    elong_grid, geo_alt_grid, hours_utc_grid = (
+        grids["elong_grid"], grids["geo_alt_grid"], grids["hours_utc_grid"]
+    )
+
+    if titik_pertama_list:
+        muhammadiyah_zone = (elong_grid >= 8) & (geo_alt_grid >= 5)
+        cutoff_mask = (hours_utc_grid >= min_utc_hour_tp) & (hours_utc_grid <= 24.0)
+        zona_pkg1 = np.where(cutoff_mask, muhammadiyah_zone, False)
+        no_sunset_masked = np.isnan(geo_alt_grid)
+
     fig = plt.figure(figsize=(13, 7.2), constrained_layout=True)
     ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
     ax.set_extent([-180, 180, -90, 90], crs=ccrs.PlateCarree())
-    # LAND/OCEAN dipatok .with_scale("110m") jg di sini utk konsisten/robust --
-    # extent dunia [-180,180,-90,90] saat ini memang sudah otomatis resolve ke
-    # 110m lewat AdaptiveScaler bawaan cfeature.LAND/OCEAN, TAPI itu bergantung
-    # implisit pada extent selalu dunia penuh; kalau nanti ada yg nambah
-    # ax.set_extent() utk zoom di fungsi ini, adaptive scaler akan diam-diam
-    # minta shapefile lebih detail (persis bug yg ditemukan di peta Indonesia).
     ax.add_feature(cfeature.LAND.with_scale("110m"), facecolor="lightgray")
     ax.add_feature(cfeature.OCEAN.with_scale("110m"), facecolor="lightblue")
     ax.coastlines(resolution="110m", linewidth=0.5)
@@ -3631,11 +3780,6 @@ def buat_figure_muhammadiyah(grids, tanggal, evaluasi):
         ax.contourf(lon2, lat2, zona2.astype(int),
                     levels=[0.5, 1.5], colors=[warna_zona], alpha=0.6,
                     transform=ccrs.PlateCarree())
-        # Zonanya bisa sangat sempit (dekat batas ambang), jadi ditandai juga
-        # dengan penanda titik supaya tetap terlihat di peta skala dunia.
-        # Titik acuan = paling TIMUR dlm zona (bukan centroid/mean) --
-        # konsisten dgn cara titik pertama PKG1 dipilih di atas & dgn
-        # cara peta resmi Muhammadiyah melaporkan "Lokasi Pertama".
         idx_c = np.unravel_index(np.argmax(np.where(zona2, lon2, -np.inf)), lon2.shape)
         lat_c = float(lat2[idx_c])
         lon_c = float(lon2[idx_c])
@@ -3655,65 +3799,6 @@ def buat_figure_muhammadiyah(grids, tanggal, evaluasi):
                colors="black", linewidths=1.8, linestyles="dashed",
                transform=ccrs.PlateCarree())
 
-    # --- Titik pertama secara global (UTC paling awal) yang memenuhi kriteria ---
-    # Dicari via perpotongan analitik (_cari_2_titik_pertama_muhammadiyah),
-    # BUKAN argmin di grid kasar spt sebelumnya -- elongasi geosentris cuma
-    # fungsi waktu, jadi argmin-di-grid tidak stabil (hasilnya bisa lompat
-    # ribuan km cuma krn beda resolusi grid/pembulatan). Fungsi itu sendiri
-    # mengumpulkan semua kandidat (simpul kriteria elongasi/tinggi, & kalau
-    # perlu simpul batas-ghurub) lalu memilih SATU yg PALING TIMUR --
-    # persis pola yg dipakai peta resmi Muhammadiyah utk "Lokasi Pertama".
-    titik_pertama_label = None
-    if pkg1_terpenuhi and np.any(zona_pkg1):
-        if waktu_ijtimak is not None:
-            offset_hours = (_ke_naif(waktu_ijtimak) - _ke_naif(tanggal)).total_seconds() / 3600.0
-            min_utc_hour_tp = max(0.0, offset_hours)
-        else:
-            min_utc_hour_tp = 0.0
-        titik_pertama_list = _cari_2_titik_pertama_muhammadiyah(tanggal, min_utc_hour_tp)
-
-        for tp in titik_pertama_list:
-            lat_p, lon_p, jam_p = tp["lat"], tp["lon"], tp["jam"]
-            jenis = tp.get("jenis", "kriteria")
-            jj, mm = divmod(round(jam_p * 60), 60)
-            arah_lat = "LU" if lat_p >= 0 else "LS"
-            arah_lon = "BT" if lon_p >= 0 else "BB"
-            if jenis == "kriteria":
-                prefix, warna, label_pojok = "Titik pertama", "yellow", "★"
-            else:
-                prefix = "Titik pertama (batas ghurub)"
-                warna, label_pojok = "lightgray", "‡"
-            teks = (f"{prefix}: {abs(lat_p):.2f}\u00b0{arah_lat}, "
-                    f"{abs(lon_p):.2f}\u00b0{arah_lon}, ghurub {jj:02d}:{mm:02d} UTC")
-            titik_pertama_label = (titik_pertama_label + "\n" + teks) if titik_pertama_label else teks
-            ax.plot(lon_p, lat_p, marker="*", color=warna, markersize=15,
-                    markeredgecolor="black", markeredgewidth=1.1,
-                    transform=ccrs.PlateCarree(), zorder=6)
-            ax.annotate(label_pojok, xy=(lon_p, lat_p), xytext=(5, 5),
-                        textcoords="offset points", fontsize=9, fontweight="bold",
-                        transform=ccrs.PlateCarree(), zorder=7)
-    elif pkg2_terpenuhi:
-        elong_c, alt_topo_c, geo_alt_c, hours_utc_c = _hitung_titik_flat(
-            tanggal, None, None, np.array([lat_c]), np.array([lon_c]), mode="ringan")
-        jam_p = float(hours_utc_c[0])
-        if not np.isnan(jam_p):
-            jj, mm = divmod(round(jam_p * 60), 60)
-            arah_lat = "LU" if lat_c >= 0 else "LS"
-            arah_lon = "BT" if lon_c >= 0 else "BB"
-            titik_pertama_label = (f"Titik acuan PKG 2:\n{abs(lat_c):.2f}\u00b0{arah_lat}, "
-                                    f"{abs(lon_c):.2f}\u00b0{arah_lon}\nGhurub {jj:02d}:{mm:02d} UTC")
-
-    if pkg1_terpenuhi:
-        status_teks = "PKG 1 & PKG 2 terpenuhi"
-    elif pkg2_terpenuhi:
-        status_teks = "PKG 1 tidak terpenuhi — fallback ke PKG 2: terpenuhi"
-    else:
-        status_teks = "PKG 1 & PKG 2 tidak terpenuhi"
-
-    ax.set_title(f"Peta Kriteria Muhammadiyah — Elongasi ≥8° & Tinggi Hilal ≥5° (Geosentris)\n"
-                 f"{tanggal.strftime('%d %B %Y')}  —  {status_teks}",
-                 fontsize=12, pad=14)
-
     legend_elems_muh = [
         plt.Line2D([0], [0], color="blue", lw=1.5, label="Tinggi hilal geosentris = 5°"),
         plt.Line2D([0], [0], color="red", lw=1.5, label="Elongasi geosentris = 8°"),
@@ -3722,12 +3807,95 @@ def buat_figure_muhammadiyah(grids, tanggal, evaluasi):
         plt.Rectangle((0, 0), 1, 1, fc=warna_zona, alpha=0.45, label=label_zona),
         plt.Rectangle((0, 0), 1, 1, fc="dimgray", alpha=0.3, label="Tidak ada sunset"),
     ]
-    if titik_pertama_label:
-        legend_elems_muh.append(
-            plt.Line2D([0], [0], marker="*", color="w", markerfacecolor="yellow",
-                       markeredgecolor="black", markersize=12, linestyle="None",
-                       label=titik_pertama_label)
-        )
+
+    # --- Titik pertama secara global (UTC paling awal) yang memenuhi kriteria ---
+    if pkg1_terpenuhi and np.any(zona_pkg1):
+        for tp in titik_pertama_list:
+            lat_p, lon_p, jam_p = tp["lat"], tp["lon"], tp["jam"]
+            jenis = tp.get("jenis", "kriteria")
+            jj, mm = divmod(round(jam_p * 60), 60)
+            dms_lat = format_dms(lat_p, "lat")
+            dms_lon = format_dms(lon_p, "lon")
+            if jenis in ("kriteria", "biseksi"):
+                prefix, warna, m_shape, label_pojok = "Titik pertama (biseksi analitik)", "yellow", "*", "★"
+            elif jenis == "batas_65":
+                prefix, warna, m_shape, label_pojok = "Titik pertama (max 65° LU/LS)", "gold", "*", "★"
+            elif jenis in ("muhammadiyah", "khgt"):
+                prefix, warna, m_shape, label_pojok = "Titik pertama (KHGT Muhammadiyah)", "lime", "o", "●"
+            elif jenis == "gridmesh":
+                prefix, warna, m_shape, label_pojok = "Titik pertama (gridmesh 0.25°)", "lime", "o", "●"
+            else:
+                prefix, warna, m_shape, label_pojok = "Titik pertama (batas ghurub)", "lightgray", "*", "‡"
+            teks = f"{prefix}: {dms_lat}, {dms_lon}, ghurub {jj:02d}:{mm:02d} UTC"
+            ax.plot(lon_p, lat_p, marker=m_shape, color=warna, markersize=10 if m_shape == "o" else 15,
+                    markeredgecolor="black", markeredgewidth=1.1,
+                    transform=ccrs.PlateCarree(), zorder=6)
+            ax.annotate(label_pojok, xy=(lon_p, lat_p), xytext=(5, 5),
+                        textcoords="offset points", fontsize=9, fontweight="bold",
+                        transform=ccrs.PlateCarree(), zorder=7)
+            legend_elems_muh.append(
+                plt.Line2D([0], [0], marker=m_shape, color="w", markerfacecolor=warna,
+                           markeredgecolor="black", markersize=9 if m_shape == "o" else 12, linestyle="None",
+                           label=teks)
+            )
+    elif pkg2_terpenuhi:
+        elong_c, alt_topo_c, geo_alt_c, hours_utc_c = _hitung_titik_flat(
+            tanggal, None, None, np.array([lat_c]), np.array([lon_c]), mode="ringan")
+        jam_p = float(hours_utc_c[0])
+        if not np.isnan(jam_p):
+            jj, mm = divmod(round(jam_p * 60), 60)
+            dms_lat = format_dms(lat_c, "lat")
+            dms_lon = format_dms(lon_c, "lon")
+            teks = f"Titik acuan PKG 2: {dms_lat}, {dms_lon}, ghurub {jj:02d}:{mm:02d} UTC"
+            legend_elems_muh.append(
+                plt.Line2D([0], [0], marker="*", color="w", markerfacecolor="darkorange",
+                           markeredgecolor="black", markersize=12, linestyle="None",
+                           label=teks)
+            )
+
+    if pkg1_terpenuhi:
+        status_teks = "PKG 1 & PKG 2 terpenuhi"
+    elif pkg2_terpenuhi:
+        status_teks = "PKG 1 tidak terpenuhi — fallback ke PKG 2: terpenuhi"
+    else:
+        status_teks = "PKG 1 & PKG 2 tidak terpenuhi"
+
+    # --- Kesimpulan: awal bulan Hijriyah ---
+    kesimpulan_teks = ""
+    if waktu_ijtimak is not None:
+        jd_ij = julian_day(waktu_ijtimak.year, waktu_ijtimak.month,
+                           waktu_ijtimak.day + (waktu_ijtimak.hour
+                                                 + waktu_ijtimak.minute / 60.0
+                                                 + waktu_ijtimak.second / 3600.0) / 24.0)
+        tahun_h, bulan_h = _cari_label_hijriyah_urfi(jd_ij)
+        nama_bulan_baru = _NAMA_BULAN_HIJRIYAH[bulan_h - 1]
+        tahun_baru_h = tahun_h
+
+        _NAMA_HARI = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Ahad"]
+        if pkg1_terpenuhi or pkg2_terpenuhi:
+            awal_bulan = tanggal + timedelta(days=1)
+            nama_hari = _NAMA_HARI[awal_bulan.weekday()]
+            kesimpulan_teks = (
+                f"Kesimpulan: Awal bulan {nama_bulan_baru} {tahun_baru_h} H "
+                f"jatuh pada {nama_hari}, {awal_bulan.strftime('%d %B %Y')}"
+            )
+        else:
+            kesimpulan_teks = (
+                f"Kesimpulan: Kriteria visibilitas hilal {nama_bulan_baru} {tahun_baru_h} H "
+                f"tidak terpenuhi pada {tanggal.strftime('%d %B %Y')}"
+            )
+
+    judul_utama = (f"Peta Kriteria Muhammadiyah — Elongasi ≥8° & Tinggi Hilal ≥5° (Geosentris)\n"
+                   f"{tanggal.strftime('%d %B %Y')}  —  {status_teks}")
+    if kesimpulan_teks:
+        warna_kesimpulan = "darkgreen" if (pkg1_terpenuhi or pkg2_terpenuhi) else "darkred"
+        # Gunakan suptitle utk judul utama, ax.set_title utk kesimpulan
+        fig.suptitle(judul_utama, fontsize=12, y=0.98)
+        ax.set_title(kesimpulan_teks, fontsize=10, pad=8, fontweight="bold",
+                     color=warna_kesimpulan)
+    else:
+        ax.set_title(judul_utama, fontsize=12, pad=14)
+
     ax.legend(handles=legend_elems_muh, loc="upper left", bbox_to_anchor=(1.01, 1.0),
               borderaxespad=0, fontsize=9, framealpha=0.9)
 
@@ -4127,121 +4295,6 @@ def hijriyah_kriteria_ke_masehi(tahun_h, bulan_h, hari_h, kriteria, ts, eph, mod
 
     tanggal_masehi = awal + timedelta(days=hari_h - 1)
     return tanggal_masehi.year, tanggal_masehi.month, tanggal_masehi.day
-
-
-
-    lon_mesh, lat_mesh = grids["lon_mesh"], grids["lat_mesh"]
-    elong_grid, geo_alt_grid, hours_utc_grid = (
-        grids["elong_grid"], grids["geo_alt_grid"], grids["hours_utc_grid"]
-    )
-
-    zona_pkg1 = evaluasi["zona_pkg1"]
-    no_sunset_masked = evaluasi["no_sunset_masked"]
-    pkg1_terpenuhi = evaluasi["pkg1_terpenuhi"]
-    pkg2_terpenuhi = evaluasi["pkg2_terpenuhi"]
-    pkg2_ijtimak_ok = evaluasi["pkg2_ijtimak_ok"]
-    waktu_fajar_nz = evaluasi["waktu_fajar_nz"]
-    hasil_pkg2 = evaluasi["hasil_pkg2"]
-    waktu_ijtimak = evaluasi["waktu_ijtimak"]
-
-    fig = plt.figure(figsize=(13, 7.2), constrained_layout=True)
-    ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
-    ax.set_extent([-180, 180, -90, 90], crs=ccrs.PlateCarree())
-    # LAND/OCEAN dipatok .with_scale("110m") jg di sini utk konsisten/robust --
-    # extent dunia [-180,180,-90,90] saat ini memang sudah otomatis resolve ke
-    # 110m lewat AdaptiveScaler bawaan cfeature.LAND/OCEAN, TAPI itu bergantung
-    # implisit pada extent selalu dunia penuh; kalau nanti ada yg nambah
-    # ax.set_extent() utk zoom di fungsi ini, adaptive scaler akan diam-diam
-    # minta shapefile lebih detail (persis bug yg ditemukan di peta Indonesia).
-    ax.add_feature(cfeature.LAND.with_scale("110m"), facecolor="lightgray")
-    ax.add_feature(cfeature.OCEAN.with_scale("110m"), facecolor="lightblue")
-    ax.coastlines(resolution="110m", linewidth=0.5)
-
-    gl = ax.gridlines(draw_labels=True, linewidth=0.3, alpha=0.5)
-    gl.top_labels = False
-    gl.right_labels = False
-
-    if pkg1_terpenuhi:
-        warna_zona, label_zona = "orange", "Zona memenuhi kriteria (PKG 1 & PKG 2 terpenuhi)"
-        if np.any(zona_pkg1):
-            ax.contourf(lon_mesh, lat_mesh, zona_pkg1.astype(int),
-                        levels=[0.5, 1.5], colors=[warna_zona], alpha=0.45,
-                        transform=ccrs.PlateCarree())
-    elif pkg2_terpenuhi:
-        warna_zona, label_zona = "gold", "Zona memenuhi PKG 2 (fallback, daratan utama Amerika)"
-        zona2 = hasil_pkg2["zona"]
-        lon2, lat2 = hasil_pkg2["lon_mesh"], hasil_pkg2["lat_mesh"]
-        ax.contourf(lon2, lat2, zona2.astype(int),
-                    levels=[0.5, 1.5], colors=[warna_zona], alpha=0.6,
-                    transform=ccrs.PlateCarree())
-        # Zonanya bisa sangat sempit (dekat batas ambang), jadi ditandai juga
-        # dengan penanda titik supaya tetap terlihat di peta skala dunia.
-        lat_c = lat2[zona2].mean()
-        lon_c = lon2[zona2].mean()
-        ax.plot(lon_c, lat_c, marker="*", color="darkorange", markersize=14,
-                markeredgecolor="black", transform=ccrs.PlateCarree(), zorder=5)
-    else:
-        warna_zona, label_zona = "orange", "Zona memenuhi kriteria Muhammadiyah"
-
-    ax.contour(lon_mesh, lat_mesh, geo_alt_grid, levels=[5],
-               colors="blue", linewidths=1.5, transform=ccrs.PlateCarree())
-    ax.contour(lon_mesh, lat_mesh, elong_grid, levels=[8],
-               colors="red", linewidths=1.5, transform=ccrs.PlateCarree())
-    ax.contourf(lon_mesh, lat_mesh, no_sunset_masked.astype(int),
-                levels=[0.5, 1.5], colors=["dimgray"], alpha=0.3,
-                transform=ccrs.PlateCarree())
-    ax.contour(lon_mesh, lat_mesh, hours_utc_grid, levels=[0, 24],
-               colors="black", linewidths=1.8, linestyles="dashed",
-               transform=ccrs.PlateCarree())
-
-    if pkg1_terpenuhi:
-        status_teks = "PKG 1 & PKG 2 terpenuhi"
-    elif pkg2_terpenuhi:
-        status_teks = "PKG 1 tidak terpenuhi — fallback ke PKG 2: terpenuhi"
-    else:
-        status_teks = "PKG 1 & PKG 2 tidak terpenuhi"
-
-    ax.set_title(f"Peta Kriteria Muhammadiyah — Elongasi ≥8° & Tinggi Hilal ≥5° (Geosentris)\n"
-                 f"{tanggal.strftime('%d %B %Y')}  —  {status_teks}",
-                 fontsize=12, pad=14)
-
-    legend_elems_muh = [
-        plt.Line2D([0], [0], color="blue", lw=1.5, label="Tinggi hilal geosentris = 5°"),
-        plt.Line2D([0], [0], color="red", lw=1.5, label="Elongasi geosentris = 8°"),
-        plt.Line2D([0], [0], color="black", lw=1.8, linestyle="dashed",
-                   label="Batas cutoff (sunset di luar rentang UTC 0-24\ntanggal target) — batas PKG 1"),
-        plt.Rectangle((0, 0), 1, 1, fc=warna_zona, alpha=0.45, label=label_zona),
-        plt.Rectangle((0, 0), 1, 1, fc="dimgray", alpha=0.3, label="Tidak ada sunset"),
-    ]
-    ax.legend(handles=legend_elems_muh, loc="upper left", bbox_to_anchor=(1.01, 1.0),
-              borderaxespad=0, fontsize=9, framealpha=0.9)
-
-    # --- Catatan status PKG 2 (hanya ditampilkan kalau PKG 1 tidak terpenuhi) ---
-    if not pkg1_terpenuhi:
-        baris = []
-        if waktu_fajar_nz is not None:
-            cek = "OK" if pkg2_ijtimak_ok else "TIDAK terpenuhi"
-            baris.append(f"Ijtimak {waktu_ijtimak.strftime('%d %b %Y %H:%M')} UTC vs "
-                         f"fajar NZ {waktu_fajar_nz.strftime('%d %b %Y %H:%M')} UTC -> {cek}")
-        else:
-            baris.append("Waktu fajar NZ tidak dapat dihitung.")
-        if hasil_pkg2 is not None:
-            ket = "terpenuhi" if hasil_pkg2["ditemukan"] else "TIDAK terpenuhi"
-            tahap = hasil_pkg2["tahap"]
-            baris.append(f"Kriteria 5°/8° di daratan utama Amerika: {ket} "
-                         f"(pencarian tahap {tahap}, resolusi "
-                         f"{f'adaptif {RES_KASAR_PKG2:g}°/{RES_HALUS_ZONA_SEMPIT_PKG2:g}°' if tahap == 1 else '0.25°'})")
-        else:
-            baris.append("Kriteria 5°/8° di daratan utama Amerika: tidak dapat diperiksa.")
-        catatan = "Cek syarat PKG 2:\n" + "\n".join(baris)
-        fig.text(0.01, 0.01, catatan, fontsize=8, va="bottom", ha="left",
-                  color="dimgray", wrap=True)
-
-    # fig.tight_layout() dihapus -- sudah digantikan constrained_layout=True
-    # di plt.figure() saat pembuatan figure (hipotesa: tight_layout() memicu
-    # render-pass tambahan yang lebih mahal saat berinteraksi dgn GeoAxes
-    # cartopy dibanding constrained_layout yg terintegrasi ke layout engine).
-    return fig
 
 
 # =========================================================

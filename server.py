@@ -500,15 +500,35 @@ def api_peta():
 
                 if pkg1:
                     warna, label = "#e08a2e", "Zona memenuhi kriteria (PKG 1 & PKG 2 terpenuhi)"
-                    zona_kriteria = _zona_geojson(ax_tmp, lon_mesh, lat_mesh, evaluasi["zona_pkg1"])
+                    titik_pertama_raw = hw._cari_2_titik_pertama_muhammadiyah(tanggal, 0.0)
+                    titik_pertama_list = []
+                    for tp in titik_pertama_raw:
+                        tp_item = dict(tp)
+                        tp_item["lat_dms"] = hw.format_dms(tp["lat"], "lat")
+                        tp_item["lon_dms"] = hw.format_dms(tp["lon"], "lon")
+                        titik_pertama_list.append(tp_item)
+                    if titik_pertama_list:
+                        grids_muh = hw._injeksi_titik_pertama_ke_grid(grids, titik_pertama_list, tanggal)
+                        lon_mesh, lat_mesh = grids_muh["lon_mesh"], grids_muh["lat_mesh"]
+                        geo_alt_grid = grids_muh["geo_alt_grid"]
+                        elong_grid = grids_muh["elong_grid"]
+                        hours_utc_grid = grids_muh["hours_utc_grid"]
+                        zona_m = (elong_grid >= 8) & (geo_alt_grid >= 5) & (hours_utc_grid >= 0.0) & (hours_utc_grid <= 24.0)
+                        zona_kriteria = _zona_geojson(ax_tmp, lon_mesh, lat_mesh, zona_m)
+                    else:
+                        zona_kriteria = _zona_geojson(ax_tmp, lon_mesh, lat_mesh, evaluasi["zona_pkg1"])
                 elif pkg2:
                     warna, label = "#e8c04a", "Zona memenuhi PKG 2 (fallback, daratan utama Amerika)"
                     hasil_pkg2 = evaluasi["hasil_pkg2"]
                     lon2, lat2, zona2 = hasil_pkg2["lon_mesh"], hasil_pkg2["lat_mesh"], hasil_pkg2["zona"]
                     zona_kriteria = _zona_geojson(ax_tmp, lon2, lat2, zona2)
                     if np.any(zona2):
-                        titik_pkg2 = {"lat": round(float(lat2[zona2].mean()), 3),
-                                      "lon": round(float(lon2[zona2].mean()), 3)}
+                        lat_c_mean = float(lat2[zona2].mean())
+                        lon_c_mean = float(lon2[zona2].mean())
+                        titik_pkg2 = {"lat": round(lat_c_mean, 3),
+                                      "lon": round(lon_c_mean, 3),
+                                      "lat_dms": hw.format_dms(lat_c_mean, "lat"),
+                                      "lon_dms": hw.format_dms(lon_c_mean, "lon")}
                 else:
                     warna, label = "#e08a2e", "Zona memenuhi kriteria Muhammadiyah"
                     zona_kriteria = None
@@ -545,6 +565,7 @@ def api_peta():
                     "label_zona": label,
                     "zona_kriteria": zona_kriteria,
                     "titik_pkg2": titik_pkg2,
+                    "titik_pertama_list": titik_pertama_list if pkg1 else [],
                     "kontur_alt5": _garis_geojson(ax_tmp, lon_mesh, lat_mesh, geo_alt_grid, 5),
                     "kontur_elong8": _garis_geojson(ax_tmp, lon_mesh, lat_mesh, elong_grid, 8),
                     "zona_no_sunset": _zona_geojson(ax_tmp, lon_mesh, lat_mesh, evaluasi["no_sunset_masked"]),
@@ -552,6 +573,30 @@ def api_peta():
                     "status_teks": status_teks,
                     "catatan_pkg2": catatan_pkg2,
                 }
+
+                # --- Kesimpulan awal bulan Hijriyah ---
+                kesimpulan = None
+                jd_ij = hw.julian_day(waktu_ijtimak.year, waktu_ijtimak.month,
+                                       waktu_ijtimak.day + (waktu_ijtimak.hour
+                                                             + waktu_ijtimak.minute / 60.0
+                                                             + waktu_ijtimak.second / 3600.0) / 24.0)
+                tahun_h, bulan_h = hw._cari_label_hijriyah_urfi(jd_ij)
+                nama_bulan_baru = hw._NAMA_BULAN_HIJRIYAH[bulan_h - 1]
+                tahun_baru_h = tahun_h
+                _NAMA_HARI = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Ahad"]
+                if pkg1 or pkg2:
+                    awal_bulan = tanggal + timedelta(days=1)
+                    nama_hari = _NAMA_HARI[awal_bulan.weekday()]
+                    kesimpulan = (
+                        f"Awal bulan {nama_bulan_baru} {tahun_baru_h} H "
+                        f"jatuh pada {nama_hari}, {awal_bulan.strftime('%d %B %Y')}"
+                    )
+                else:
+                    kesimpulan = (
+                        f"Kriteria visibilitas hilal {nama_bulan_baru} {tahun_baru_h} H "
+                        f"tidak terpenuhi pada {tanggal.strftime('%d %B %Y')}"
+                    )
+
             return {
                 "ok": True,
                 "mode": mode,
@@ -562,6 +607,7 @@ def api_peta():
                     "pkg2_terpenuhi": bool(evaluasi.get("pkg2_terpenuhi")),
                     "pkg2_ijtimak_ok": bool(evaluasi.get("pkg2_ijtimak_ok")) if evaluasi.get("pkg2_ijtimak_ok") is not None else None,
                 },
+                "kesimpulan": kesimpulan,
                 "mabims": mabims,
                 "muhammadiyah": muhammadiyah,
             }
