@@ -506,6 +506,12 @@ def api_peta():
                         tp_item = dict(tp)
                         tp_item["lat_dms"] = hw.format_dms(tp["lat"], "lat")
                         tp_item["lon_dms"] = hw.format_dms(tp["lon"], "lon")
+                        tot_sec = round(tp["jam"] * 3600)
+                        jj = (tot_sec // 3600) % 24
+                        mm = (tot_sec % 3600) // 60
+                        ss = tot_sec % 60
+                        tp_item["ghurub_utc"] = f"{jj:02d}:{mm:02d}:{ss:02d}"
+                        tp_item["jam_teks"] = f"{jj:02d}:{mm:02d}:{ss:02d} UTC"
                         titik_pertama_list.append(tp_item)
                     if titik_pertama_list:
                         grids_muh = hw._injeksi_titik_pertama_ke_grid(grids, titik_pertama_list, tanggal)

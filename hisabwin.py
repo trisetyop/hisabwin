@@ -1955,55 +1955,46 @@ def hitung_grid_ringan(tanggal, progress_cb=lambda msg: None, lat_range=None, lo
     dt0 = delta_t_detik(tanggal.year, tanggal.month)
     jd0 = julian_day(tanggal.year, tanggal.month, tanggal.day + 0.5)
     T0 = (jd0 + dt0 / 86400.0 - 2451545.0) / 36525.0
-    _, dec_sun0, _, _ = posisi_matahari(np.array([T0]))
+    _, dec_sun0, _, R_au0 = posisi_matahari(np.array([T0]))
     dec_rad = np.radians(dec_sun0[0])
     lat_rad = np.radians(lats)
 
-    h0_rad = np.radians(-0.8333)
-    cos_h = (np.sin(h0_rad) - np.sin(lat_rad) * np.sin(dec_rad)) / (np.cos(lat_rad) * np.cos(dec_rad))
-    valid_mask = (cos_h >= -1.0) & (cos_h <= 1.0)
+    sd_sun0 = (959.63 / 3600.0) / R_au0[0]
+    h0_deg = -(34.0 / 60.0 + sd_sun0)
+    h0_rad = np.radians(h0_deg)
+
+    denom = np.cos(lat_rad) * np.cos(dec_rad)
+    cos_h = np.where(np.abs(denom) > 1e-12, (np.sin(h0_rad) - np.sin(lat_rad) * np.sin(dec_rad)) / denom, np.nan)
+    valid_mask = (~np.isnan(cos_h)) & (cos_h >= -1.0) & (cos_h <= 1.0)
     valid_indices = np.where(valid_mask)[0]
 
     precise_sunset_hours = np.full(N, np.nan)
     eot_jam = equation_of_time_menit(tanggal) / 60.0
 
-    progress_cb(f"2/4 (ringan): Mengevaluasi jendela waktu ekstrem untuk {len(valid_indices)} titik "
-                f"(batch, tanpa loop Python)...")
+    progress_cb(f"2/4 (ringan): Mengevaluasi waktu sunset eksak untuk {len(valid_indices)} titik "
+                f"(batch Newton-Raphson)...")
 
-    n_window = 5
     idx = valid_indices
     M = len(idx)
 
     if M > 0:
-        h_rad = np.arccos(cos_h[idx])
+        h_rad = np.arccos(np.clip(cos_h[idx], -1.0, 1.0))
         h_hours = np.degrees(h_rad) / 15.0
         sunset_utc_guess = 12.0 - eot_jam - (lons[idx] / 15.0) + h_hours
 
-        offsets = np.linspace(-0.33, 0.33, n_window)
-        t_window_2d = sunset_utc_guess[:, None] + offsets[None, :]
+        t_curr = sunset_utc_guess.copy()
+        lat_v = lats[idx]
+        lon_v = lons[idx]
+        for _ in range(3):
+            alt_now = _alt_matahari_saja(tanggal, t_curr, lat_v, lon_v)
+            dt_step = 1e-4
+            alt_step = _alt_matahari_saja(tanggal, t_curr + dt_step, lat_v, lon_v)
+            d_alt = (alt_step - alt_now) / dt_step
+            diff = alt_now - h0_deg
+            d_alt_safe = np.where(np.abs(d_alt) < 1e-6, -15.0, d_alt)
+            t_curr = t_curr - diff / d_alt_safe
 
-        lat_rep = np.repeat(lats[idx], n_window)
-        lon_rep = np.repeat(lons[idx], n_window)
-        t_flat = t_window_2d.ravel()
-
-        alt_sun_flat = _alt_matahari_saja(tanggal, t_flat, lat_rep, lon_rep)
-        alts_2d = alt_sun_flat.reshape(M, n_window)
-
-        is_above = alts_2d > -0.8333
-        crossings = is_above[:, :-1] & ~is_above[:, 1:]
-        has_cross = crossings.any(axis=1)
-        first_cross = np.argmax(crossings, axis=1)
-
-        rows = np.where(has_cross)[0]
-        c = first_cross[rows]
-
-        alt1 = alts_2d[rows, c]
-        alt2 = alts_2d[rows, c + 1]
-        t1 = t_window_2d[rows, c]
-        t2 = t_window_2d[rows, c + 1]
-
-        fraction = (-0.8333 - alt1) / (alt2 - alt1)
-        precise_sunset_hours[idx[rows]] = t1 + fraction * (t2 - t1)
+        precise_sunset_hours[idx] = t_curr
 
     final_valid_locs = np.where(~np.isnan(precise_sunset_hours))[0]
 
@@ -2427,55 +2418,72 @@ def _hitung_titik_flat(tanggal, ts, eph, lats, lons, mode="jpl"):
         dt0 = delta_t_detik(tanggal.year, tanggal.month)
         jd0 = julian_day(tanggal.year, tanggal.month, tanggal.day + 0.5)
         T0 = (jd0 + dt0 / 86400.0 - 2451545.0) / 36525.0
-        _, dec_sun0, _, _ = posisi_matahari(np.array([T0]))
+        _, dec_sun0, _, R_au0 = posisi_matahari(np.array([T0]))
         dec_rad = np.radians(dec_sun0[0])
+        sd_sun0 = (959.63 / 3600.0) / R_au0[0]
+        h0_deg = -(34.0 / 60.0 + sd_sun0)
     else:
         sun, moon, earth = eph['sun'], eph['moon'], eph['earth']
         t_ref = ts.utc(tanggal.year, tanggal.month, tanggal.day, 12)
-        _, dec, _ = earth.at(t_ref).observe(sun).apparent().radec()
+        _, dec, dist = earth.at(t_ref).observe(sun).apparent().radec()
         dec_rad = dec.radians
+        R_au0 = dist.au
+        sd_sun0 = (959.63 / 3600.0) / R_au0
+        h0_deg = -(34.0 / 60.0 + sd_sun0)
 
     lat_rad = np.radians(lats)
-    h0_rad = np.radians(-0.8333)
-    cos_h = (np.sin(h0_rad) - np.sin(lat_rad) * np.sin(dec_rad)) / (np.cos(lat_rad) * np.cos(dec_rad))
-    valid_mask = (cos_h >= -1.0) & (cos_h <= 1.0)
+    h0_rad = np.radians(h0_deg)
+    denom = np.cos(lat_rad) * np.cos(dec_rad)
+    cos_h = np.where(np.abs(denom) > 1e-12, (np.sin(h0_rad) - np.sin(lat_rad) * np.sin(dec_rad)) / denom, np.nan)
+    valid_mask = (~np.isnan(cos_h)) & (cos_h >= -1.0) & (cos_h <= 1.0)
     idx = np.where(valid_mask)[0]
     M = len(idx)
     if M == 0:
         return elong, alt, geo_alt, hours_utc
 
     eot_jam = equation_of_time_menit(tanggal) / 60.0
-    h_hours = np.degrees(np.arccos(cos_h[idx])) / 15.0
+    h_hours = np.degrees(np.arccos(np.clip(cos_h[idx], -1.0, 1.0))) / 15.0
     sunset_utc_guess = 12.0 - eot_jam - (lons[idx] / 15.0) + h_hours
 
-    n_window = 5
-    offsets = np.linspace(-0.33, 0.33, n_window)
-    t_window_2d = sunset_utc_guess[:, None] + offsets[None, :]
-    lat_rep = np.repeat(lats[idx], n_window)
-    lon_rep = np.repeat(lons[idx], n_window)
-    t_flat = t_window_2d.ravel()
+    precise_sunset_hours = np.full(N, np.nan)
 
     if mode == "ringan":
-        alt_sun_flat = _alt_matahari_saja(tanggal, t_flat, lat_rep, lon_rep)
+        t_curr = sunset_utc_guess.copy()
+        lat_v = lats[idx]
+        lon_v = lons[idx]
+        for _ in range(3):
+            alt_now = _alt_matahari_saja(tanggal, t_curr, lat_v, lon_v)
+            dt_step = 1e-4
+            alt_step = _alt_matahari_saja(tanggal, t_curr + dt_step, lat_v, lon_v)
+            d_alt = (alt_step - alt_now) / dt_step
+            diff = alt_now - h0_deg
+            d_alt_safe = np.where(np.abs(d_alt) < 1e-6, -15.0, d_alt)
+            t_curr = t_curr - diff / d_alt_safe
+        precise_sunset_hours[idx] = t_curr
     else:
+        n_window = 5
+        offsets = np.linspace(-0.33, 0.33, n_window)
+        t_window_2d = sunset_utc_guess[:, None] + offsets[None, :]
+        lat_rep = np.repeat(lats[idx], n_window)
+        lon_rep = np.repeat(lons[idx], n_window)
+        t_flat = t_window_2d.ravel()
+
         t_micro_all = ts.utc(tanggal.year, tanggal.month, tanggal.day, t_flat)
         topo_all = wgs84.latlon(lat_rep, lon_rep)
         alt_sun_ap, _, _ = (earth + topo_all).at(t_micro_all).observe(sun).apparent().altaz()
         alt_sun_flat = alt_sun_ap.degrees
 
-    alts_2d = alt_sun_flat.reshape(M, n_window)
-    is_above = alts_2d > -0.8333
-    crossings = is_above[:, :-1] & ~is_above[:, 1:]
-    has_cross = crossings.any(axis=1)
-    first_cross = np.argmax(crossings, axis=1)
-    rows = np.where(has_cross)[0]
-    c = first_cross[rows]
-    alt1, alt2 = alts_2d[rows, c], alts_2d[rows, c + 1]
-    t1, t2 = t_window_2d[rows, c], t_window_2d[rows, c + 1]
-    fraction = (-0.8333 - alt1) / (alt2 - alt1)
-
-    precise_sunset_hours = np.full(N, np.nan)
-    precise_sunset_hours[idx[rows]] = t1 + fraction * (t2 - t1)
+        alts_2d = alt_sun_flat.reshape(M, n_window)
+        is_above = alts_2d > h0_deg
+        crossings = is_above[:, :-1] & ~is_above[:, 1:]
+        has_cross = crossings.any(axis=1)
+        first_cross = np.argmax(crossings, axis=1)
+        rows = np.where(has_cross)[0]
+        c = first_cross[rows]
+        alt1, alt2 = alts_2d[rows, c], alts_2d[rows, c + 1]
+        t1, t2 = t_window_2d[rows, c], t_window_2d[rows, c + 1]
+        fraction = (h0_deg - alt1) / (alt2 - alt1)
+        precise_sunset_hours[idx[rows]] = t1 + fraction * (t2 - t1)
 
     final_valid_locs = np.where(~np.isnan(precise_sunset_hours))[0]
     if len(final_valid_locs) == 0:
@@ -2499,14 +2507,12 @@ def _hitung_titik_flat(tanggal, ts, eph, lats, lons, mode="jpl"):
         elong[final_valid_locs] = geo_sun.separation_from(geo_moon).degrees
 
         topo_final = wgs84.latlon(lat_f, lon_f)
-        # temperature_C/pressure_mbar diisi -> Skyfield menerapkan refraksi
-        # atmosfer standar (formula Bennett) ke altitude toposentris Bulan.
-        # Sengaja TIDAK diisi utk altaz() Matahari (dipakai cuma sbg trigger
-        # sunset -0.8333 derajat, yang sudah baku mengasumsikan refraksi
-        # standar sendiri) -- lihat komentar di hitung_grid_jpl().
-        alt_moon, az_moon, d_moon = (earth + topo_final).at(t_sunsets).observe(moon).apparent().altaz(
-            temperature_C=10.0, pressure_mbar=1010.0)
-        alt[final_valid_locs] = alt_moon.degrees
+        # Gunakan altitude geometris murni dari Skyfield lalu tambahkan
+        # koreksi_refraksi() (formula Saemundsson) yang kontinu dan mulus,
+        # menghindari potongan keras (discontinuity/jump 0.65°) pada altaz()
+        # bawaan Skyfield saat alt <= -1.0° yang menyebabkan distorsi kontur.
+        alt_moon_geom, az_moon, d_moon = (earth + topo_final).at(t_sunsets).observe(moon).apparent().altaz()
+        alt[final_valid_locs] = alt_moon_geom.degrees + koreksi_refraksi(alt_moon_geom.degrees)
 
         ra, dec_moon, _ = geo_moon.radec(epoch='date')
         gast = t_sunsets.gast
@@ -2556,13 +2562,17 @@ def hitung_grid_jpl(tanggal, ts, eph, progress_cb=lambda msg: None, lat_range=No
     progress_cb("1/4: Menghitung 'clue' waktu terbenam dengan Trigonometri Bola...")
 
     t_ref = ts.utc(tanggal.year, tanggal.month, tanggal.day, 12)
-    _, dec, _ = earth.at(t_ref).observe(sun).apparent().radec()
+    _, dec, dist = earth.at(t_ref).observe(sun).apparent().radec()
     dec_rad = dec.radians
-    lat_rad = np.radians(lats)
+    R_au0 = dist.au
+    sd_sun0 = (959.63 / 3600.0) / R_au0
+    h0_deg = -(34.0 / 60.0 + sd_sun0)
 
-    h0_rad = np.radians(-0.8333)
-    cos_h = (np.sin(h0_rad) - np.sin(lat_rad) * np.sin(dec_rad)) / (np.cos(lat_rad) * np.cos(dec_rad))
-    valid_mask = (cos_h >= -1.0) & (cos_h <= 1.0)
+    lat_rad = np.radians(lats)
+    h0_rad = np.radians(h0_deg)
+    denom = np.cos(lat_rad) * np.cos(dec_rad)
+    cos_h = np.where(np.abs(denom) > 1e-12, (np.sin(h0_rad) - np.sin(lat_rad) * np.sin(dec_rad)) / denom, np.nan)
+    valid_mask = (~np.isnan(cos_h)) & (cos_h >= -1.0) & (cos_h <= 1.0)
     valid_indices = np.where(valid_mask)[0]
 
     precise_sunset_hours = np.full(N, np.nan)
@@ -2578,7 +2588,7 @@ def hitung_grid_jpl(tanggal, ts, eph, progress_cb=lambda msg: None, lat_range=No
     M = len(idx)
 
     if M > 0:
-        h_rad = np.arccos(cos_h[idx])
+        h_rad = np.arccos(np.clip(cos_h[idx], -1.0, 1.0))
         h_hours = np.degrees(h_rad) / 15.0
         sunset_utc_guess = 12.0 - eot_jam - (lons[idx] / 15.0) + h_hours
 
@@ -2595,7 +2605,7 @@ def hitung_grid_jpl(tanggal, ts, eph, progress_cb=lambda msg: None, lat_range=No
         alt, _, _ = (earth + topo_all).at(t_micro_all).observe(sun).apparent().altaz()
         alts_2d = alt.degrees.reshape(M, n_window)
 
-        is_above = alts_2d > -0.8333
+        is_above = alts_2d > h0_deg
         crossings = is_above[:, :-1] & ~is_above[:, 1:]
         has_cross = crossings.any(axis=1)
         first_cross = np.argmax(crossings, axis=1)
@@ -2608,7 +2618,7 @@ def hitung_grid_jpl(tanggal, ts, eph, progress_cb=lambda msg: None, lat_range=No
         t1 = t_window_2d[rows, c]
         t2 = t_window_2d[rows, c + 1]
 
-        fraction = (-0.8333 - alt1) / (alt2 - alt1)
+        fraction = (h0_deg - alt1) / (alt2 - alt1)
         precise_sunset_hours[idx[rows]] = t1 + fraction * (t2 - t1)
 
     final_valid_locs = np.where(~np.isnan(precise_sunset_hours))[0]
@@ -2629,13 +2639,12 @@ def hitung_grid_jpl(tanggal, ts, eph, progress_cb=lambda msg: None, lat_range=No
         elong_grid_1d[final_valid_locs] = geo_sun.separation_from(geo_moon).degrees
 
         topo_final = wgs84.latlon(lats[final_valid_locs], lons[final_valid_locs])
-        # Refraksi atmosfer standar (10°C, 1010 mbar) diterapkan Skyfield ke
-        # altitude toposentris Bulan -- lihat penjelasan lengkap di
-        # hitung_grid()/_hitung_titik_flat() untuk alasan kenapa altaz()
-        # Matahari di atas (variabel `alt`) sengaja dibiarkan tanpa refraksi.
-        alt_moon, az_moon, d_moon = (earth + topo_final).at(t_sunsets).observe(moon).apparent().altaz(
-            temperature_C=10.0, pressure_mbar=1010.0)
-        alt_grid_1d[final_valid_locs] = alt_moon.degrees
+        # Gunakan altitude geometris murni dari Skyfield lalu tambahkan
+        # koreksi_refraksi() (formula Saemundsson) yang kontinu dan mulus,
+        # menghindari potongan keras (discontinuity/jump 0.65°) pada altaz()
+        # bawaan Skyfield saat alt <= -1.0° yang menyebabkan distorsi kontur.
+        alt_moon_geom, az_moon, d_moon = (earth + topo_final).at(t_sunsets).observe(moon).apparent().altaz()
+        alt_grid_1d[final_valid_locs] = alt_moon_geom.degrees + koreksi_refraksi(alt_moon_geom.degrees)
 
         progress_cb("4/4: Menghitung tinggi hilal geosentris & jam UTC sunset (batch, tanpa loop)...")
 
@@ -2910,8 +2919,8 @@ def buat_figure_mabims(grids, tanggal):
     lon_mesh, lat_mesh = grids["lon_mesh"], grids["lat_mesh"]
     elong_grid, alt_grid = grids["elong_grid"], grids["alt_grid"]
 
-    fig = plt.figure(figsize=(13, 7.2), constrained_layout=True)
-    ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
+    fig = plt.figure(figsize=(11, 7.5))
+    ax = fig.add_axes([0.06, 0.22, 0.88, 0.64], projection=ccrs.PlateCarree())
     ax.set_extent([-180, 180, -90, 90], crs=ccrs.PlateCarree())
     # LAND/OCEAN dipatok .with_scale("110m") jg di sini utk konsisten/robust --
     # extent dunia [-180,180,-90,90] saat ini memang sudah otomatis resolve ke
@@ -2944,7 +2953,7 @@ def buat_figure_mabims(grids, tanggal):
 
     ax.set_title(f"Peta Kriteria MABIMS — Elongasi ≥6.4° & Tinggi Hilal ≥3° (Toposentris)\n"
                  f"{tanggal.strftime('%d %B %Y')}",
-                 fontsize=12, pad=14)
+                 fontsize=11, pad=10, fontweight="bold", color="#1f2937")
 
     legend_elems_mabims = [
         plt.Line2D([0], [0], color="blue", lw=1.5, label="Tinggi hilal = 3°"),
@@ -2952,12 +2961,8 @@ def buat_figure_mabims(grids, tanggal):
         plt.Rectangle((0, 0), 1, 1, fc="green", alpha=0.4, label="Zona memenuhi kriteria MABIMS"),
         plt.Rectangle((0, 0), 1, 1, fc="dimgray", alpha=0.3, label="Tidak ada sunset (siang/malam kutub)"),
     ]
-    ax.legend(handles=legend_elems_mabims, loc="upper left", bbox_to_anchor=(1.01, 1.0),
-              borderaxespad=0, fontsize=9, framealpha=0.9)
-    # fig.tight_layout() dihapus -- sudah digantikan constrained_layout=True
-    # di plt.figure() saat pembuatan figure (hipotesa: tight_layout() memicu
-    # render-pass tambahan yang lebih mahal saat berinteraksi dgn GeoAxes
-    # cartopy dibanding constrained_layout yg terintegrasi ke layout engine).
+    ax.legend(handles=legend_elems_mabims, loc="upper center", bbox_to_anchor=(0.5, -0.07),
+              ncol=2, borderaxespad=0, fontsize=8.5, framealpha=0.95)
     return fig
 
 
@@ -3406,73 +3411,101 @@ def evaluasi_pkg(grids, tanggal, waktu_ijtimak=None, ts=None, eph=None,
 def _titik_pada_terminator(tanggal, lat_arr, tau_target):
     """Untuk tiap lintang di lat_arr, cari BUJUR yg ghurub lokalnya persis
     jatuh di jam UTC 'tau_target' (skalar atau array sepanjang lat_arr),
-    lalu kembalikan (lon, elong, geo_alt) di titik itu -- mode ringan saja
-    (VSOP87+ELP2000, cukup presisi utk penanda referensi & jauh lebih murah
-    drpd JPL/skyfield per-titik).
+    lalu kembalikan (lon, elong, geo_alt) di titik itu secara analitik eksak
+    (tanpa interpolasi diskrit).
 
-    Tebakan awal bujur pakai relasi linier jam-ghurub~bujur yg sama dgn
-    yg dipakai hitung_grid_ringan/_hitung_titik_flat, lalu diperhalus 3x
-    iterasi Newton pakai _hitung_titik_flat (fungsi presisi yg SAMA yg
-    dipakai grid utama) supaya konsisten 1:1 dgn nilai di peta."""
+    Ghurub didefinisikan secara presisi saat piringan atas Matahari menyentuh
+    ufuk sejati dengan refraksi atmosfer standar 34' (34/60°) dan semi-diameter
+    Matahari AKTUAL hari itu berdasarkan jarak Bumi-Matahari (R_au):
+        alt_pusat_matahari = -(34/60 + sd_matahari_aktual)
+    """
     lat_arr = np.asarray(lat_arr, dtype=float)
     tau_target = np.broadcast_to(np.asarray(tau_target, dtype=float), lat_arr.shape).copy()
 
-    dt0 = delta_t_detik(tanggal.year, tanggal.month)
-    jd0 = julian_day(tanggal.year, tanggal.month, tanggal.day + 0.5)
-    T0 = (jd0 + dt0 / 86400.0 - 2451545.0) / 36525.0
-    _, dec_sun0, _, _ = posisi_matahari(np.array([T0]))
-    dec_rad = np.radians(dec_sun0[0])
+    tahun_a = np.full(tau_target.shape, tanggal.year, dtype=float)
+    bulan_a = np.full(tau_target.shape, tanggal.month, dtype=float)
+    hari_a = tanggal.day + tau_target / 24.0
+
+    jd_ut = julian_day(tahun_a, bulan_a, hari_a)
+    dt = delta_t_detik(tanggal.year, tanggal.month)
+    T = (jd_ut + dt / 86400.0 - 2451545.0) / 36525.0
+
+    ra_s, dec_s, _, R_au = posisi_matahari(T)
+    ra_m, dec_m, _, _, _, _ = posisi_bulan(T)
+    dpsi, deps = nutasi_singkat(T)
+    eps = (23.0 + 26.0 / 60.0 + 21.448 / 3600.0 - (46.8150 * T) / 3600.0) + deps
+    gast = gast_derajat(jd_ut, T, dpsi, eps)
+
+    sd_sun = (959.63 / 3600.0) / R_au
+    h0 = -(34.0 / 60.0 + sd_sun)
 
     lat_rad = np.radians(lat_arr)
-    h0_rad = np.radians(-0.8333)
-    cos_h = (np.sin(h0_rad) - np.sin(lat_rad) * np.sin(dec_rad)) / (np.cos(lat_rad) * np.cos(dec_rad))
-    valid = (cos_h >= -1.0) & (cos_h <= 1.0)
+    dec_rad = np.radians(dec_s)
+    h0_rad = np.radians(h0)
+
+    denom = np.cos(lat_rad) * np.cos(dec_rad)
+    cos_H = np.where(np.abs(denom) > 1e-12, (np.sin(h0_rad) - np.sin(lat_rad) * np.sin(dec_rad)) / denom, np.nan)
+    valid = (~np.isnan(cos_H)) & (cos_H >= -1.0) & (cos_H <= 1.0)
 
     lon = np.full(lat_arr.shape, np.nan)
-    if np.any(valid):
-        h_hours = np.degrees(np.arccos(cos_h[valid])) / 15.0
-        eot_jam = equation_of_time_menit(tanggal) / 60.0
-        lon[valid] = 15.0 * (12.0 - eot_jam + h_hours - tau_target[valid])
-
-        for _ in range(3):
-            ok = ~np.isnan(lon)
-            if not np.any(ok):
-                break
-            _, _, _, jam_now = _hitung_titik_flat(
-                tanggal, None, None, lat_arr[ok], lon[ok], mode="ringan")
-            koreksi = np.where(np.isnan(jam_now), 0.0, (jam_now - tau_target[ok]) * 15.0)
-            lon[ok] = lon[ok] + koreksi
-
-    ok = ~np.isnan(lon)
     elong = np.full(lat_arr.shape, np.nan)
     geo_alt = np.full(lat_arr.shape, np.nan)
-    if np.any(ok):
-        elong_f, _, geo_alt_f, _ = _hitung_titik_flat(
-            tanggal, None, None, lat_arr[ok], lon[ok], mode="ringan")
-        elong[ok] = elong_f
-        geo_alt[ok] = geo_alt_f
+
+    if np.any(valid):
+        H_deg = np.degrees(np.arccos(np.clip(cos_H[valid], -1.0, 1.0)))
+        # Terbenam (Sunset) -> sudut waktu barat (H > 0)
+        # LST = GAST + lon = ra_s + H_deg => lon = ra_s + H_deg - GAST
+        lon_v = ((ra_s[valid] + H_deg - gast[valid] + 180.0) % 360.0) - 180.0
+        lon[valid] = lon_v
+
+        lst_v = (gast[valid] + lon_v) % 360.0
+        H_moon = ((lst_v - ra_m[valid] + 180.0) % 360.0) - 180.0
+        geo_alt[valid] = altitude_geosentris(lat_arr[valid], dec_m[valid], H_moon)
+
+        cos_elong = (np.sin(dec_rad[valid]) * np.sin(np.radians(dec_m[valid]))
+                     + np.cos(dec_rad[valid]) * np.cos(np.radians(dec_m[valid]))
+                     * np.cos(np.radians(ra_s[valid] - ra_m[valid])))
+        elong[valid] = np.degrees(np.arccos(np.clip(cos_elong, -1.0, 1.0)))
+
     return lon, elong, geo_alt
 
 
 def _cari_tau_elongasi_8(tanggal, min_utc_hour, target=8.0):
     """Elongasi geosentris cuma fungsi WAKTU (tdk bergantung lat/lon sama
     sekali -- lihat _altaz_matahari_bulan: cuma pakai ra/dec Matahari &
-    Bulan). Jadi momen UTC global saat elongasi menembus 'target' derajat
-    dicari lewat SATU titik acuan (lintang 0, yg selalu ada ghurubnya),
-    dgn bujurnya diatur via _titik_pada_terminator supaya ghurubnya jatuh
-    pas di jam yg sedang diuji -- dibungkus bisection di 'tau'."""
+    Bulan). Momen UTC global saat elongasi menembus 'target' derajat dicari
+    via biseksi langsung pada waktu UTC 'tau'."""
     tau_scan = np.arange(min_utc_hour, 30.0, 0.1)
-    _, elong_scan, _ = _titik_pada_terminator(tanggal, np.zeros_like(tau_scan), tau_scan)
+    tahun_a = np.full(tau_scan.shape, tanggal.year, dtype=float)
+    bulan_a = np.full(tau_scan.shape, tanggal.month, dtype=float)
+    hari_a = tanggal.day + tau_scan / 24.0
+    jd_ut = julian_day(tahun_a, bulan_a, hari_a)
+    dt = delta_t_detik(tanggal.year, tanggal.month)
+    T = (jd_ut + dt / 86400.0 - 2451545.0) / 36525.0
+    ra_s, dec_s, _, _ = posisi_matahari(T)
+    ra_m, dec_m, _, _, _, _ = posisi_bulan(T)
+    cos_elong = (np.sin(np.radians(dec_s)) * np.sin(np.radians(dec_m))
+                 + np.cos(np.radians(dec_s)) * np.cos(np.radians(dec_m))
+                 * np.cos(np.radians(ra_s - ra_m)))
+    elong_scan = np.degrees(np.arccos(np.clip(cos_elong, -1.0, 1.0)))
     ok = ~np.isnan(elong_scan)
     naik = np.where(ok[:-1] & ok[1:] & (elong_scan[:-1] < target) & (elong_scan[1:] >= target))[0]
     if len(naik) == 0:
         return None
     i = naik[0]
     lo, hi = tau_scan[i], tau_scan[i + 1]
-    for _ in range(25):
+    for _ in range(30):
         mid = 0.5 * (lo + hi)
-        _, e_mid, _ = _titik_pada_terminator(tanggal, np.array([0.0]), np.array([mid]))
-        if np.isnan(e_mid[0]) or e_mid[0] < target:
+        hari_mid = np.array([tanggal.day + mid / 24.0])
+        jd_mid = julian_day(np.array([tanggal.year], dtype=float), np.array([tanggal.month], dtype=float), hari_mid)
+        T_mid = (jd_mid + dt / 86400.0 - 2451545.0) / 36525.0
+        ra_sm, dec_sm, _, _ = posisi_matahari(T_mid)
+        ra_mm, dec_mm, _, _, _, _ = posisi_bulan(T_mid)
+        cos_e = (np.sin(np.radians(dec_sm)) * np.sin(np.radians(dec_mm))
+                 + np.cos(np.radians(dec_sm)) * np.cos(np.radians(dec_mm))
+                 * np.cos(np.radians(ra_sm - ra_mm)))
+        e_mid = np.degrees(np.arccos(np.clip(cos_e[0], -1.0, 1.0)))
+        if e_mid < target:
             lo = mid
         else:
             hi = mid
@@ -3756,8 +3789,8 @@ def buat_figure_muhammadiyah(grids, tanggal, evaluasi):
         zona_pkg1 = np.where(cutoff_mask, muhammadiyah_zone, False)
         no_sunset_masked = np.isnan(geo_alt_grid)
 
-    fig = plt.figure(figsize=(13, 7.2), constrained_layout=True)
-    ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
+    fig = plt.figure(figsize=(11, 7.5))
+    ax = fig.add_axes([0.06, 0.22, 0.88, 0.64], projection=ccrs.PlateCarree())
     ax.set_extent([-180, 180, -90, 90], crs=ccrs.PlateCarree())
     ax.add_feature(cfeature.LAND.with_scale("110m"), facecolor="lightgray")
     ax.add_feature(cfeature.OCEAN.with_scale("110m"), facecolor="lightblue")
@@ -3803,7 +3836,7 @@ def buat_figure_muhammadiyah(grids, tanggal, evaluasi):
         plt.Line2D([0], [0], color="blue", lw=1.5, label="Tinggi hilal geosentris = 5°"),
         plt.Line2D([0], [0], color="red", lw=1.5, label="Elongasi geosentris = 8°"),
         plt.Line2D([0], [0], color="black", lw=1.8, linestyle="dashed",
-                   label="Batas cutoff (sunset di luar rentang UTC 0-24\ntanggal target) — batas PKG 1"),
+                   label="Batas cutoff (sunset di luar UTC 0-24) — batas PKG 1"),
         plt.Rectangle((0, 0), 1, 1, fc=warna_zona, alpha=0.45, label=label_zona),
         plt.Rectangle((0, 0), 1, 1, fc="dimgray", alpha=0.3, label="Tidak ada sunset"),
     ]
@@ -3813,20 +3846,23 @@ def buat_figure_muhammadiyah(grids, tanggal, evaluasi):
         for tp in titik_pertama_list:
             lat_p, lon_p, jam_p = tp["lat"], tp["lon"], tp["jam"]
             jenis = tp.get("jenis", "kriteria")
-            jj, mm = divmod(round(jam_p * 60), 60)
+            tot_sec = round(jam_p * 3600)
+            jj = (tot_sec // 3600) % 24
+            mm = (tot_sec % 3600) // 60
+            ss = tot_sec % 60
             dms_lat = format_dms(lat_p, "lat")
             dms_lon = format_dms(lon_p, "lon")
             if jenis in ("kriteria", "biseksi"):
-                prefix, warna, m_shape, label_pojok = "Titik pertama (biseksi analitik)", "yellow", "*", "★"
+                prefix, warna, m_shape, label_pojok = "Titik pertama (biseksi)", "yellow", "*", "★"
             elif jenis == "batas_65":
-                prefix, warna, m_shape, label_pojok = "Titik pertama (max 65° LU/LS)", "gold", "*", "★"
+                prefix, warna, m_shape, label_pojok = "Titik pertama (max 65°)", "gold", "*", "★"
             elif jenis in ("muhammadiyah", "khgt"):
-                prefix, warna, m_shape, label_pojok = "Titik pertama (KHGT Muhammadiyah)", "lime", "o", "●"
+                prefix, warna, m_shape, label_pojok = "Titik pertama (KHGT)", "lime", "o", "●"
             elif jenis == "gridmesh":
-                prefix, warna, m_shape, label_pojok = "Titik pertama (gridmesh 0.25°)", "lime", "o", "●"
+                prefix, warna, m_shape, label_pojok = "Titik pertama (grid)", "lime", "o", "●"
             else:
                 prefix, warna, m_shape, label_pojok = "Titik pertama (batas ghurub)", "lightgray", "*", "‡"
-            teks = f"{prefix}: {dms_lat}, {dms_lon}, ghurub {jj:02d}:{mm:02d} UTC"
+            teks = f"{prefix}: {dms_lat}, {dms_lon}, ghurub {jj:02d}:{mm:02d}:{ss:02d} UTC"
             ax.plot(lon_p, lat_p, marker=m_shape, color=warna, markersize=10 if m_shape == "o" else 15,
                     markeredgecolor="black", markeredgewidth=1.1,
                     transform=ccrs.PlateCarree(), zorder=6)
@@ -3843,10 +3879,13 @@ def buat_figure_muhammadiyah(grids, tanggal, evaluasi):
             tanggal, None, None, np.array([lat_c]), np.array([lon_c]), mode="ringan")
         jam_p = float(hours_utc_c[0])
         if not np.isnan(jam_p):
-            jj, mm = divmod(round(jam_p * 60), 60)
+            tot_sec = round(jam_p * 3600)
+            jj = (tot_sec // 3600) % 24
+            mm = (tot_sec % 3600) // 60
+            ss = tot_sec % 60
             dms_lat = format_dms(lat_c, "lat")
             dms_lon = format_dms(lon_c, "lon")
-            teks = f"Titik acuan PKG 2: {dms_lat}, {dms_lon}, ghurub {jj:02d}:{mm:02d} UTC"
+            teks = f"Titik acuan PKG 2: {dms_lat}, {dms_lon}, ghurub {jj:02d}:{mm:02d}:{ss:02d} UTC"
             legend_elems_muh.append(
                 plt.Line2D([0], [0], marker="*", color="w", markerfacecolor="darkorange",
                            markeredgecolor="black", markersize=12, linestyle="None",
@@ -3887,17 +3926,16 @@ def buat_figure_muhammadiyah(grids, tanggal, evaluasi):
 
     judul_utama = (f"Peta Kriteria Muhammadiyah — Elongasi ≥8° & Tinggi Hilal ≥5° (Geosentris)\n"
                    f"{tanggal.strftime('%d %B %Y')}  —  {status_teks}")
+    ax.set_title(judul_utama, fontsize=11, pad=10, fontweight="bold", color="#1f2937")
+
     if kesimpulan_teks:
         warna_kesimpulan = "darkgreen" if (pkg1_terpenuhi or pkg2_terpenuhi) else "darkred"
-        # Gunakan suptitle utk judul utama, ax.set_title utk kesimpulan
-        fig.suptitle(judul_utama, fontsize=12, y=0.98)
-        ax.set_title(kesimpulan_teks, fontsize=10, pad=8, fontweight="bold",
-                     color=warna_kesimpulan)
-    else:
-        ax.set_title(judul_utama, fontsize=12, pad=14)
+        fig.text(0.5, 0.965, kesimpulan_teks, fontsize=10.5, ha="center", va="top",
+                 fontweight="bold", color=warna_kesimpulan)
 
-    ax.legend(handles=legend_elems_muh, loc="upper left", bbox_to_anchor=(1.01, 1.0),
-              borderaxespad=0, fontsize=9, framealpha=0.9)
+    # Legenda di bawah peta (2 kolom, simetris dan rapi)
+    ax.legend(handles=legend_elems_muh, loc="upper center", bbox_to_anchor=(0.5, -0.07),
+              ncol=2, borderaxespad=0, fontsize=8.5, framealpha=0.95)
 
     # --- Catatan status PKG 2 (hanya ditampilkan kalau PKG 1 tidak terpenuhi) ---
     if not pkg1_terpenuhi:
@@ -8102,6 +8140,56 @@ def _cari_potong_turun_petang(jam_lokal, nilai):
     return None
 
 
+def hitung_kriteria_odeh(arcv, arcl, sd_bulan_arcmin=15.5):
+    """Menghitung parameter V Odeh (2004/2006) dan kategori visibilitas hilal.
+    arcv: ArcV (selisih tinggi Bulan - Matahari) dalam derajat desimal
+    arcl: ArcL (elongasi Bulan - Matahari) dalam derajat desimal
+    sd_bulan_arcmin: Semi-diameter Bulan dalam menit busur (') [default 15.5']
+
+    Returns dict:
+      "v": float atau None
+      "w": float atau None (lebar sabit dalam arcmin)
+      "kategori": str ('A', 'B', 'C', 'D', 'E' atau '-')
+      "keterangan": str
+      "singkatan": str (misal: "Mata (Jika Cerah)")
+    """
+    if arcv is None or arcl is None or np.isnan(arcv) or np.isnan(arcl):
+        return {"v": None, "w": None, "kategori": "-", "keterangan": "—", "singkatan": "—"}
+
+    arcl_rad = math.radians(arcl)
+    w = float(sd_bulan_arcmin * (1.0 - math.cos(arcl_rad)))
+    v = float(arcv - (-0.1018 * (w**3) + 0.7319 * (w**2) - 6.3226 * w + 7.1651))
+
+    if arcl < 6.4 or v < -3.96:
+        kat = "E"
+        ket = "Tidak mungkin terlihat (Danjon/Odeh Limit)"
+        singk = "Tidak Mungkin (E)"
+    elif v >= 5.65:
+        kat = "A"
+        ket = "Mudah dilihat mata telanjang"
+        singk = "Mudah (Mata)"
+    elif v >= 2.00:
+        kat = "B"
+        ket = "Terlihat mata telanjang jika cuaca cerah"
+        singk = "Mata (Jika Cerah)"
+    elif v >= -0.96:
+        kat = "C"
+        ket = "Terlihat dengan alat bantu (teleskop/binokuler)"
+        singk = "Perlu Teleskop"
+    else:
+        kat = "D"
+        ket = "Terlihat dengan teleskop + CCD/tracking"
+        singk = "Perlu CCD/Tracking"
+
+    return {
+        "v": v,
+        "w": w,
+        "kategori": kat,
+        "keterangan": ket,
+        "singkatan": singk,
+    }
+
+
 def simulasikan_hilal(profil, tanggal, zona_offset_jam, ts=None, eph=None,
                        mode="ringan", interval_menit=2):
     """Simulasikan posisi Matahari & Bulan sepanjang satu hari (tanggal,
@@ -8234,18 +8322,24 @@ def simulasikan_hilal(profil, tanggal, zona_offset_jam, ts=None, eph=None,
                 "az_matahari": None, "alt_matahari": None,
                 "az_bulan": None, "alt_bulan": None,
                 "daz": None, "arcv": None, "arcl": None, "fraksi_iluminasi": None,
+                "odeh": hitung_kriteria_odeh(None, None),
             }
         az_s, alt_s = _pada_jam(jam_g, az_sun), _pada_jam(jam_g, alt_sun)
         az_b, alt_b = _pada_jam(jam_g, az_moon), _pada_jam(jam_g, alt_moon)
         sd_g = _pada_jam(jam_g, sd_matahari_deg)
         lag_menit = ((jam_terbenam_bulan - jam_g) * 60.0
                      if jam_terbenam_bulan is not None else None)
+        daz_val = ((az_b - az_s + 180.0) % 360.0) - 180.0
+        arcv_val = alt_b - alt_s
+        arcl_val = _pada_jam(jam_g, elong)
+        odeh_res = hitung_kriteria_odeh(arcv_val, arcl_val)
         return {
             "label": label, "jam_ghurub": jam_g, "jam_terbenam_bulan": jam_terbenam_bulan,
             "lag_menit": lag_menit, "tinggi_hilal": tinggi_hilal, "sd_matahari": sd_g,
             "az_matahari": az_s, "alt_matahari": alt_s, "az_bulan": az_b, "alt_bulan": alt_b,
-            "daz": ((az_b - az_s + 180.0) % 360.0) - 180.0, "arcv": alt_b - alt_s,
-            "arcl": _pada_jam(jam_g, elong), "fraksi_iluminasi": _pada_jam(jam_g, frac_illum),
+            "daz": daz_val, "arcv": arcv_val,
+            "arcl": arcl_val, "fraksi_iluminasi": _pada_jam(jam_g, frac_illum),
+            "odeh": odeh_res,
         }
 
     # -- 1. Ufuk astronomis (datar 0 derajat) --
@@ -8429,6 +8523,8 @@ def buat_figure_simulasi_hilal(profil, hasil):
         cmap = plt.get_cmap("copper_r")
         n_sample = matriks_sudut.shape[1]
         y_floor_layer = min(y_min, float(matriks_sudut.min()) - 5.0)
+        # Landasan Cokelat Tembaga Senja di belakang kontur pegunungan (zorder=1)
+        ax.fill_between(azimuth, y_floor_layer, sudut_horizon, color="#6e5545", alpha=0.45, zorder=1)
         # Painter's algorithm: lapisan PALING JAUH digambar duluan, lapisan
         # makin dekat menutupi di atasnya -- efek pegunungan bertumpuk.
         for s_idx in range(n_sample - 1, -1, -1):
@@ -8441,7 +8537,7 @@ def buat_figure_simulasi_hilal(profil, hasil):
     else:
         h_topo, = ax.plot(azimuth, sudut_horizon, color=_GAYA_UFUK["topo"]["warna"], linewidth=1.2,
                            label="Ufuk topografi (cakrawala nyata)")
-        ax.fill_between(azimuth, sudut_horizon, y_min, color="#8B7355", alpha=0.6)
+        ax.fill_between(azimuth, y_min - 10, sudut_horizon, color="#6e5545", alpha=0.55, zorder=2)
 
     # Label nama gunung/puncak (spt di Profil Cakrawala) -- garis tegak
     # tipis dari kontur ke atas + nama miring, hanya utk puncak yg jatuh
@@ -8508,10 +8604,10 @@ def buat_figure_simulasi_hilal(profil, hasil):
               fontsize=7, framealpha=0.85, borderpad=0.5, handletextpad=0.4)
 
     # Bagian 2: tabel DATA ghurub — informatif, di bawah plot pakai fig.text().
-    # Disusun sbg tabel 7 kolom: Ufuk | Ghurub | Tinggi Hilal | DAZ | ArcV |
-    # ArcL | Iluminasi — 1 baris header + 3 baris data (astro/dip/topo).
-    kolom_x = [0.04, 0.19, 0.30, 0.47, 0.58, 0.69, 0.80]
-    header = ["Definisi Ufuk", "Ghurub", "Tinggi Hilal (DMS)", "DAZ", "ArcV", "ArcL", "Iluminasi"]
+    # Disusun sbg tabel 8 kolom: Ufuk | Ghurub | Tinggi Hilal | DAZ | ArcV |
+    # ArcL | Iluminasi | Kriteria Odeh — 1 baris header + 3 baris data (astro/dip/topo).
+    kolom_x = [0.03, 0.16, 0.26, 0.40, 0.48, 0.56, 0.64, 0.74]
+    header = ["Definisi Ufuk", "Ghurub", "Tinggi Hilal (DMS)", "DAZ", "ArcV", "ArcL", "Iluminasi", "Kriteria Odeh"]
     y_header = 0.155
     y_step = 0.028
 
@@ -8519,7 +8615,7 @@ def buat_figure_simulasi_hilal(profil, hasil):
         fig.text(kolom_x[ci], y_header, txt, fontsize=7.5, fontweight="bold",
                  va="top", ha="left", family="monospace")
     # Garis pemisah header
-    fig.text(0.04, y_header - 0.010, "─" * 105, fontsize=6, va="top",
+    fig.text(0.03, y_header - 0.010, "─" * 125, fontsize=6, va="top",
              ha="left", color="#9CA3AF", family="monospace")
 
     baris_ufuk = [("astro", "Astronomis (0°)"), ("dip", f"Dip ({dip_derajat:.2f}°)"),
@@ -8534,6 +8630,8 @@ def buat_figure_simulasi_hilal(profil, hasil):
             fig.text(kolom_x[1], y_baris, "— tidak terbenam —", fontsize=7,
                      va="top", ha="left", color="#6B7280")
             continue
+        odeh_info = g.get("odeh", {})
+        odeh_str = odeh_info.get("singkatan", "—")
         vals = [
             nama_ufuk,
             _label_jam_hhmm(g["jam_ghurub"]),
@@ -8542,6 +8640,7 @@ def buat_figure_simulasi_hilal(profil, hasil):
             f"{g['arcv']:+.2f}°",
             f"{g['arcl']:.2f}°",
             f"{g['fraksi_iluminasi']:.1f}%" if g.get("fraksi_iluminasi") is not None else "—",
+            odeh_str,
         ]
         for ci, txt in enumerate(vals):
             fw = "bold" if ci == 0 else "normal"

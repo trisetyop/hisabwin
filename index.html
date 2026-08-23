@@ -1438,6 +1438,21 @@ function bangunLayerMuhammadiyah(mu){
   gambarGaris(layerMuhammadiyah, mu.kontur_alt5, '#4d8fe0', false);
   gambarGaris(layerMuhammadiyah, mu.kontur_elong8, '#e05a4d', false);
   gambarGaris(layerMuhammadiyah, mu.kontur_cutoff, '#eef1f6', true);
+  if(mu.titik_pertama_list && mu.titik_pertama_list.length > 0){
+    mu.titik_pertama_list.forEach(tp => {
+      const isKhgt = (tp.jenis === 'muhammadiyah' || tp.jenis === 'khgt');
+      const iconHtml = isKhgt
+        ? '<div style="color:#00ff00;font-size:20px;text-shadow:0 0 4px #000;cursor:pointer;">●</div>'
+        : '<div style="color:#ffff00;font-size:22px;text-shadow:0 0 4px #000;cursor:pointer;">★</div>';
+      const label = isKhgt
+        ? 'Titik pertama (KHGT Muhammadiyah)'
+        : (tp.jenis === 'batas_ghurub' ? 'Titik pertama (batas ghurub)' : 'Titik pertama (biseksi analitik)');
+      const popupText = `<b>${label}</b><br>Lintang: ${tp.lat_dms || tp.lat}<br>Bujur: ${tp.lon_dms || tp.lon}<br>Ghurub: ${tp.jam_teks || (tp.ghurub_utc ? tp.ghurub_utc + ' UTC' : '')}`;
+      L.marker([tp.lat, tp.lon], {
+        icon: L.divIcon({ className: '', html: iconHtml, iconSize:[22,22], iconAnchor:[11,11] })
+      }).bindPopup(popupText).addTo(layerMuhammadiyah);
+    });
+  }
   if(mu.titik_pkg2){
     L.marker([mu.titik_pkg2.lat, mu.titik_pkg2.lon], {
       icon: L.divIcon({ className: '', html: '<div style="color:#e8c04a;font-size:22px;text-shadow:0 0 4px #000;">★</div>',
@@ -3199,6 +3214,16 @@ function labelJamHHMM(jamDesimal){
   if(m === 60){ m = 0; h = (h + 1) % 24; }
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
+
+function labelJamHHMMSS(jamDesimal){
+  if(jamDesimal == null) return '—';
+  let totalSec = Math.round((((jamDesimal % 24) + 24) % 24) * 3600);
+  if(totalSec >= 86400) totalSec -= 86400;
+  let h = Math.floor(totalSec / 3600);
+  let m = Math.floor((totalSec % 3600) / 60);
+  let s = totalSec % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
 function fmtSigned(v){ return v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(2); }
 
 // ---- Fungsi utama: port dari simulasikan_hilal() ----
@@ -3275,6 +3300,33 @@ function simulasikanHilal(profil, tabel, zonaOffsetJam){
   };
 }
 
+function hitungKriteriaOdeh(arcv, arcl, sdBulanArcmin = 15.5){
+  if(arcv == null || arcl == null || isNaN(arcv) || isNaN(arcl)){
+    return { v: null, w: null, kategori: '-', keterangan: '—', singkatan: '—' };
+  }
+  const arclRad = arcl * Math.PI / 180.0;
+  const w = sdBulanArcmin * (1.0 - Math.cos(arclRad));
+  const v = arcv - (-0.1018 * Math.pow(w, 3) + 0.7319 * Math.pow(w, 2) - 6.3226 * w + 7.1651);
+  let kat = '', ket = '', singk = '';
+  if(arcl < 6.4 || v < -3.96){
+    kat = 'E'; ket = 'Tidak mungkin terlihat (Danjon/Odeh Limit)';
+    singk = 'Tidak Mungkin (E)';
+  } else if(v >= 5.65){
+    kat = 'A'; ket = 'Mudah dilihat mata telanjang';
+    singk = 'Mudah (Mata)';
+  } else if(v >= 2.00){
+    kat = 'B'; ket = 'Terlihat mata telanjang jika cuaca cerah';
+    singk = 'Mata (Jika Cerah)';
+  } else if(v >= -0.96){
+    kat = 'C'; ket = 'Terlihat dengan alat bantu (teleskop/binokuler)';
+    singk = 'Perlu Teleskop';
+  } else {
+    kat = 'D'; ket = 'Terlihat dengan teleskop + CCD/tracking';
+    singk = 'Perlu CCD/Tracking';
+  }
+  return { v, w, kategori: kat, keterangan: ket, singkatan: singk };
+}
+
 function renderRingkasanGhurubHtml(hasil){
   const urutan = [
     ['astro', 'Astronomis (0°)'],
@@ -3286,21 +3338,25 @@ function renderRingkasanGhurubHtml(hasil){
     const g = hasil.ghurub[k];
     const warna = GAYA_UFUK[k].warna;
     if(g.jamGhurub == null){
-      rows += `<tr><td style="color:${warna};font-weight:700;">${nama}</td><td colspan="6" style="color:#6B7280;">— tidak terbenam hari ini —</td></tr>`;
+      rows += `<tr><td style="color:${warna};font-weight:700;">${nama}</td><td colspan="7" style="color:#6B7280;">— tidak terbenam hari ini —</td></tr>`;
       continue;
     }
+    const odeh = (g.odeh && g.odeh.singkatan) ? g.odeh : hitungKriteriaOdeh(g.arcv, g.arcl);
+    const odehStr = odeh.singkatan || '—';
+    const odehKet = odeh.keterangan || '';
     rows += `<tr>
       <td style="color:${warna};font-weight:700;">${nama}</td>
-      <td>${labelJamHHMM(g.jamGhurub)}</td>
+      <td>${labelJamHHMMSS(g.jamGhurub)}</td>
       <td>${fmtSigned(g.tinggiHilal)}°</td>
       <td>${fmtSigned(g.daz)}°</td>
       <td>${fmtSigned(g.arcv)}°</td>
       <td>${g.arcl != null ? g.arcl.toFixed(2) : '—'}°</td>
       <td>${g.fraksiIluminasi != null ? g.fraksiIluminasi.toFixed(1) + '%' : '—'}</td>
+      <td title="${odehKet}" style="font-weight:600;color:#1e3a8a;">${odehStr}</td>
     </tr>`;
   }
   return `<table class="tabel-sholat">
-    <thead><tr><th>Definisi Ufuk</th><th>Ghurub</th><th>Tinggi Hilal</th><th>DAZ</th><th>ArcV</th><th>ArcL</th><th>Iluminasi</th></tr></thead>
+    <thead><tr><th>Definisi Ufuk</th><th>Ghurub</th><th>Tinggi Hilal</th><th>DAZ</th><th>ArcV</th><th>ArcL</th><th>Iluminasi</th><th>Kriteria Odeh</th></tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
 }
@@ -3372,11 +3428,11 @@ function renderSimulasiHilalSvg(profil, hasil, modeView = 'siluet'){
   if(modeView === 'ridge'){
     if(!hasLayers){
       warningBanner = `<rect x="${padL}" y="${padT + 4}" width="${plotW}" height="24" fill="#fff3cd" rx="4"/><text x="${W / 2}" y="${padT + 20}" font-size="11" fill="#856404" font-weight="600" text-anchor="middle">Profil ini belum memiliki data Ridge Line (dibuat versi lama). Hitung ulang profil untuk melihat Ridge Line.</text>`;
-      terrainSvg = `<polygon points="${ptsArea}" fill="#8B7355" opacity="0.55"/>`;
+      terrainSvg = `<polygon points="${ptsArea}" fill="#6e5545" opacity="0.55"/>`;
     } else {
       const nSample = profil.matriksJarakKm.length;
       const nAzimuth = azimuth.length;
-      let layersHtml = '';
+      let layersHtml = `<polygon points="${ptsArea}" fill="#6e5545" opacity="0.45"/>`;
       for(let sIdx = nSample - 1; sIdx >= 0; sIdx--){
         const t = sIdx / Math.max(1, nSample - 1);
         const color = getCopperRColor(t);
@@ -3397,7 +3453,7 @@ function renderSimulasiHilalSvg(profil, hasil, modeView = 'siluet'){
       terrainSvg = layersHtml;
     }
   } else {
-    terrainSvg = `<polygon points="${ptsArea}" fill="#8B7355" opacity="0.55"/>`;
+    terrainSvg = `<polygon points="${ptsArea}" fill="#6e5545" opacity="0.55"/>`;
   }
 
   let gridSvg = '';
