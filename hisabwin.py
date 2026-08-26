@@ -7924,7 +7924,7 @@ def ekspor_profil_ke_stellarium(profil, path_zip, nama_lokasi=None, penulis="His
 
 def ekspor_profil_ke_stellarium_panorama(
         profil, path_zip, nama_lokasi=None, penulis="HisabWin",
-        lebar_px=4096, margin_atas_derajat=8.0, alt_bawah=-30.0):
+        lebar_px=8192, margin_atas_derajat=8.0, alt_bawah=-30.0):
     """Companion dari ekspor_profil_ke_stellarium() di atas -- versi ini
     mengekspor landscape Stellarium tipe "spherical" (tekstur panorama
     equirectangular), BUKAN "polygonal", supaya efek RIDGE LINE BERLAPIS
@@ -7943,18 +7943,25 @@ def ekspor_profil_ke_stellarium_panorama(
       bisa "dilukis" jadi PNG lalu dipakai sebagai tekstur ground itu
       sendiri.
 
-    WAKTU TERBIT/TERBENAM TETAP PRESISI:
-      landscape.ini di bawah TETAP menyertakan polygonal_horizon_list =
-      horizon.txt (siluet gabungan/union tertinggi tiap azimuth, PERSIS
-      sama dengan yang dipakai ekspor_profil_ke_stellarium() di atas) DI
-      SAMPING tekstur panorama -- Stellarium mendukung kombinasi
-      "type=spherical + maptex=... + polygonal_horizon_list=..." sekaligus
-      (dipakai jg oleh landscape pihak ketiga, mis. contoh "LMJOBStransp"
-      di forum resmi Stellarium): tekstur cuma dipakai utk RENDER VISUAL,
-      sedangkan query rise/set presisi tetap pakai horizon.txt, bukan
-      hasil baca piksel tekstur. Jadi walau tampilan jadi berlapis, jam
-      ghurub yang dihitung Stellarium tetap identik dengan
-      ekspor_profil_ke_stellarium() versi polygonal biasa.
+    TIDAK ADA LAGI GABUNGAN POLIGON+PANORAMA:
+      Versi lama landscape.ini ini MENGGABUNGKAN "type=spherical" (tekstur)
+      DENGAN "polygonal_horizon_list" (horizon.txt, dibaca Stellarium
+      sendiri di render pass TERPISAH utk query rise/set presisi). Itu
+      sumber SEMUA masalah "garis ufuk menutupi kontur" yg berulang kali
+      muncul: z-order garis polygon itu di luar kendali kita sama sekali,
+      apapun yg diubah di panorama.png tidak akan pernah mempengaruhinya.
+      Sekarang landscape.ini MURNI type=spherical saja -- SEMUA garis
+      referensi ufuk (astronomis 0 derajat/biru putus2, dip/ungu titik2,
+      topografi nyata/abu2 gelap solid -- persis 3 definisi & gaya yg
+      sama dgn buat_figure_simulasi_hilal()/_GAYA_UFUK) dilukis LANGSUNG
+      jadi bagian dari panorama.png, SEBELUM loop fill terrain per-lapisan
+      berjalan -- jadi terrain asli (lebih detail/akurat) selalu menang
+      menimpa ketiganya di mana pun ada data terrain, sepenuhnya di bawah
+      kendali kode ini sendiri, tanpa bergantung ke fitur native Stellarium
+      manapun lagi. Konsekuensinya: query rise/set presisi di panel info
+      Stellarium sendiri sekarang mengandalkan alpha channel tekstur, tapi
+      perhitungan HisabWin sendiri (jam ghurub, Simulasi Hilal, dll) sama
+      sekali tidak terpengaruh -- itu selalu dihitung independen di Python.
 
     SYARAT DATA:
       profil harus punya "matriks_sudut" (shape: n_azimuth x n_layer) dan
@@ -7996,11 +8003,20 @@ def ekspor_profil_ke_stellarium_panorama(
     nama_lokasi    : nama landscape yang muncul di Stellarium (default:
                      dari koordinat, ditandai "Ridge" biar beda dari hasil
                      ekspor_profil_ke_stellarium() versi polygonal).
-    lebar_px       : lebar tekstur panorama (piksel). 4096 = default aman
-                     (di bawah batas ~8192x4096 yang disebut dok resmi
-                     Stellarium utk kartu grafis rata-rata). Naikkan kalau
-                     mau detail lebih tajam, dengan konsekuensi file lebih
-                     besar & makin berat dimuat Stellarium.
+    lebar_px       : lebar tekstur panorama (piksel). 8192 = default (batas
+                     aman TERTINGGI yang disebut dok resmi Stellarium utk
+                     kartu grafis rata-rata; 8192x4096). Menaikkan ini
+                     menghaluskan STAIRCASE/tangga piksel di tepi kontur
+                     (pembulatan baris saat digambar) -- TAPI tidak
+                     menambah detail bentuk gunung itu sendiri kalau
+                     sumbernya (profil["azimuth"], dari n_azimuth di
+                     hitung_profil_cakrawala()) memang jarang; utk siluet
+                     yg terlihat berpoligon/patah2 (bukan cuma tepi
+                     bergerigi halus), naikkan n_azimuth saat hitung ulang
+                     Profil Cakrawala-nya, bukan lebar_px ini. Konsekuensi
+                     menaikkan lebar_px: file lebih besar & makin berat
+                     dimuat Stellarium -- jangan naikkan lebih dari 8192
+                     tanpa memastikan dulu GPU target mendukungnya.
     margin_atas_derajat : seberapa banyak langit kosong di atas puncak
                      tertinggi ikut disertakan (derajat) -- dibutuhkan
                      supaya label puncak (yang digeser +1.5..+8 derajat
@@ -8037,7 +8053,14 @@ def ekspor_profil_ke_stellarium_panorama(
     if nama_lokasi is None:
         arah_lat = "LS" if lat < 0 else "LU"
         arah_lon = "BB" if lon < 0 else "BT"
-        nama_lokasi = f"HisabWin Ridge {abs(lat):.4f}{arah_lat} {abs(lon):.4f}{arah_lon}"
+        # Suffix timestamp: Stellarium sering TIDAK reload tekstur landscape
+        # yg sudah pernah diinstal dgn nama sama, walau file di disk sudah
+        # beda (perlu hapus manual + restart app). Nama unik per-ekspor ini
+        # bikin Stellarium SELALU menganggapnya landscape baru, jadi tiap
+        # kali export ulang dijamin kepakai versi terbaru tanpa perlu
+        # hapus/restart manual.
+        stempel_waktu = datetime.now().strftime("%H%M%S")
+        nama_lokasi = f"HisabWin Ridge {abs(lat):.4f}{arah_lat} {abs(lon):.4f}{arah_lon} {stempel_waktu}"
 
     # -- 1. Tekstur spherical FULL EQUIRECTANGULAR 2:1 --
     # Landscape spherical Stellarium dipetakan ke bola. Gunakan seluruh
@@ -8083,30 +8106,62 @@ def ekspor_profil_ke_stellarium_panorama(
     kanvas = np.zeros((tinggi_px, lebar_px, 4), dtype=np.uint8)  # RGBA, mulai transparan penuh (= langit asli Stellarium)
     baris_idx = np.arange(tinggi_px).reshape(-1, 1)  # (tinggi_px, 1), utk broadcast
 
-    # Garis ufuk (union skyline dari sudut_horizon, PADAT/kontinu) digambar
-    # DI SINI, SEBELUM loop fill terrain per-lapisan di bawah -- ini
-    # gantiin fitur horizon_line_color native Stellarium (yg dimatikan
-    # di landscape.ini krn TIDAK BISA diatur z-order-nya, selalu digambar
-    # nimpa segalanya oleh Stellarium sendiri, di luar kendali kita).
-    # Dgn digambar DI SINI DULU dan warna CYAN (sama spt horizon_line_color
-    # yg dulu), lalu loop fill terrain di bawah jalan SESUDAHNYA: terrain
-    # asli (lebih detail/akurat per-piksel) SELALU menimpa garis ini di
-    # mana pun datanya ada -- garis cyan cuma kelihatan di piksel yg
-    # TIDAK kena fill terrain sama sekali (celah sampling kasar n_layer
-    # vs sudut_horizon yg lebih padat). Ini yg diminta user: ufuk tetap
-    # berwarna & kelihatan, TAPI tidak pernah menutupi kontur asli di
-    # bawahnya.
-    warna_ufuk = (0, 230, 230)  # cyan, samain dgn horizon_line_color = 0.0, 0.9, 0.9
-    siluet_di_azpx = _interp_lingkar(sudut_horizon)
-    baris_siluet = np.clip(
-        np.round((alt_atas - siluet_di_azpx) / (alt_atas - alt_bawah) * (tinggi_px - 1)).astype(int),
-        0, tinggi_px - 1)
-    for tebal in (-1, 0, 1):  # garis setebal ~3px biar kelihatan di resolusi tinggi
-        b = np.clip(baris_siluet + tebal, 0, tinggi_px - 1)
-        kanvas[b, np.arange(lebar_px), 0] = warna_ufuk[0]
-        kanvas[b, np.arange(lebar_px), 1] = warna_ufuk[1]
-        kanvas[b, np.arange(lebar_px), 2] = warna_ufuk[2]
-        kanvas[b, np.arange(lebar_px), 3] = 255
+    # GANTI PENDEKATAN (permintaan user): sebelumnya kita pakai gabungan
+    # "type=spherical + polygonal_horizon_list" (garis ufuk digambar
+    # Stellarium sendiri lewat horizon.txt, di render pass terpisah yg
+    # z-order-nya di luar kendali kita -- itu akar dari seluruh masalah
+    # "menutupi kontur" yg berulang kali muncul). Sekarang SEMUA garis
+    # referensi ufuk digambar LANGSUNG ke tekstur panorama.png ini
+    # sendiri -- persis prinsip yg sama dgn buat_figure_simulasi_hilal()
+    # di hisabwin: TIGA definisi ufuk (astronomis 0 derajat, dip, &
+    # topografi nyata), masing2 gaya/warna sendiri dari _GAYA_UFUK,
+    # SEMUA digambar SEBELUM loop fill terrain di bawah -- jadi fill
+    # terrain asli (lebih akurat per-piksel) SELALU menang menimpa
+    # ketiganya di mana pun ada data terrain, tanpa bergantung ke fitur
+    # native Stellarium manapun lagi (tidak ada lagi polygonal_horizon_
+    # list/horizon_line_color di landscape.ini -- lihat di bawah).
+    def _hex_ke_rgb(kode_hex):
+        kode_hex = kode_hex.lstrip("#")
+        return tuple(int(kode_hex[i:i + 2], 16) for i in (0, 2, 4))
+
+    def _gambar_garis_datar(sudut_derajat, warna_rgb, pola):
+        """Gambar garis horizontal (altitude tetap) melintasi semua kolom,
+        dgn pola 'solid'/'dashed'/'dotted' spt matplotlib linestyle '-'/'--'/':'."""
+        # Panorama spherical memakai rentang equirectangular PENUH -90..+90.
+        # Jangan gunakan alt_bawah (parameter lama -30), karena itu membuat
+        # garis 0°/dip bergeser jauh ke bawah dan bisa masuk area terrain.
+        b0 = int(round((alt_atas - sudut_derajat) / (alt_atas - alt_bawah_full) * (tinggi_px - 1)))
+        b0 = max(0, min(tinggi_px - 1, b0))
+        kolom = np.arange(lebar_px)
+        if pola == "dashed":
+            panjang_on = max(lebar_px // 200, 8)
+            aktif = (kolom // panjang_on) % 2 == 0
+        elif pola == "dotted":
+            spasi = max(lebar_px // 300, 6)
+            aktif = (kolom % spasi) < max(spasi // 3, 2)
+        else:
+            aktif = np.ones(lebar_px, dtype=bool)
+        kolom_aktif = kolom[aktif]
+        for tebal in (-1, 0, 1):
+            b = max(0, min(tinggi_px - 1, b0 + tebal))
+            kanvas[b, kolom_aktif, 0] = warna_rgb[0]
+            kanvas[b, kolom_aktif, 1] = warna_rgb[1]
+            kanvas[b, kolom_aktif, 2] = warna_rgb[2]
+            kanvas[b, kolom_aktif, 3] = 255
+
+    def _gambar_garis_kontur(sudut_per_kolom, warna_rgb):
+        """Gambar garis yg TIDAK datar -- ikut kontur (mis. sudut_horizon)."""
+        # Sama: kontur topografi harus memakai skala FULL -90..+90 agar
+        # tepat berimpit dengan geometri terrain yang dilukis di bawahnya.
+        baris = np.clip(
+            np.round((alt_atas - sudut_per_kolom) / (alt_atas - alt_bawah_full) * (tinggi_px - 1)).astype(int),
+            0, tinggi_px - 1)
+        for tebal in (-1, 0, 1):
+            b = np.clip(baris + tebal, 0, tinggi_px - 1)
+            kanvas[b, np.arange(lebar_px), 0] = warna_rgb[0]
+            kanvas[b, np.arange(lebar_px), 1] = warna_rgb[1]
+            kanvas[b, np.arange(lebar_px), 2] = warna_rgb[2]
+            kanvas[b, np.arange(lebar_px), 3] = 255
 
     # -- 3. Lukis painter's algorithm: lapisan PALING JAUH dulu, makin --
     # -- dekat menimpa di atasnya. Sama urutan/skema warna dgn buat_ --
@@ -8130,30 +8185,67 @@ def ekspor_profil_ke_stellarium_panorama(
         kanvas[..., 2][mask] = warna[2]
         kanvas[..., 3][mask] = 255  # opaque -- dari sini ke bawah, timpa lapisan yg lebih jauh
 
+    # Gambar ulang TIGA garis ufuk SETELAH terrain selesai, supaya tidak
+    # tertimpa oleh fill terrain yang opaque. Topografi akan tepat mengikuti
+    # tepi siluet karena memakai skala equirectangular yang sama.
+    dip_derajat = 0.0293 * math.sqrt(max(tinggi_pengamat, 0.0))
+    _gambar_garis_datar(0.0, _hex_ke_rgb(_GAYA_UFUK["astro"]["warna"]), "dashed")
+    _gambar_garis_datar(-dip_derajat, _hex_ke_rgb(_GAYA_UFUK["dip"]["warna"]), "dotted")
+    siluet_di_azpx = _interp_lingkar(sudut_horizon)
+    _gambar_garis_kontur(siluet_di_azpx, _hex_ke_rgb(_GAYA_UFUK["topo"]["warna"]))
+
+    # -- 3b. Tutup celah transparan di bawah ufuk topografi --
+    # "sudut_horizon" (garis topo) di-clamp minimal = -dip (lihat catatan di
+    # hitung_profil_cakrawala), TAPI "matriks_sudut" (fill terrain aktual di
+    # atas) SENGAJA TIDAK di-clamp -- supaya kontur asli tetap akurat. Di
+    # arah yang datar/terbuka (topo == dip, tidak ada gunung penghalang),
+    # ini bikin garis topo "naik" ke posisi dip sementara fill terrain
+    # mentahnya tetap di posisi aslinya yang lebih rendah -- selisihnya jadi
+    # STRIP TRANSPARAN (kanvas asli, alpha=0) yang tidak pernah kesentuh
+    # loop fill di atas maupun garis 3px ini. Isi abu-abu HANYA piksel yang
+    # masih transparan PENUH (alpha==0) supaya gunung/terrain yang sudah
+    # opaque di manapun TIDAK PERNAH tertimpa -- syarat alpha==0 ini yang
+    # menjamin itu, jadi urutan (dijalankan PALING TERAKHIR, setelah semua
+    # fill terrain & ketiga garis ufuk) sebenarnya tidak krusial, tapi tetap
+    # diletakkan di akhir biar jelas ini "penambal celah", bukan lapisan yg
+    # ikut ditimpa proses lain sesudahnya.
+    baris_topo = np.clip(
+        np.round((alt_atas - siluet_di_azpx) / (alt_atas - alt_bawah_full) * (tinggi_px - 1)).astype(int),
+        0, tinggi_px - 1)
+    mask_bawah_topo = baris_idx >= baris_topo.reshape(1, -1)
+    mask_transparan = kanvas[..., 3] == 0
+    mask_tambal = mask_bawah_topo & mask_transparan
+    warna_tambal = _hex_ke_rgb("#696969")  # dimgray -- konsisten dgn warna ufuk/ground dimgray dipakai di tempat lain
+    kanvas[..., 0][mask_tambal] = warna_tambal[0]
+    kanvas[..., 1][mask_tambal] = warna_tambal[1]
+    kanvas[..., 2][mask_tambal] = warna_tambal[2]
+    kanvas[..., 3][mask_tambal] = 255
+
     img = Image.fromarray(kanvas, mode="RGBA")
     buf_png = io.BytesIO()
     img.save(buf_png, format="PNG")
 
-    # -- 4. horizon.txt & gazetteer -- PERSIS sama dengan ekspor_profil_ke_ --
-    # -- stellarium() versi polygonal supaya waktu ghurub/terbit yg --
-    # -- dihitung Stellarium identik antara dua jenis ekspor ini. --
-    urutan = np.argsort(azimuth)
-    az_urut = azimuth[urutan]
-    sudut_urut = sudut_horizon[urutan]
-    baris_horizon = [f"{az:.3f} {sudut:.3f}" for az, sudut in zip(az_urut, sudut_urut)]
-    baris_horizon.append(f"{az_urut[0] + 360.0:.3f} {sudut_urut[0]:.3f}")
-    isi_horizon_txt = "\n".join(baris_horizon) + "\n"
-
+    # -- 4. gazetteer (label nama puncak) -- horizon.txt TIDAK dibuat lagi:
+    # semua garis ufuk (astronomis, dip, topografi) sudah dilukis LANGSUNG
+    # ke panorama.png di atas, jadi tidak ada lagi yg perlu dibaca dari
+    # polygonal_horizon_list terpisah.
     baris_gazetteer = [
         f"{az:.3f}|{sudut:.3f}|1.50|0.00|{nama}"
         for az, sudut, nama in puncak_berlabel
     ]
     isi_gazetteer_txt = ("\n".join(baris_gazetteer) + "\n") if baris_gazetteer else None
 
-    # -- 5. landscape.ini -- type=spherical (tekstur) + polygonal_horizon_list --
-    # (query rise/set presisi) sekaligus -- kombinasi ini didukung resmi
-    # Stellarium (dipakai jg oleh landscape pihak ketiga semacam
-    # "LMJOBStransp" di forum resminya).
+    # -- 5. landscape.ini -- MURNI type=spherical, TANPA polygonal_horizon_
+    # list/horizon_line_color sama sekali (beda dari versi sebelumnya).
+    # Konsekuensi: query rise/set presisi di panel info objek Stellarium
+    # sendiri (F4/klik kanan Matahari-Bulan) sekarang mengandalkan alpha
+    # channel tekstur (opacity ground), BUKAN polygon horizon.txt terpisah
+    # -- ini trade-off yg disengaja sesuai permintaan, demi menghindari
+    # SELURUH kelas masalah z-order/cache yg berulang muncul saat dua
+    # mekanisme (poligon & panorama) digabung. Perhitungan HisabWin sendiri
+    # (Simulasi Hilal, jam ghurub, dll) tidak terpengaruh sama sekali --
+    # itu tetap dihitung independen di Python, tidak pernah bergantung ke
+    # Stellarium.
     tanggal_str = datetime.now().strftime("%Y-%m-%d")
     isi_landscape_ini = (
         "[landscape]\n"
@@ -8161,9 +8253,11 @@ def ekspor_profil_ke_stellarium_panorama(
         f"author = {penulis}\n"
         f"description = Diekspor otomatis dari HisabWin (Ridge Line / Panorama "
         f"Berlapis) pada {tanggal_str}. Koordinat: {lat:.6f}, {lon:.6f}. "
-        f"Tinggi pengamat: {tinggi_pengamat:.1f} m dpl. Kalau arah gunung tidak "
-        f"pas kompas setelah diimpor, ubah nilai angle_rotatez di bawah "
-        f"(0-359), TIDAK perlu bikin ulang panorama.png.\n"
+        f"Tinggi pengamat: {tinggi_pengamat:.1f} m dpl. Semua garis ufuk "
+        f"(astronomis 0 derajat, dip, topografi) sudah ada di dalam "
+        f"panorama.png. Kalau arah gunung tidak pas kompas setelah "
+        f"diimpor, ubah nilai angle_rotatez di bawah (0-359), TIDAK perlu "
+        f"bikin ulang panorama.png.\n"
         "type = spherical\n"
         "maptex = panorama.png\n"
         f"maptex_top = {alt_atas:.3f}\n"
@@ -8174,30 +8268,10 @@ def ekspor_profil_ke_stellarium_panorama(
         "tesselate_cols = 512\n"
         "bottom_cap_color = 0.15,0.1,0.05\n"
         # Rotasi TEKSTUR (spherical) -- offset kecil (BUKAN 0 persis) utk
-        # menghindari bug tepi gambar tepat di azimuth 0/180, sama alasan
-        # dgn polygonal_angle_rotatez di bawah (lihat landscape "zero"
-        # bawaan Stellarium). Sesuaikan nilainya kalau arahnya meleset.
+        # menghindari bug tepi gambar tepat di azimuth 0/180 (lihat
+        # landscape "zero" bawaan Stellarium). Sesuaikan nilainya kalau
+        # arahnya meleset.
         "angle_rotatez = 0.00001\n"
-        # Garis horizon native Stellarium DIMATIKAN (bukan cuma "opsional
-        # tipis" spt komentar lama) -- ini akar masalah "menutupi kontur"
-        # yg terus muncul walau PNG-nya sudah dibetulkan berkali-kali:
-        # horizon_line_color menyuruh Stellarium menggambar horizon.txt
-        # (yg sudah termasuk dip) sbg garis TERPISAH di render pass-nya
-        # SENDIRI -- z-order-nya di luar kendali kita sama sekali, tidak
-        # peduli urutan gambar di panorama.png diapain juga. Tekstur kita
-        # SUDAH menggambar ridge line sendiri (fill terrain per-lapisan +
-        # siluet kosmetik), jadi garis native ini murni duplikat yg
-        # nongol nimpa2 tekstur tanpa bisa kita atur. Sentinel resmi
-        # Stellarium (red negatif) utk "jangan digambar" -- lihat landscape
-        # "zero" bawaan Stellarium: "Color for the line. It will not be
-        # drawn if this is not defined" / negatif = don't draw.
-        # (polygonal_horizon_list-nya SENDIRI TETAP dipakai -- cuma garis
-        # visualnya yg dimatikan -- horizon.txt masih dipakai Stellarium
-        # utk query rise/set azimuth/altitude presisi di balik layar.)
-        "polygonal_horizon_list = horizon.txt\n"
-        "polygonal_horizon_list_mode = azDeg_altDeg\n"
-        "polygonal_angle_rotatez = 0.00001\n"
-        "horizon_line_color = -1, -1, -1\n"
         "ground_color = 0.15, 0.1, 0.05\n"
         "\n"
         "[location]\n"
@@ -8212,12 +8286,247 @@ def ekspor_profil_ke_stellarium_panorama(
     with zipfile.ZipFile(path_zip, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("landscape.ini", isi_landscape_ini)
         zf.writestr("panorama.png", buf_png.getvalue())
-        zf.writestr("horizon.txt", isi_horizon_txt)
         if isi_gazetteer_txt:
             zf.writestr("gazetteer.en.utf8", isi_gazetteer_txt)
             zf.writestr("gazetteer.id.utf8", isi_gazetteer_txt)
 
     return path_zip
+
+
+def _cari_font_ttf(ukuran_px):
+    """Cari font TrueType yg tersedia di sistem (Windows/Linux/Mac umum),
+    fallback ke font bawaan PIL kalau tidak ketemu sama sekali. Dipakai
+    khusus utk melabeli puncak gunung LANGSUNG ke piksel PNG (lihat
+    ekspor_profil_ke_cartes_du_ciel())."""
+    from PIL import ImageFont
+
+    kandidat = [
+        r"C:\Windows\Fonts\segoeui.ttf", r"C:\Windows\Fonts\arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
+    ]
+    for jalur in kandidat:
+        try:
+            return ImageFont.truetype(jalur, ukuran_px)
+        except Exception:
+            continue
+    try:
+        return ImageFont.load_default(size=ukuran_px)  # Pillow >= 10.1
+    except TypeError:
+        return ImageFont.load_default()  # Pillow lama, ukuran tetap kecil
+
+
+def ekspor_profil_ke_cartes_du_ciel(profil, path_png, lebar_px=8192, margin_atas_derajat=8.0):
+    """Ekspor profil cakrawala jadi gambar horizon panorama utk fitur
+    "Use an horizon picture" bawaan Cartes du Ciel / Skychart (Setup ->
+    Observatory -> Horizon). Konvensi formatnya PERSIS Stellarium "type =
+    spherical" (dikonfirmasi resmi di dok ap-i.net: "This function is
+    compatible with the horizon made for Stellarium using the Single
+    Panorama Method... just be sure format is compatible by looking at
+    the row 'type = spherical'"), jadi mesin lukis tekstur (rotasi 90
+    derajat, painter's algorithm per-lapisan warna copper_r, TIGA garis
+    ufuk astro/dip/topo dari _GAYA_UFUK) di sini SENGAJA meniru persis
+    ekspor_profil_ke_stellarium_panorama() -- lihat komentar2 di fungsi
+    itu utk alasan detail tiap bagian.
+
+    SATU PERBEDAAN WAJIB dari versi Stellarium: dok CdC menyatakan "the
+    horizon must be EXACTLY at the middle height of the picture" -- beda
+    dari Stellarium yg boleh di-crop asimetris (margin_atas_derajat di
+    atas, alt_bawah tetap -30 di bawah). Di sini rentang altitude WAJIB
+    SIMETRIS (+-alt_lim) supaya baris tengah gambar = altitude 0 derajat
+    persis, baru dipotong (crop) sesedikit mungkin sesuai puncak
+    tertinggi di profil (co. dok CdC sendiri: "if the highest point of
+    your horizon is at an altitude of 20 derajat, cukup cover -20..+20").
+
+    LABEL PUNCAK DIRENDER LANGSUNG KE PIKSEL: CdC TIDAK punya file
+    gazetteer terpisah spt Stellarium, jadi profil["puncak_berlabel"]
+    digambar sbg TEKS beneran (font TrueType, dirotasi 75 derajat spt
+    gaya buat_figure_profil_cakrawala()) langsung ke kanvas PNG, dgn
+    garis penanda tipis dari puncak ke label -- meniru persis PNG yg
+    dihasilkan matplotlib, tapi jadi bagian permanen dari tekstur.
+
+    Return: path_png (gambar utama). Sebuah "landscape.ini" MINIMAL jg
+    ditulis di folder yg SAMA dgn path_png (nama file harus persis itu,
+    sesuai dok CdC: "This angle can be read from value of angle_rotatez=
+    in a landscape.ini file found in the SAME FOLDER as the picture") --
+    isinya cuma angle_rotatez, supaya CdC baca offset rotasi otomatis
+    tanpa perlu diketik manual satu2 di dialog "Use an horizon picture".
+    """
+    from PIL import Image, ImageDraw
+    import matplotlib.colors as mcolors
+    import matplotlib.pyplot as plt
+
+    azimuth = np.asarray(profil["azimuth"], dtype=float)
+    sudut_horizon = np.asarray(profil["sudut_horizon"], dtype=float)
+    matriks_sudut = np.asarray(profil["matriks_sudut"], dtype=float)
+    matriks_jarak_km = np.asarray(profil["matriks_jarak_km"], dtype=float)
+    tinggi_pengamat = float(profil.get("tinggi_pengamat", profil.get("elev_tanah", 0.0)) or 0.0)
+    puncak_berlabel = profil.get("puncak_berlabel", [])
+
+    # -- 1. Rentang altitude SIMETRIS (wajib CdC: baris tengah = 0 derajat) --
+    puncak_tertinggi = float(sudut_horizon.max()) if sudut_horizon.size else 0.0
+    dip_derajat = 0.0293 * math.sqrt(max(tinggi_pengamat, 0.0))
+    alt_lim = max(puncak_tertinggi, dip_derajat, 1.0) + margin_atas_derajat
+    alt_atas, alt_bawah = alt_lim, -alt_lim
+    px_per_derajat = lebar_px / 360.0
+    tinggi_px = int(round(px_per_derajat * (alt_atas - alt_bawah)))
+    if tinggi_px % 2 == 1:  # genapkan supaya baris tengah persis integer
+        tinggi_px += 1
+    if tinggi_px < 2:
+        raise ValueError("lebar_px terlalu kecil untuk panorama Cartes du Ciel.")
+
+    # -- 2. Interpolasi ke grid kolom tekstur, rotasi +90 derajat sama --
+    # -- persis dgn ekspor_profil_ke_stellarium_panorama() (dikonfirmasi --
+    # -- dok CdC: "the left side of the picture is the East direction", --
+    # -- konvensi yg SAMA dgn landscape spherical Stellarium). --
+    urutan_az = np.argsort(azimuth)
+    az_sorted = azimuth[urutan_az]
+    az_px = np.linspace(0.0, 360.0, lebar_px, endpoint=False)
+    az_query = (az_px + 90.0) % 360.0
+    az_ext = np.concatenate([az_sorted - 360.0, az_sorted, az_sorted + 360.0])
+
+    def _interp_lingkar(y_asli):
+        y_sorted = np.asarray(y_asli, dtype=float)[urutan_az]
+        y_ext = np.concatenate([y_sorted, y_sorted, y_sorted])
+        return np.interp(az_query, az_ext, y_ext)
+
+    n_layer = matriks_sudut.shape[1]
+    layer_di_azpx = np.stack(
+        [_interp_lingkar(matriks_sudut[:, s]) for s in range(n_layer)], axis=0)
+
+    kanvas = np.zeros((tinggi_px, lebar_px, 4), dtype=np.uint8)
+    baris_idx = np.arange(tinggi_px).reshape(-1, 1)
+
+    def _hex_ke_rgb(kode_hex):
+        kode_hex = kode_hex.lstrip("#")
+        return tuple(int(kode_hex[i:i + 2], 16) for i in (0, 2, 4))
+
+    def _baris_dari_sudut(sudut_derajat):
+        b = int(round((alt_atas - sudut_derajat) / (alt_atas - alt_bawah) * (tinggi_px - 1)))
+        return max(0, min(tinggi_px - 1, b))
+
+    def _gambar_garis_datar(sudut_derajat, warna_rgb, pola):
+        b0 = _baris_dari_sudut(sudut_derajat)
+        kolom = np.arange(lebar_px)
+        if pola == "dashed":
+            panjang_on = max(lebar_px // 200, 8)
+            aktif = (kolom // panjang_on) % 2 == 0
+        elif pola == "dotted":
+            spasi = max(lebar_px // 300, 6)
+            aktif = (kolom % spasi) < max(spasi // 3, 2)
+        else:
+            aktif = np.ones(lebar_px, dtype=bool)
+        kolom_aktif = kolom[aktif]
+        for tebal in (-1, 0, 1):
+            b = max(0, min(tinggi_px - 1, b0 + tebal))
+            kanvas[b, kolom_aktif, 0] = warna_rgb[0]
+            kanvas[b, kolom_aktif, 1] = warna_rgb[1]
+            kanvas[b, kolom_aktif, 2] = warna_rgb[2]
+            kanvas[b, kolom_aktif, 3] = 255
+
+    def _gambar_garis_kontur(sudut_per_kolom, warna_rgb):
+        baris = np.clip(
+            np.round((alt_atas - sudut_per_kolom) / (alt_atas - alt_bawah) * (tinggi_px - 1)).astype(int),
+            0, tinggi_px - 1)
+        for tebal in (-1, 0, 1):
+            b = np.clip(baris + tebal, 0, tinggi_px - 1)
+            kanvas[b, np.arange(lebar_px), 0] = warna_rgb[0]
+            kanvas[b, np.arange(lebar_px), 1] = warna_rgb[1]
+            kanvas[b, np.arange(lebar_px), 2] = warna_rgb[2]
+            kanvas[b, np.arange(lebar_px), 3] = 255
+
+    # -- 3. Painter's algorithm per-lapisan (jauh->dekat), SAMA persis --
+    # -- gaya/warna dgn buat_figure_ridgeline_cakrawala(). --
+    norm = mcolors.Normalize(vmin=float(matriks_jarak_km.min()), vmax=float(matriks_jarak_km.max()))
+    cmap = plt.get_cmap("copper_r")
+    warna_layer = (cmap(norm(matriks_jarak_km))[:, :3] * 255).astype(np.uint8)
+
+    urutan_jauh_ke_dekat = np.argsort(matriks_jarak_km)[::-1]
+    for s_idx in urutan_jauh_ke_dekat:
+        y_curve = layer_di_azpx[s_idx]
+        baris_batas = np.clip(
+            np.round((alt_atas - y_curve) / (alt_atas - alt_bawah) * (tinggi_px - 1)).astype(int),
+            0, tinggi_px - 1)
+        mask = baris_idx >= baris_batas.reshape(1, -1)
+        warna = warna_layer[s_idx]
+        kanvas[..., 0][mask] = warna[0]
+        kanvas[..., 1][mask] = warna[1]
+        kanvas[..., 2][mask] = warna[2]
+        kanvas[..., 3][mask] = 255
+
+    # -- 3b. Tiga garis referensi ufuk, digambar SESUDAH fill terrain --
+    # -- (spt versi Stellarium terbaru) supaya tidak pernah tertimpa; --
+    # -- celah transparan di bawah garis topo (arah datar/terbuka, lihat --
+    # -- catatan hitung_profil_cakrawala ttg clamp sudut_horizon vs --
+    # -- matriks_sudut) ditambal abu2 spy tidak bolong. --
+    _gambar_garis_datar(0.0, _hex_ke_rgb(_GAYA_UFUK["astro"]["warna"]), "dashed")
+    _gambar_garis_datar(-dip_derajat, _hex_ke_rgb(_GAYA_UFUK["dip"]["warna"]), "dotted")
+    siluet_di_azpx = _interp_lingkar(sudut_horizon)
+    _gambar_garis_kontur(siluet_di_azpx, _hex_ke_rgb(_GAYA_UFUK["topo"]["warna"]))
+    baris_topo = np.clip(
+        np.round((alt_atas - siluet_di_azpx) / (alt_atas - alt_bawah) * (tinggi_px - 1)).astype(int),
+        0, tinggi_px - 1)
+    mask_bawah_topo = baris_idx >= baris_topo.reshape(1, -1)
+    mask_transparan = kanvas[..., 3] == 0
+    mask_tambal = mask_bawah_topo & mask_transparan
+    warna_tambal = _hex_ke_rgb("#696969")
+    kanvas[..., 0][mask_tambal] = warna_tambal[0]
+    kanvas[..., 1][mask_tambal] = warna_tambal[1]
+    kanvas[..., 2][mask_tambal] = warna_tambal[2]
+    kanvas[..., 3][mask_tambal] = 255
+
+    # -- 4. Label nama puncak, DIRENDER LANGSUNG ke piksel (CdC tidak --
+    # -- punya file gazetteer terpisah spt Stellarium) -- garis penanda --
+    # -- tipis + teks dirotasi 75 derajat, gaya sama dgn --
+    # -- buat_figure_profil_cakrawala(): ax.plot(...) + ax.text(..., --
+    # -- rotation=75, ha="left", va="bottom"). --
+    img = Image.fromarray(kanvas, mode="RGBA")
+    draw = ImageDraw.Draw(img)
+    ukuran_font = max(int(lebar_px / 220), 14)
+    font = _cari_font_ttf(ukuran_font)
+    panjang_tanda_px = int(tinggi_px * 0.02)  # ~1.5 derajat, sama nisbah dgn "sudut+1.5" di matplotlib
+    for az, sudut, nama in puncak_berlabel:
+        # posisi kolom: azimuth asli -> query yg SAMA dgn rotasi +90 di atas
+        kolom = int(round(((az - 90.0) % 360.0) / 360.0 * lebar_px)) % lebar_px
+        baris_puncak = _baris_dari_sudut(sudut)
+        baris_label = max(0, baris_puncak - panjang_tanda_px)
+        draw.line([(kolom, baris_puncak), (kolom, baris_label)], fill=(0, 0, 0, 220), width=max(lebar_px // 4000, 1))
+        # Teks dirotasi 75 derajat: render ke image kecil terpisah lalu
+        # tempel (rotate) -- cara standar PIL utk teks miring dgn stroke.
+        bbox = draw.textbbox((0, 0), nama, font=font, stroke_width=2)
+        lebar_teks = bbox[2] - bbox[0] + 8
+        tinggi_teks = bbox[3] - bbox[1] + 8
+        img_teks = Image.new("RGBA", (lebar_teks, tinggi_teks), (0, 0, 0, 0))
+        draw_teks = ImageDraw.Draw(img_teks)
+        draw_teks.text((4, 4), nama, font=font, fill=(0, 0, 0, 255),
+                        stroke_width=2, stroke_fill=(255, 255, 255, 235))
+        img_teks_rot = img_teks.rotate(75, expand=True, resample=Image.BICUBIC)
+        # Jangkarkan sudut kiri-bawah teks (sesudah rotasi) ke ujung atas
+        # garis penanda, meniru ha="left", va="bottom" di matplotlib.
+        x_tempel = kolom
+        y_tempel = baris_label - img_teks_rot.height
+        img.alpha_composite(img_teks_rot, dest=(x_tempel, max(0, y_tempel)))
+    kanvas = np.array(img)
+
+    img_final = Image.fromarray(kanvas, mode="RGBA")
+    img_final.save(path_png, format="PNG")
+
+    # -- 5. landscape.ini MINIMAL di folder yg sama, cuma angle_rotatez -- --
+    # -- (dok CdC: dibaca otomatis dari file bernama PERSIS "landscape. --
+    # -- ini" di folder yg sama dgn gambar, biar rotasi tdk perlu --
+    # -- diketik manual di dialog "Use an horizon picture"). --
+    folder_tujuan = os.path.dirname(os.path.abspath(path_png)) or "."
+    path_ini = os.path.join(folder_tujuan, "landscape.ini")
+    with open(path_ini, "w", encoding="utf-8") as f:
+        f.write(
+            "[landscape]\n"
+            "type = spherical\n"
+            "angle_rotatez = 0.00001\n"
+        )
+
+    return path_png
 
 
 def simpan_profil_cakrawala_txt(path, profil):
@@ -12584,7 +12893,12 @@ class HisabWinApp(tk.Tk):
         self.btn_export_stellarium_ridge_cakrawala = ttk.Button(
             frame_tombol_hasil, text="🏔️ Ekspor Ridge Line ke Stellarium...",
             command=self._on_export_stellarium_ridge_cakrawala, state="disabled")
-        self.btn_export_stellarium_ridge_cakrawala.pack(fill="x")
+        self.btn_export_stellarium_ridge_cakrawala.pack(fill="x", pady=(0, 4))
+
+        self.btn_export_cdc_ridge_cakrawala = ttk.Button(
+            frame_tombol_hasil, text="🌌 Ekspor Ridge Line ke Cartes du Ciel...",
+            command=self._on_export_cdc_ridge_cakrawala, state="disabled")
+        self.btn_export_cdc_ridge_cakrawala.pack(fill="x")
 
         self._hasil_cakrawala_terakhir = None  # diisi dict hitung_profil_cakrawala() begitu selesai
 
@@ -12722,6 +13036,41 @@ class HisabWinApp(tk.Tk):
         except OSError as e:
             messagebox.showerror("Gagal menyimpan", f"Tidak bisa menulis file .zip:\n{e}")
 
+    def _on_export_cdc_ridge_cakrawala(self):
+        """Tombol '🌌 Ekspor Ridge Line ke Cartes du Ciel...' -- companion
+        dari _on_export_stellarium_ridge_cakrawala() di atas, lihat
+        ekspor_profil_ke_cartes_du_ciel(). Beda dari Stellarium: outputnya
+        SATU file PNG (bukan .zip) + sebuah landscape.ini kecil otomatis
+        ditulis di folder yg sama (dibaca CdC utk offset rotasi -- lihat
+        docstring fungsinya)."""
+        if not self._hasil_cakrawala_terakhir:
+            messagebox.showwarning("Belum ada data", "Hitung Profil Cakrawala terlebih dahulu.")
+            return
+        profil = self._hasil_cakrawala_terakhir
+        nama_default = f"cdc_horizon_{profil['lat']:.4f}_{profil['lon']:.4f}.png"
+        path = filedialog.asksaveasfilename(
+            defaultextension=".png",
+            filetypes=[("Gambar PNG", "*.png"), ("Semua File", "*.*")],
+            initialfile=nama_default,
+            title="Ekspor Ridge Line ke Horizon Picture Cartes du Ciel")
+        if not path:
+            return
+        try:
+            ekspor_profil_ke_cartes_du_ciel(profil, path)
+            messagebox.showinfo(
+                "Tersimpan",
+                f"Gambar horizon Cartes du Ciel disimpan ke:\n{path}\n\n"
+                "(Sebuah landscape.ini kecil jg ditulis di folder yang sama, "
+                "berisi offset rotasi -- biarkan tetap di situ.)\n\n"
+                "Cara pakai: buka Cartes du Ciel -> Setup -> Observatory -> "
+                "tab Horizon -> centang \"Display the horizon picture\" -> "
+                "pilih file PNG ini.")
+            self._log(f"Gambar horizon Cartes du Ciel diekspor ke: {path}")
+        except ValueError as e:
+            messagebox.showwarning("Data belum lengkap", str(e))
+        except OSError as e:
+            messagebox.showerror("Gagal menyimpan", f"Tidak bisa menulis file:\n{e}")
+
     def _on_simpan_ke_manajer_cakrawala(self):
         """CREATE: simpan hasil hitung yang sedang tampil ke folder data
         terkelola (_folder_data_profil_cakrawala()) dgn nama file otomatis
@@ -12774,6 +13123,7 @@ class HisabWinApp(tk.Tk):
         self.btn_ridge_cakrawala.config(state="normal")
         self.btn_export_stellarium_cakrawala.config(state="normal")
         self.btn_export_stellarium_ridge_cakrawala.config(state="normal")
+        self.btn_export_cdc_ridge_cakrawala.config(state="normal")
         try:
             fig_cakrawala = buat_figure_profil_cakrawala(profil)
             tgl_label = f"({profil['lat']:.3f}, {profil['lon']:.3f})"
@@ -15198,6 +15548,7 @@ for i in range(7):
                     self.btn_ridge_cakrawala.config(state="normal")
                     self.btn_export_stellarium_cakrawala.config(state="normal")
                     self.btn_export_stellarium_ridge_cakrawala.config(state="normal")
+                    self.btn_export_cdc_ridge_cakrawala.config(state="normal")
                     try:
                         fig_cakrawala = buat_figure_profil_cakrawala(profil)
                         tgl_label = f"({profil['lat']:.3f}, {profil['lon']:.3f})"
@@ -15225,6 +15576,7 @@ for i in range(7):
                         self.btn_ridge_cakrawala.config(state="normal")
                         self.btn_export_stellarium_cakrawala.config(state="normal")
                         self.btn_export_stellarium_ridge_cakrawala.config(state="normal")
+                        self.btn_export_cdc_ridge_cakrawala.config(state="normal")
 
                 elif jenis == "simulasi_hilal_ok":
                     profil, hasil = payload
