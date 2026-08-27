@@ -7922,6 +7922,408 @@ def ekspor_profil_ke_stellarium(profil, path_zip, nama_lokasi=None, penulis="His
     return path_zip
 
 
+_CACHE_CITRA_ESRI = {}
+
+
+def ambil_citra_satelit_esri(lat, lon, radius_km, size_px=1024, timeout=25):
+    """Mengunduh citra satelit Esri World Imagery (ArcGIS MapServer) untuk area
+    lingkaran pengamat dengan radius_km.
+
+    Mencoba ukuran `size_px` (default 1024 agar cepat & hemat kuota).
+    Jika timeout, otomatis melakukan retry dengan ukuran lebih kecil (512px) dan timeout lebih panjang.
+
+    Returns: (img_pil, (min_lon, min_lat, max_lon, max_lat))
+    atau None jika gagal (offline/timeout).
+    """
+    cache_key = (round(lat, 4), round(lon, 4), round(radius_km, 1), size_px)
+    if cache_key in _CACHE_CITRA_ESRI:
+        return _CACHE_CITRA_ESRI[cache_key]
+
+    dlat = (radius_km * 1.05) / 111.32
+    cos_lat = max(0.01, math.cos(math.radians(lat)))
+    dlon = (radius_km * 1.05) / (111.32 * cos_lat)
+
+    min_lat = max(-90.0, lat - dlat)
+    max_lat = min(90.0, lat + dlat)
+    min_lon = max(-180.0, lon - dlon)
+    max_lon = min(180.0, lon + dlon)
+
+    opsi_size = [size_px]
+    if size_px > 1024:
+        opsi_size.append(1024)
+    if 512 not in opsi_size:
+        opsi_size.append(512)
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 HisabWin/1.0"
+    }
+
+    from PIL import Image
+
+    for s_px in opsi_size:
+        url = (
+            "https://services.arcgisonline.com/arcgis/rest/services/World_Imagery/MapServer/export"
+            f"?bbox={min_lon:.6f},{min_lat:.6f},{max_lon:.6f},{max_lat:.6f}"
+            "&bboxSR=4326&imageSR=4326"
+            f"&size={s_px},{s_px}&format=jpg&f=image"
+        )
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = resp.read()
+            img = Image.open(io.BytesIO(data)).convert("RGB")
+            res = (img, (min_lon, min_lat, max_lon, max_lat))
+            _CACHE_CITRA_ESRI[cache_key] = res
+            return res
+        except Exception as e:
+            print(f"Percobaan unduh satelit Esri ({s_px}px) gagal: {e}")
+            continue
+
+    return None
+
+
+def ekspor_profil_ke_stellarium_terrain3d_satellite(
+        profil, path_zip, nama_lokasi=None, penulis="HisabWin",
+        lebar_px=8192, margin_atas_derajat=8.0, alt_bawah=-30.0):
+    """Mengekspor landscape Stellarium tipe 'spherical' dengan tekstur permukaan
+    terrain berupa foto satelit Esri (ArcGIS World Imagery) nyata per lapisan
+    jarak, digabung dengan TIGA garis referensi ufuk (astronomis 0 derajat,
+    dip, dan topografi) yang dilukis di atasnya.
+    """
+    matriks_sudut = profil.get("matriks_sudut")
+    matriks_jarak_km = profil.get("matriks_jarak_km")
+    if matriks_sudut is None or matriks_jarak_km is None:
+        raise ValueError(
+            "Profil ini belum punya data lapisan (dibuat sebelum fitur Ridge Line / Terrain 3D "
+            "ada, atau dimuat dari .txt lama). Hitung ulang Profil Cakrawala-nya terlebih dahulu."
+        )
+
+    from PIL import Image
+    import matplotlib.colors as mcolors
+    import matplotlib.pyplot as plt
+
+    azimuth = np.asarray(profil["azimuth"], dtype=float)
+    sudut_horizon = np.asarray(profil["sudut_horizon"], dtype=float)
+    matriks_jarak_km = np.asarray(matriks_jarak_km, dtype=float)
+    lat, lon = float(profil["lat"]), float(profil["lon"])
+    tinggi_pengamat = float(profil.get("tinggi_pengamat", profil.get("elev_tanah", 0.0)) or 0.0)
+    puncak_berlabel = profil.get("puncak_berlabel", [])
+
+    if nama_lokasi is None:
+        arah_lat = "LS" if lat < 0 else "LU"
+        arah_lon = "BB" if lon < 0 else "BT"
+        stempel_waktu = datetime.now().strftime("%H%M%S")
+        nama_lokasi = f"HisabWin Terrain3D Esri {abs(lat):.4f}{arah_lat} {abs(lon):.4f}{arah_lon} {stempel_waktu}"
+
+    alt_atas = 90.0
+    alt_bawah_full = -90.0
+    tinggi_px = int(lebar_px // 2)
+    if tinggi_px < 2:
+        raise ValueError("lebar_px terlalu kecil untuk panorama spherical.")
+
+    urutan_az = np.argsort(azimuth)
+    az_sorted = azimuth[urutan_az]
+    az_px = np.linspace(0.0, 360.0, lebar_px, endpoint=False)
+    az_query = (az_px + 90.0) % 360.0
+    az_ext = np.concatenate([az_sorted - 360.0, az_sorted, az_sorted + 360.0])
+
+    def _interp_lingkar(y_asli):
+        y_sorted = np.asarray(y_asli, dtype=float)[urutan_az]
+        y_ext = np.concatenate([y_sorted, y_sorted, y_sorted])
+        return np.interp(az_query, az_ext, y_ext)
+
+    n_layer = matriks_sudut.shape[1]
+    layer_di_azpx = np.stack(
+        [_interp_lingkar(matriks_sudut[:, s]) for s in range(n_layer)], axis=0)
+
+    kanvas = np.zeros((tinggi_px, lebar_px, 4), dtype=np.uint8)
+    baris_idx = np.arange(tinggi_px).reshape(-1, 1)
+
+    def _hex_ke_rgb(kode_hex):
+        kode_hex = kode_hex.lstrip("#")
+        return tuple(int(kode_hex[i:i + 2], 16) for i in (0, 2, 4))
+
+    def _gambar_garis_datar(sudut_derajat, warna_rgb, pola):
+        b0 = int(round((alt_atas - sudut_derajat) / (alt_atas - alt_bawah_full) * (tinggi_px - 1)))
+        b0 = max(0, min(tinggi_px - 1, b0))
+        kolom = np.arange(lebar_px)
+        if pola == "dashed":
+            panjang_on = max(lebar_px // 200, 8)
+            aktif = (kolom // panjang_on) % 2 == 0
+        elif pola == "dotted":
+            spasi = max(lebar_px // 300, 6)
+            aktif = (kolom % spasi) < max(spasi // 3, 2)
+        else:
+            aktif = np.ones(lebar_px, dtype=bool)
+        kolom_aktif = kolom[aktif]
+        for tebal in (-1, 0, 1):
+            b = max(0, min(tinggi_px - 1, b0 + tebal))
+            kanvas[b, kolom_aktif, 0] = warna_rgb[0]
+            kanvas[b, kolom_aktif, 1] = warna_rgb[1]
+            kanvas[b, kolom_aktif, 2] = warna_rgb[2]
+            kanvas[b, kolom_aktif, 3] = 255
+
+    def _gambar_garis_kontur(sudut_per_kolom, warna_rgb):
+        baris = np.clip(
+            np.round((alt_atas - sudut_per_kolom) / (alt_atas - alt_bawah_full) * (tinggi_px - 1)).astype(int),
+            0, tinggi_px - 1)
+        for tebal in (-1, 0, 1):
+            b = np.clip(baris + tebal, 0, tinggi_px - 1)
+            kanvas[b, np.arange(lebar_px), 0] = warna_rgb[0]
+            kanvas[b, np.arange(lebar_px), 1] = warna_rgb[1]
+            kanvas[b, np.arange(lebar_px), 2] = warna_rgb[2]
+            kanvas[b, np.arange(lebar_px), 3] = 255
+
+    radius_max_km = float(matriks_jarak_km.max())
+    res_esri = ambil_citra_satelit_esri(lat, lon, radius_max_km, size_px=2048)
+
+    arr_esri = None
+    if res_esri is not None:
+        img_esri, (min_lon, min_lat, max_lon, max_lat) = res_esri
+        arr_esri = np.array(img_esri)
+        H_esri, W_esri, _ = arr_esri.shape
+        cos_lat = max(0.01, math.cos(math.radians(lat)))
+
+    # Skyline altitude per column
+    # sudut_horizon dari profil sudah di-clamp ke -dip (lihat hitung_profil_cakrawala).
+    # Untuk masking tekstur satelit, kita butuh skyline MENTAH (batas topo DEM asli)
+    # supaya tekstur tidak meluber ke bawah batas terrain → artefak drone-view.
+    siluet_di_azpx = _interp_lingkar(sudut_horizon)  # versi dip-clamp (utk garis ufuk)
+
+    # Hitung skyline MENTAH dari matriks_sudut (maks per azimuth, tanpa clamp dip)
+    siluet_mentah = np.max(matriks_sudut, axis=1)  # shape: (n_azimuth,)
+    siluet_mentah_azpx = _interp_lingkar(siluet_mentah)
+
+    # Interpolate matriks_sudut across columns: shape (lebar_px, n_layer)
+    matriks_sudut_px = np.zeros((lebar_px, n_layer))
+    for s in range(n_layer):
+        matriks_sudut_px[:, s] = _interp_lingkar(matriks_sudut[:, s])
+
+    # Unduh citra satelit Esri untuk seluruh radius profil
+    radius_max_km = float(matriks_jarak_km.max())
+    res_esri = ambil_citra_satelit_esri(lat, lon, radius_max_km, size_px=2048)
+
+    arr_esri = None
+    if res_esri is not None:
+        img_esri, (min_lon, min_lat, max_lon, max_lat) = res_esri
+        arr_esri = np.array(img_esri)
+        H_esri, W_esri, _ = arr_esri.shape
+        cos_lat = max(0.01, math.cos(math.radians(lat)))
+
+    alt_grid = np.linspace(alt_atas, alt_bawah_full, tinggi_px)
+    ALT = alt_grid[:, None]  # (tinggi_px, 1)
+
+    if arr_esri is not None:
+        # Pemetaan 2D Perspektif Geografis Monotonik Presisi
+        R_km = np.zeros((tinggi_px, lebar_px), dtype=float)
+        h_eye_m = max(tinggi_pengamat, 2.0)
+
+        for col in range(lebar_px):
+            angles_col = np.nan_to_num(
+                matriks_sudut_px[col, :], nan=-90.0, posinf=90.0, neginf=-90.0)
+
+            env_angle = np.maximum.accumulate(angles_col)
+            eps = np.arange(len(env_angle), dtype=float) * 1e-7
+            env_for_interp = np.maximum.accumulate(env_angle + eps)
+
+            r_interp = np.interp(
+                alt_grid, env_for_interp, matriks_jarak_km,
+                left=float(matriks_jarak_km[0]), right=radius_max_km)
+
+            first_angle = float(angles_col[0])
+            tan_alt = np.tan(np.radians(np.minimum(alt_grid, -0.001)))
+            tan_alt = np.where(np.abs(tan_alt) < 1e-8, -1e-8, tan_alt)
+            r_flat_km = (np.abs(h_eye_m / tan_alt)) / 1000.0
+            r_flat_km = np.clip(r_flat_km, 0.01, radius_max_km)
+            mask_flat = alt_grid < first_angle
+            R_km[:, col] = np.where(mask_flat, r_flat_km, r_interp)
+
+        AZ_RAD = np.radians(az_query)[None, :]
+        D_NORTH = R_km * np.cos(AZ_RAD)
+        D_EAST = R_km * np.sin(AZ_RAD)
+
+        P_LAT = lat + (D_NORTH / 111.32)
+        P_LON = lon + (D_EAST / (111.32 * cos_lat))
+
+        U = (P_LON - min_lon) / (max_lon - min_lon)
+        V = (max_lat - P_LAT) / (max_lat - min_lat)
+
+        # Bilinear texture sampling menghilangkan blok/pixel patah saat
+        # panorama 8192 px dipetakan dari citra satelit yang lebih kecil.
+        fx = np.clip(U * (W_esri - 1), 0.0, W_esri - 1.0)
+        fy = np.clip(V * (H_esri - 1), 0.0, H_esri - 1.0)
+        x0 = np.floor(fx).astype(np.int32)
+        y0 = np.floor(fy).astype(np.int32)
+        x1 = np.minimum(x0 + 1, W_esri - 1)
+        y1 = np.minimum(y0 + 1, H_esri - 1)
+        wx = (fx - x0).astype(np.float32)
+        wy = (fy - y0).astype(np.float32)
+        c00 = arr_esri[y0, x0, :3].astype(np.float32)
+        c10 = arr_esri[y0, x1, :3].astype(np.float32)
+        c01 = arr_esri[y1, x0, :3].astype(np.float32)
+        c11 = arr_esri[y1, x1, :3].astype(np.float32)
+        wx3 = wx[..., None]
+        wy3 = wy[..., None]
+        sampled_rgb = (c00 * (1.0 - wx3) * (1.0 - wy3)
+                       + c10 * wx3 * (1.0 - wy3)
+                       + c01 * (1.0 - wx3) * wy3
+                       + c11 * wx3 * wy3).astype(np.uint8)
+
+        # Mask ground: gunakan skyline MENTAH (batas DEM asli, tanpa clamp dip)
+        # supaya tekstur satelit HANYA mengisi area di mana ada data terrain.
+        MASK_GROUND = ALT <= siluet_mentah_azpx[None, :]
+        kanvas[..., :3][MASK_GROUND] = sampled_rgb[MASK_GROUND]
+        kanvas[..., 3][MASK_GROUND] = 255
+
+        # --- TANAH TEMPAT BERPIJAK: Coklat Solid apa adanya ---
+        # Area di bawah batas layer pertama dicat coklat tanah apa adanya
+        mask_tanah = MASK_GROUND & (ALT <= matriks_sudut_px[:, 0][None, :])
+        kanvas[..., 0][mask_tanah] = 85   # earth brown R
+        kanvas[..., 1][mask_tanah] = 68   # earth brown G
+        kanvas[..., 2][mask_tanah] = 45   # earth brown B
+
+        # --- RIDGELINE SHADOW / DEPTH EFFECT ---
+        # Setiap lapisan ridgeline (dari dekat ke jauh) membuat bayangan di
+        # permukaan terrain di belakangnya. Gelap = di balik ridgeline dekat.
+        urutan_dekat_ke_jauh = np.argsort(matriks_jarak_km)
+        shadow_map = np.zeros((tinggi_px, lebar_px), dtype=np.float32)
+        for i, s_idx in enumerate(urutan_dekat_ke_jauh):
+            y_curve = layer_di_azpx[s_idx]
+            baris_batas = np.clip(
+                np.round((alt_atas - y_curve) / (alt_atas - alt_bawah_full) * (tinggi_px - 1)).astype(int),
+                0, tinggi_px - 1)
+            fraksi_jarak = float(matriks_jarak_km[s_idx]) / radius_max_km
+            shadow_tebal_px = max(2, int(10 * (1.0 - fraksi_jarak * 0.7)))
+            shadow_kekuatan = 0.22 * (1.0 - fraksi_jarak * 0.5)
+            for col_idx in range(lebar_px):
+                b_top = baris_batas[col_idx]
+                b_bot = min(b_top + shadow_tebal_px, tinggi_px)
+                if b_top < tinggi_px:
+                    panjang = b_bot - b_top
+                    if panjang > 0:
+                        grad = np.linspace(shadow_kekuatan, 0.0, panjang)
+                        shadow_map[b_top:b_bot, col_idx] = np.maximum(
+                            shadow_map[b_top:b_bot, col_idx], grad)
+
+        shadow_mask = MASK_GROUND & (shadow_map > 0.01)
+        if np.any(shadow_mask):
+            darken_factor = 1.0 - shadow_map
+            terrain_rgb = kanvas[..., :3].astype(np.float32)
+            for ch in range(3):
+                terrain_rgb[..., ch][shadow_mask] *= darken_factor[shadow_mask]
+            kanvas[..., :3] = np.clip(terrain_rgb, 0, 255).astype(np.uint8)
+    else:
+        # Fallback jika offline: painter's algorithm gradien elevasi
+        norm = mcolors.Normalize(vmin=float(matriks_jarak_km.min()), vmax=float(matriks_jarak_km.max()))
+        cmap = plt.get_cmap("copper_r")
+        warna_fallback = (cmap(norm(matriks_jarak_km))[:, :3] * 255).astype(np.uint8)
+
+        urutan_jauh_ke_dekat = np.argsort(matriks_jarak_km)[::-1]
+        for s_idx in urutan_jauh_ke_dekat:
+            y_curve = layer_di_azpx[s_idx]
+            baris_batas = np.clip(
+                np.round((alt_atas - y_curve) / (alt_atas - alt_bawah_full) * (tinggi_px - 1)).astype(int),
+                0, tinggi_px - 1)
+            mask = baris_idx >= baris_batas.reshape(1, -1)
+            warna = warna_fallback[s_idx]
+            kanvas[..., 0][mask] = warna[0]
+            kanvas[..., 1][mask] = warna[1]
+            kanvas[..., 2][mask] = warna[2]
+            kanvas[..., 3][mask] = 255
+
+    # --- DISTANT GROUND HAZE di celah antara Dip dan batas Topo DEM ---
+    # Di arah di mana radius DEM berakhir sebelum mencapai ufuk dip (laut/rata):
+    # celah ini merepresentasikan daratan jauh yang memudar di horizon.
+    # Warna: muted distant terrain (hijau-kelabu tanah berkabut, BUKAN biru langit)
+    # Alpha: memudar mulus dari 255 (di batas DEM) hingga 0 (di garis dip)
+    # sehingga menyatu alami dengan langit dinamis Stellarium tanpa garis keras atau artefak biru.
+    dip_derajat = 0.0293 * math.sqrt(max(tinggi_pengamat, 0.0))
+    dip_alt = -dip_derajat
+
+    # Baris garis dip (garis lurus di alt = dip_alt)
+    baris_dip = int(round((alt_atas - dip_alt) / (alt_atas - alt_bawah_full) * (tinggi_px - 1)))
+    baris_dip = max(0, min(tinggi_px - 1, baris_dip))
+
+    # Warna kabut daratan jauh (muted slate green-brown / earth mist)
+    mist_top_r, mist_top_g, mist_top_b = 70, 80, 75    # dekat garis dip (kabut tipis)
+    mist_bot_r, mist_bot_g, mist_bot_b = 60, 75, 55    # dekat batas topo DEM (daratan jauh)
+
+    for col_idx in range(lebar_px):
+        topo_col = siluet_mentah_azpx[col_idx]
+        # Hanya isi gap jika DEM berakhir DI BAWAH garis dip (ada gap daratan jauh)
+        if topo_col < dip_alt:
+            baris_topo_col = int(round((alt_atas - topo_col) / (alt_atas - alt_bawah_full) * (tinggi_px - 1)))
+            baris_topo_col = max(0, min(tinggi_px - 1, baris_topo_col))
+            if baris_topo_col > baris_dip:
+                panjang = baris_topo_col - baris_dip
+                for i in range(panjang):
+                    row = baris_dip + i
+                    # Jangan menimpa jika sudah ada piksel terrain nyata
+                    if kanvas[row, col_idx, 3] == 255 and (ALT[row, 0] <= topo_col):
+                        continue
+                    # t=0 di garis dip (atas), t=1 di batas DEM (bawah)
+                    t = i / max(panjang - 1, 1)
+                    # Horizon daratan solid (alpha=255 penuh, tidak tembus pandang)
+                    r = int(mist_top_r * (1.0 - t) + mist_bot_r * t)
+                    g = int(mist_top_g * (1.0 - t) + mist_bot_g * t)
+                    b = int(mist_top_b * (1.0 - t) + mist_bot_b * t)
+                    kanvas[row, col_idx, 0] = r
+                    kanvas[row, col_idx, 1] = g
+                    kanvas[row, col_idx, 2] = b
+                    kanvas[row, col_idx, 3] = 255
+
+    # TIGA GARIS UFUK (Astronomis 0°, Dip, Topografi) dilukis di atas tekstur satelit
+    _gambar_garis_datar(0.0, _hex_ke_rgb(_GAYA_UFUK["astro"]["warna"]), "dashed")
+    _gambar_garis_datar(-dip_derajat, _hex_ke_rgb(_GAYA_UFUK["dip"]["warna"]), "dotted")
+    _gambar_garis_kontur(siluet_di_azpx, _hex_ke_rgb(_GAYA_UFUK["topo"]["warna"]))
+
+    img = Image.fromarray(kanvas, mode="RGBA")
+    buf_png = io.BytesIO()
+    img.save(buf_png, format="PNG")
+
+    baris_gazetteer = [
+        f"{az:.3f}|{sudut:.3f}|1.50|0.00|{nama}"
+        for az, sudut, nama in puncak_berlabel
+    ]
+    isi_gazetteer_txt = ("\n".join(baris_gazetteer) + "\n") if baris_gazetteer else None
+
+    tanggal_str = datetime.now().strftime("%Y-%m-%d")
+    isi_landscape_ini = (
+        "[landscape]\n"
+        f"name = {nama_lokasi}\n"
+        f"author = {penulis}\n"
+        f"description = Diekspor otomatis dari HisabWin (Terrain 3D Esri Satellite) pada {tanggal_str}. "
+        f"Koordinat: {lat:.6f}, {lon:.6f}. Tinggi pengamat: {tinggi_pengamat:.1f} m dpl. "
+        f"Semua 3 garis ufuk (astronomis 0 deg, dip, topografi) dilukis di atas foto satelit Esri.\n"
+        "type = spherical\n"
+        "maptex = panorama.png\n"
+        f"maptex_top = {alt_atas:.3f}\n"
+        f"maptex_bottom = {alt_bawah_full:.3f}\n"
+        "tesselate_rows = 256\n"
+        "tesselate_cols = 512\n"
+        "bottom_cap_color = 0.15,0.1,0.05\n"
+        "angle_rotatez = 0.00001\n"
+        "ground_color = 0.15, 0.1, 0.05\n"
+        "\n"
+        "[location]\n"
+        f"name = {nama_lokasi}\n"
+        "planet = Earth\n"
+        f"latitude = {lat:+.6f}\n"
+        f"longitude = {lon:+.6f}\n"
+        f"altitude = {int(round(tinggi_pengamat))}\n"
+        "atmospheric_pressure = -1\n"
+    )
+
+    with zipfile.ZipFile(path_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("landscape.ini", isi_landscape_ini)
+        zf.writestr("panorama.png", buf_png.getvalue())
+        if isi_gazetteer_txt:
+            zf.writestr("gazetteer.en.utf8", isi_gazetteer_txt)
+            zf.writestr("gazetteer.id.utf8", isi_gazetteer_txt)
+
+    return path_zip
+
+
 def ekspor_profil_ke_stellarium_panorama(
         profil, path_zip, nama_lokasi=None, penulis="HisabWin",
         lebar_px=8192, margin_atas_derajat=8.0, alt_bawah=-30.0):
@@ -8727,6 +9129,182 @@ def buat_figure_profil_cakrawala(profil):
     return fig
 
 
+def buat_figure_terrain3d_cakrawala(profil, elevasi_maks_jarak_km=None, pakai_satelit_esri=True):
+    """Visualisasi terrain lokal 3D dari matriks sampel Profil Cakrawala
+    dengan tekstur foto satelit Esri (ArcGIS World Imagery) nyata dan 3 garis ufuk.
+    """
+    matriks_sudut = profil.get("matriks_sudut")
+    matriks_jarak_km = profil.get("matriks_jarak_km")
+    azimuth = profil.get("azimuth")
+    sudut_horizon = profil.get("sudut_horizon")
+
+    if matriks_sudut is None or matriks_jarak_km is None or azimuth is None:
+        raise ValueError(
+            "Profil ini belum punya data lapisan terrain. Hitung ulang Profil "
+            "Cakrawala terlebih dahulu supaya viewer 3D dapat dibuat."
+        )
+
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registrasi projection)
+    import matplotlib.pyplot as plt
+    import matplotlib.colors as mcolors
+
+    az = np.asarray(azimuth, dtype=float)
+    sudut = np.asarray(matriks_sudut, dtype=float)
+    jarak_km = np.asarray(matriks_jarak_km, dtype=float)
+    lat = float(profil["lat"])
+    lon = float(profil["lon"])
+
+    if sudut.ndim != 2 or sudut.shape[0] != len(az) or sudut.shape[1] != len(jarak_km):
+        raise ValueError("Dimensi matriks terrain pada profil tidak konsisten.")
+
+    # Optional crop visual agar viewer tidak terlalu berat saat radius besar.
+    if elevasi_maks_jarak_km is not None:
+        try:
+            batas = float(elevasi_maks_jarak_km)
+            if batas > 0:
+                mask = jarak_km <= min(batas, float(jarak_km.max()))
+                if mask.sum() >= 2:
+                    jarak_km = jarak_km[mask]
+                    sudut = sudut[:, mask]
+        except (TypeError, ValueError):
+            pass
+
+    tinggi_pengamat = float(profil.get("tinggi_pengamat", 0.0) or 0.0)
+    r_efektif = float(globals().get("R_BUMI_CAKRAWALA", 6371000.0)) / (
+        1.0 - float(globals().get("REFRAKSI_CAKRAWALA", 0.13))
+    )
+
+    # Koordinat polar -> lokal ENU (East/North/Up), meter.
+    az_rad = np.radians(az)
+    r_m = jarak_km * 1000.0
+    R = np.broadcast_to(r_m[None, :], sudut.shape)
+    AZ = np.broadcast_to(az_rad[:, None], sudut.shape)
+
+    # Balik persamaan sudut yang dipakai hitung_profil_cakrawala().
+    z_rel = R * np.tan(np.radians(sudut)) + (R ** 2) / (2.0 * r_efektif)
+
+    X = R * np.sin(AZ)  # Timur (+)
+    Y = R * np.cos(AZ)  # Utara (+)
+
+    # Tutup seam azimuth 360 -> 0 supaya permukaan benar-benar melingkar.
+    Xp = np.vstack([X, X[0:1, :]])
+    Yp = np.vstack([Y, Y[0:1, :]])
+    Zp = np.vstack([z_rel, z_rel[0:1, :]])
+
+    res_esri = None
+    if pakai_satelit_esri:
+        radius_max = float(jarak_km.max())
+        res_esri = ambil_citra_satelit_esri(lat, lon, radius_max, size_px=2048)
+
+    if res_esri is not None:
+        img_esri, (min_lon, min_lat, max_lon, max_lat) = res_esri
+        arr_esri = np.array(img_esri)
+        H_esri, W_esri, _ = arr_esri.shape
+        cos_lat = max(0.01, math.cos(math.radians(lat)))
+
+        p_lat = lat + ((Yp / 1000.0) / 111.32)
+        p_lon = lon + ((Xp / 1000.0) / (111.32 * cos_lat))
+
+        u = (p_lon - min_lon) / (max_lon - min_lon)
+        v = (max_lat - p_lat) / (max_lat - min_lat)
+        # Bilinear sampling: jauh lebih halus daripada nearest-neighbor,
+        # terutama pada garis pantai/jalan dan saat permukaan diputar 3D.
+        fx = np.clip(u * (W_esri - 1), 0.0, W_esri - 1.0)
+        fy = np.clip(v * (H_esri - 1), 0.0, H_esri - 1.0)
+        x0 = np.floor(fx).astype(np.int32)
+        y0 = np.floor(fy).astype(np.int32)
+        x1 = np.minimum(x0 + 1, W_esri - 1)
+        y1 = np.minimum(y0 + 1, H_esri - 1)
+        wx = (fx - x0).astype(np.float32)
+        wy = (fy - y0).astype(np.float32)
+        c00 = arr_esri[y0, x0, :3].astype(np.float32)
+        c10 = arr_esri[y0, x1, :3].astype(np.float32)
+        c01 = arr_esri[y1, x0, :3].astype(np.float32)
+        c11 = arr_esri[y1, x1, :3].astype(np.float32)
+        wx3 = wx[..., None]
+        wy3 = wy[..., None]
+        face_rgb = (c00 * (1.0 - wx3) * (1.0 - wy3)
+                    + c10 * wx3 * (1.0 - wy3)
+                    + c01 * (1.0 - wx3) * wy3
+                    + c11 * wx3 * wy3) / 255.0
+        facecolors = np.concatenate(
+            [face_rgb, np.full(face_rgb.shape[:-1] + (1,), 0.98, dtype=np.float32)],
+            axis=-1)
+    else:
+        norm = mcolors.Normalize(vmin=float(jarak_km.min()), vmax=float(jarak_km.max()))
+        cmap = plt.get_cmap("terrain")
+        facecolors = cmap(norm(np.broadcast_to(jarak_km[None, :], Zp.shape)))
+        facecolors[..., 3] = 0.90
+
+    fig = plt.figure(figsize=(12, 8))
+    ax = fig.add_subplot(111, projection="3d")
+
+    ax.plot_surface(
+        Xp / 1000.0, Yp / 1000.0, Zp,
+        facecolors=facecolors,
+        rstride=max(1, len(Xp) // 120),
+        cstride=max(1, len(jarak_km) // 60),
+        linewidth=0,
+        antialiased=True,
+        # Jangan beri shading tambahan pada foto satelit. Shading internal
+        # Matplotlib membuat citra tampak bercak/gelap dan menimpa warna asli.
+        shade=False,
+    )
+
+    # Ring kontur horizon/siluet pada permukaan luar
+    az_closed = np.r_[az, az[0] + 360.0]
+    horizon_angles = np.r_[np.asarray(sudut_horizon, dtype=float),
+                           float(np.asarray(sudut_horizon, dtype=float)[0])]
+    jarak_horizon = np.asarray(profil.get("jarak_horizon_km", np.zeros_like(az)), dtype=float)
+    if len(jarak_horizon) == len(az):
+        jh = np.where(jarak_horizon > 0, jarak_horizon, float(jarak_km[-1])) * 1000.0
+        jh_closed = np.r_[jh, jh[0]]
+        zh = jh_closed * np.tan(np.radians(horizon_angles))
+        xh = jh_closed * np.sin(np.radians(az_closed)) / 1000.0
+        yh = jh_closed * np.cos(np.radians(az_closed)) / 1000.0
+        ax.plot(xh, yh, zh, linewidth=2.0, color=_GAYA_UFUK["topo"]["warna"], label=_GAYA_UFUK["topo"].get("nama", "Ufuk Topografi (Pegunungan)"))
+
+    # Observer dan sumbu orientasi.
+    ax.scatter([0], [0], [0], s=60, marker="o", color="#B91C1C", depthshade=False,
+               label=f"Observer (+{tinggi_pengamat:.1f} m dpl)")
+    ax.plot([0, 3], [0, 0], [0, 0], linewidth=2.0, color="#D97706")
+    ax.text(3.2, 0, 0, "T", fontsize=9, fontweight="bold")
+    ax.plot([0, 0], [0, 3], [0, 0], linewidth=2.0, color="#2563EB")
+    ax.text(0, 3.2, 0, "U", fontsize=9, fontweight="bold")
+
+    # Garis vertikal dari observer
+    ax.plot([0, 0], [0, 0], [0, max(0.0, float(np.nanmax(Zp)))],
+            linestyle=":", linewidth=1.0, color="#6B7280")
+
+    ax.set_xlabel("Timur-Barat (km)")
+    ax.set_ylabel("Utara-Selatan (km)")
+    ax.set_zlabel("Tinggi relatif pengamat (m)")
+    radius = float(jarak_km.max())
+    judul_satelit = " (Satelit Esri)" if res_esri is not None else ""
+    ax.set_title(
+        f"Terrain 3D{judul_satelit} — ({lat:.4f}, {lon:.4f}) — radius {radius:.1f} km\n"
+        "Tekstur ArcGIS World Imagery + Garis Ufuk Referensi"
+    )
+
+    try:
+        ax.view_init(elev=28, azim=-55)
+    except Exception:
+        pass
+
+    try:
+        xy_extent = max(float(np.nanmax(np.abs(Xp / 1000.0))),
+                        float(np.nanmax(np.abs(Yp / 1000.0))))
+        z_extent = max(abs(float(np.nanmin(Zp))), abs(float(np.nanmax(Zp))), 1.0) / 1000.0
+        ax.set_box_aspect((xy_extent * 2.0, xy_extent * 2.0, max(z_extent * 2.0, xy_extent * 0.18)))
+    except Exception:
+        pass
+
+    ax.grid(True, alpha=0.25)
+    ax.legend(loc="upper left", fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
 def buat_figure_ridgeline_cakrawala(profil):
     """Versi 'berlapis' dari buat_figure_profil_cakrawala() -- tiap lapisan
     jarak digambar sbg poligon terisi (painter's algorithm: jauh->dekat),
@@ -9128,9 +9706,9 @@ def _fmt_dms(val, dengan_tanda=True):
 # horizontal ufuk itu sendiri MAUPUN penanda Matahari/Bulan yang mengacu
 # ke definisi tsb, supaya gampang dikaitkan sekilas pandang.
 _GAYA_UFUK = {
-    "astro": {"warna": "#2563EB", "linestyle": "--"},   # biru -- ufuk datar 0°
-    "dip":   {"warna": "#7C3AED", "linestyle": ":"},    # ungu -- ufuk dip
-    "topo":  {"warna": "#111827", "linestyle": "-"},    # nyaris hitam -- ufuk topografi nyata
+    "astro": {"warna": "#2563EB", "linestyle": "--", "nama": "Ufuk Astronomis (0°)"},
+    "dip":   {"warna": "#7C3AED", "linestyle": ":",  "nama": "Ufuk Dip (Lengkungan Bumi)"},
+    "topo":  {"warna": "#111827", "linestyle": "-",  "nama": "Ufuk Topografi (Pegunungan)"},
 }
 
 
@@ -12885,6 +13463,11 @@ class HisabWinApp(tk.Tk):
             command=lambda: self._on_tampilkan_ridge_cakrawala(sumber="cakrawala"), state="disabled")
         self.btn_ridge_cakrawala.pack(fill="x", pady=(0, 4))
 
+        self.btn_terrain3d_cakrawala = ttk.Button(
+            frame_tombol_hasil, text="🌍 Tampilkan Terrain 3D",
+            command=self._on_tampilkan_terrain3d_cakrawala, state="disabled")
+        self.btn_terrain3d_cakrawala.pack(fill="x", pady=(0, 4))
+
         self.btn_export_stellarium_cakrawala = ttk.Button(
             frame_tombol_hasil, text="🔭 Ekspor ke Stellarium...",
             command=self._on_export_stellarium_cakrawala, state="disabled")
@@ -12894,6 +13477,11 @@ class HisabWinApp(tk.Tk):
             frame_tombol_hasil, text="🏔️ Ekspor Ridge Line ke Stellarium...",
             command=self._on_export_stellarium_ridge_cakrawala, state="disabled")
         self.btn_export_stellarium_ridge_cakrawala.pack(fill="x", pady=(0, 4))
+
+        self.btn_export_stellarium_terrain3d_cakrawala = ttk.Button(
+            frame_tombol_hasil, text="🌍 Ekspor Terrain 3D ke Stellarium...",
+            command=self._on_export_stellarium_terrain3d_cakrawala, state="disabled")
+        self.btn_export_stellarium_terrain3d_cakrawala.pack(fill="x", pady=(0, 4))
 
         self.btn_export_cdc_ridge_cakrawala = ttk.Button(
             frame_tombol_hasil, text="🌌 Ekspor Ridge Line ke Cartes du Ciel...",
@@ -12935,6 +13523,8 @@ class HisabWinApp(tk.Tk):
         self.btn_simpan_txt_cakrawala.config(state="disabled")
         self.btn_simpan_profil_cakrawala.config(state="disabled")
         self.btn_ridge_cakrawala.config(state="disabled")
+        self.btn_terrain3d_cakrawala.config(state="disabled")
+        self.btn_export_stellarium_terrain3d_cakrawala.config(state="disabled")
         self.label_hasil_cakrawala.config(text="Menghitung... lihat log Status di atas untuk progres.")
         self._log(f"\nMenghitung Profil Cakrawala di ({lat:.4f}, {lon:.4f}), "
                    f"radius {radius_km:.0f} km, resolusi {n_azimuth} arah "
@@ -13036,6 +13626,41 @@ class HisabWinApp(tk.Tk):
         except OSError as e:
             messagebox.showerror("Gagal menyimpan", f"Tidak bisa menulis file .zip:\n{e}")
 
+    def _on_export_stellarium_terrain3d_cakrawala(self):
+        """Tombol '🌍 Ekspor Terrain 3D ke Stellarium...' -- mengekspor
+        landscape Stellarium (spherical) bertekstur foto satelit Esri (ArcGIS
+        World Imagery) nyata dengan 3 garis referensi ufuk (astronomis 0°,
+        dip horizon, dan ufuk topografi) yang digambar di atas foto satelit."""
+        if not self._hasil_cakrawala_terakhir:
+            messagebox.showwarning("Belum ada data", "Hitung Profil Cakrawala terlebih dahulu.")
+            return
+        profil = self._hasil_cakrawala_terakhir
+        nama_default = f"stellarium_terrain3d_esri_{profil['lat']:.4f}_{profil['lon']:.4f}.zip"
+        path = filedialog.asksaveasfilename(
+            defaultextension=".zip",
+            filetypes=[("Landscape Stellarium (.zip)", "*.zip"), ("Semua File", "*.*")],
+            initialfile=nama_default,
+            title="Ekspor Terrain 3D (Satelit Esri) ke Landscape Stellarium")
+        if not path:
+            return
+        try:
+            self._log("Mengunduh citra satelit Esri & melukis panorama Stellarium 3D...")
+            ekspor_profil_ke_stellarium_terrain3d_satellite(profil, path)
+            messagebox.showinfo(
+                "Tersimpan",
+                f"Landscape Stellarium (Terrain 3D Satelit Esri) disimpan ke:\n{path}\n\n"
+                "Tekstur panorama permukaan dibuat dari foto satelit Esri World Imagery "
+                "dengan 3 garis ufuk (astronomis 0°, dip horizon, dan topografi) di atasnya.\n\n"
+                "Cara pakai: buka Stellarium -> tekan F4 (Lansekap) -> "
+                "\"Tambahkan/Impor landscape dari file...\" -> pilih file .zip ini.\n\n"
+                "Kalau arah gunung tidak pas kompas, edit angle_rotatez di "
+                "landscape.ini dalam .zip ini (tidak perlu ekspor ulang).")
+            self._log(f"Landscape Stellarium (Terrain 3D Satelit Esri) diekspor ke: {path}")
+        except ValueError as e:
+            messagebox.showwarning("Data belum lengkap", str(e))
+        except OSError as e:
+            messagebox.showerror("Gagal menyimpan", f"Tidak bisa menulis file .zip:\n{e}")
+
     def _on_export_cdc_ridge_cakrawala(self):
         """Tombol '🌌 Ekspor Ridge Line ke Cartes du Ciel...' -- companion
         dari _on_export_stellarium_ridge_cakrawala() di atas, lihat
@@ -13121,8 +13746,10 @@ class HisabWinApp(tk.Tk):
         self.btn_simpan_txt_cakrawala.config(state="normal")
         self.btn_simpan_profil_cakrawala.config(state="normal")
         self.btn_ridge_cakrawala.config(state="normal")
+        self.btn_terrain3d_cakrawala.config(state="normal")
         self.btn_export_stellarium_cakrawala.config(state="normal")
         self.btn_export_stellarium_ridge_cakrawala.config(state="normal")
+        self.btn_export_stellarium_terrain3d_cakrawala.config(state="normal")
         self.btn_export_cdc_ridge_cakrawala.config(state="normal")
         try:
             fig_cakrawala = buat_figure_profil_cakrawala(profil)
@@ -13133,6 +13760,28 @@ class HisabWinApp(tk.Tk):
         except Exception as e:
             self._log(f"(Grafik cakrawala gagal ditampilkan, tapi data tetap termuat: {e})")
             messagebox.showerror("Gagal menampilkan grafik", str(e))
+
+    def _on_tampilkan_terrain3d_cakrawala(self):
+        """Tampilkan rekonstruksi terrain 3D dari matriks sampel Profil Cakrawala
+        dengan tekstur foto satelit Esri World Imagery dan 3 garis ufuk.
+        """
+        if not self._hasil_cakrawala_terakhir:
+            messagebox.showinfo("Belum ada profil", "Hitung atau muat Profil Cakrawala dulu.")
+            return
+        profil = self._hasil_cakrawala_terakhir
+        try:
+            self._log("Mengunduh citra satelit Esri & memproses Terrain 3D...")
+            fig_terrain = buat_figure_terrain3d_cakrawala(profil, pakai_satelit_esri=True)
+            tgl_label = f"({profil['lat']:.3f}, {profil['lon']:.3f})"
+            frame_terrain = self._tampilkan_peta(
+                "cakrawala_terrain3d", f"🌍 Terrain 3D — {tgl_label}", fig_terrain)
+            self.notebook.select(frame_terrain)
+            self._log("Terrain 3D (Satelit Esri) berhasil ditampilkan.")
+        except ValueError as e:
+            messagebox.showinfo("Perlu hitung ulang", str(e))
+        except Exception as e:
+            self._log(f"(Terrain 3D gagal ditampilkan: {e})")
+            messagebox.showerror("Gagal menampilkan Terrain 3D", str(e))
 
     def _on_tampilkan_ridge_cakrawala(self, sumber="cakrawala"):
         """Tombol '⛰️ Tampilkan Ridge Line' -- gambar profil["matriks_sudut"]
@@ -15546,8 +16195,10 @@ for i in range(7):
                     self.btn_simpan_txt_cakrawala.config(state="normal")
                     self.btn_simpan_profil_cakrawala.config(state="normal")
                     self.btn_ridge_cakrawala.config(state="normal")
+                    self.btn_terrain3d_cakrawala.config(state="normal")
                     self.btn_export_stellarium_cakrawala.config(state="normal")
                     self.btn_export_stellarium_ridge_cakrawala.config(state="normal")
+                    self.btn_export_stellarium_terrain3d_cakrawala.config(state="normal")
                     self.btn_export_cdc_ridge_cakrawala.config(state="normal")
                     try:
                         fig_cakrawala = buat_figure_profil_cakrawala(profil)
@@ -15574,8 +16225,10 @@ for i in range(7):
                         self.btn_simpan_txt_cakrawala.config(state="normal")
                         self.btn_simpan_profil_cakrawala.config(state="normal")
                         self.btn_ridge_cakrawala.config(state="normal")
+                        self.btn_terrain3d_cakrawala.config(state="normal")
                         self.btn_export_stellarium_cakrawala.config(state="normal")
                         self.btn_export_stellarium_ridge_cakrawala.config(state="normal")
+                        self.btn_export_stellarium_terrain3d_cakrawala.config(state="normal")
                         self.btn_export_cdc_ridge_cakrawala.config(state="normal")
 
                 elif jenis == "simulasi_hilal_ok":
