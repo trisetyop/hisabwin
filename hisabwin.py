@@ -7732,7 +7732,12 @@ def hitung_profil_cakrawala(lat, lon, tinggi_mata=2.0, radius_km=30, n_azimuth=1
     progress_cb(f"Elevasi tanah: {elev_tanah:.1f} m, tinggi mata: {tinggi_pengamat:.1f} m")
 
     azimuth = np.linspace(0, 360, n_azimuth, endpoint=False)
-    jarak_arr = np.linspace(radius_km * 1000 / n_sample, radius_km * 1000, n_sample)
+    # Sampling jarak non-linear (pangkat 1.8): lebih rapat di medan dekat (100m s/d 750m)
+    # agar kontur elevasi lereng/bukit dekat pengamat terukur presisi dari DEM30
+    d_min = 100.0  # 100m (bebas noise kuantisasi grid DEM)
+    d_max = radius_km * 1000.0
+    t_step = np.linspace(0, 1, n_sample)
+    jarak_arr = d_min + (d_max - d_min) * (t_step ** 1.8)
 
     progress_cb(f"Menyiapkan {n_azimuth * n_sample} titik sampel ({n_azimuth} arah x {n_sample} jarak)...")
     semua_titik = []  # (az_idx, s_idx, jarak_m, lat, lon)
@@ -8027,14 +8032,21 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
     az_query = (az_px + 90.0) % 360.0
     az_ext = np.concatenate([az_sorted - 360.0, az_sorted, az_sorted + 360.0])
 
-    def _interp_lingkar(y_asli):
+    def _interp_lingkar(y_asli, kernel_az=1):
         y_sorted = np.asarray(y_asli, dtype=float)[urutan_az]
+        if kernel_az > 1:
+            pad = kernel_az // 2
+            ext_az = np.concatenate([y_sorted[-pad:], y_sorted, y_sorted[:pad]])
+            x_g = np.linspace(-2, 2, kernel_az)
+            g_win = np.exp(-x_g**2 / 2)
+            g_win /= g_win.sum()
+            y_sorted = np.convolve(ext_az, g_win, mode='same')[pad:-pad]
         y_ext = np.concatenate([y_sorted, y_sorted, y_sorted])
         return np.interp(az_query, az_ext, y_ext)
 
     n_layer = matriks_sudut.shape[1]
     layer_di_azpx = np.stack(
-        [_interp_lingkar(matriks_sudut[:, s]) for s in range(n_layer)], axis=0)
+        [_interp_lingkar(matriks_sudut[:, s], kernel_az=3) for s in range(n_layer)], axis=0)
 
     kanvas = np.zeros((tinggi_px, lebar_px, 4), dtype=np.uint8)
     baris_idx = np.arange(tinggi_px).reshape(-1, 1)
@@ -8074,27 +8086,17 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
             kanvas[b, np.arange(lebar_px), 2] = warna_rgb[2]
             kanvas[b, np.arange(lebar_px), 3] = 255
 
-    radius_max_km = float(matriks_jarak_km.max())
-    res_esri = ambil_citra_satelit_esri(lat, lon, radius_max_km, size_px=2048)
-
-    arr_esri = None
-    if res_esri is not None:
-        img_esri, (min_lon, min_lat, max_lon, max_lat) = res_esri
-        arr_esri = np.array(img_esri)
-        H_esri, W_esri, _ = arr_esri.shape
-        cos_lat = max(0.01, math.cos(math.radians(lat)))
-
     # Skyline altitude per column
     # sudut_horizon dari profil sudah di-clamp ke -dip (lihat hitung_profil_cakrawala).
     # Untuk masking tekstur satelit, kita butuh skyline MENTAH (batas topo DEM asli)
     # supaya tekstur tidak meluber ke bawah batas terrain → artefak drone-view.
-    siluet_di_azpx = _interp_lingkar(sudut_horizon)  # versi dip-clamp (utk garis ufuk)
+    siluet_di_azpx = _interp_lingkar(sudut_horizon, kernel_az=3)  # versi dip-clamp (utk garis ufuk)
 
     # Hitung skyline MENTAH dari matriks_sudut (maks per azimuth, tanpa clamp dip)
     siluet_mentah = np.max(matriks_sudut, axis=1)  # shape: (n_azimuth,)
-    siluet_mentah_azpx = _interp_lingkar(siluet_mentah)
+    siluet_mentah_azpx = _interp_lingkar(siluet_mentah, kernel_az=3)
 
-    # Interpolate matriks_sudut across columns: shape (lebar_px, n_layer)
+    # Interpolate matriks_sudut secara halus melingkar: shape (lebar_px, n_layer)
     matriks_sudut_px = np.zeros((lebar_px, n_layer))
     for s in range(n_layer):
         matriks_sudut_px[:, s] = _interp_lingkar(matriks_sudut[:, s])
@@ -8116,7 +8118,10 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
     if arr_esri is not None:
         # Pemetaan 2D Perspektif Geografis Monotonik Presisi
         R_km = np.zeros((tinggi_px, lebar_px), dtype=float)
-        h_eye_m = max(tinggi_pengamat, 2.0)
+        # Tinggi mata pengamat di atas permukaan tanah lokal (misal 2.0 meter)
+        # BUKAN elevasi permukaan laut (1566m), agar pandangan ke bawah kaki
+        # mengambil citra tanah puncakan tempat berdiri (1m-100m), bukan kota di lembah 5km.
+        h_local_m = max(float(profil.get("tinggi_mata", 2.0)), 2.0)
 
         for col in range(lebar_px):
             angles_col = np.nan_to_num(
@@ -8133,10 +8138,13 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
             first_angle = float(angles_col[0])
             tan_alt = np.tan(np.radians(np.minimum(alt_grid, -0.001)))
             tan_alt = np.where(np.abs(tan_alt) < 1e-8, -1e-8, tan_alt)
-            r_flat_km = (np.abs(h_eye_m / tan_alt)) / 1000.0
-            r_flat_km = np.clip(r_flat_km, 0.01, radius_max_km)
+            # Formulasi Kontinu Presisi: Pada alt = first_angle, r_flat tepat sama dengan matriks_jarak_km[0].
+            # Tidak ada lompatan radius (zero radius jump), sehingga tidak ada garis kontur bergerigi/patah.
+            tan_first = math.tan(math.radians(min(first_angle, -0.01)))
+            r_flat_continuous = float(matriks_jarak_km[0]) * np.abs(tan_first / tan_alt)
+            r_flat_continuous = np.clip(r_flat_continuous, 0.001, float(matriks_jarak_km[0]))
             mask_flat = alt_grid < first_angle
-            R_km[:, col] = np.where(mask_flat, r_flat_km, r_interp)
+            R_km[:, col] = r_interp
 
         AZ_RAD = np.radians(az_query)[None, :]
         D_NORTH = R_km * np.cos(AZ_RAD)
@@ -8169,18 +8177,28 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
                        + c01 * (1.0 - wx3) * wy3
                        + c11 * wx3 * wy3).astype(np.uint8)
 
-        # Mask ground: gunakan skyline MENTAH (batas DEM asli, tanpa clamp dip)
-        # supaya tekstur satelit HANYA mengisi area di mana ada data terrain.
-        MASK_GROUND = ALT <= siluet_mentah_azpx[None, :]
-        kanvas[..., :3][MASK_GROUND] = sampled_rgb[MASK_GROUND]
-        kanvas[..., 3][MASK_GROUND] = 255
+        # Hitung garis batas bawah lereng gunung secara halus (smooth 360 derajat)
+        angles_first = matriks_sudut_px[:, 0]
+        k_sz = max(lebar_px // 40, 64)
+        pad_f = np.concatenate([angles_first[-k_sz:], angles_first, angles_first[:k_sz]])
+        win_f = np.ones(2 * k_sz + 1) / (2 * k_sz + 1)
+        first_angle_smooth = np.convolve(pad_f, win_f, mode='same')[k_sz:-k_sz]
 
-        # --- TANAH TEMPAT BERPIJAK: Coklat Solid apa adanya ---
-        # Area di bawah batas layer pertama dicat coklat tanah apa adanya
-        mask_tanah = MASK_GROUND & (ALT <= matriks_sudut_px[:, 0][None, :])
-        kanvas[..., 0][mask_tanah] = 85   # earth brown R
-        kanvas[..., 1][mask_tanah] = 68   # earth brown G
-        kanvas[..., 2][mask_tanah] = 45   # earth brown B
+        # Mask ground: batas skyline MENTAH (DEM asli)
+        MASK_GROUND = ALT <= siluet_mentah_azpx[None, :]
+
+        # 1. Foto Satelit ESRI 3D pada lereng & puncakan gunung (di atas batas kaki gunung)
+        mask_mountain = MASK_GROUND & (ALT >= first_angle_smooth[None, :])
+        kanvas[..., :3][mask_mountain] = sampled_rgb[mask_mountain]
+        kanvas[..., 3][mask_mountain] = 255
+
+        # 2. Tanah Berpijak Padat (Ground Cap): Warna tanah solid Stellarium (RGB 38, 25, 13) di bawah kaki gunung
+        # Bebas garis vertikal/garis memanjang ke bawah dan bebas gerigi tangga.
+        mask_ground_cap = ALT < first_angle_smooth[None, :]
+        kanvas[..., 0][mask_ground_cap] = 38   # 0.15 * 255 (ground_color Stellarium)
+        kanvas[..., 1][mask_ground_cap] = 25   # 0.10 * 255
+        kanvas[..., 2][mask_ground_cap] = 13   # 0.05 * 255
+        kanvas[..., 3][mask_ground_cap] = 255
 
         # --- RIDGELINE SHADOW / DEPTH EFFECT ---
         # Setiap lapisan ridgeline (dari dekat ke jauh) membuat bayangan di
@@ -8205,7 +8223,7 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
                         shadow_map[b_top:b_bot, col_idx] = np.maximum(
                             shadow_map[b_top:b_bot, col_idx], grad)
 
-        shadow_mask = MASK_GROUND & (shadow_map > 0.01)
+        shadow_mask = mask_mountain & (shadow_map > 0.01)
         if np.any(shadow_mask):
             darken_factor = 1.0 - shadow_map
             terrain_rgb = kanvas[..., :3].astype(np.float32)
@@ -8278,6 +8296,7 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
     _gambar_garis_kontur(siluet_di_azpx, _hex_ke_rgb(_GAYA_UFUK["topo"]["warna"]))
 
     img = Image.fromarray(kanvas, mode="RGBA")
+    profil["panorama_img"] = img
     buf_png = io.BytesIO()
     img.save(buf_png, format="PNG")
 
@@ -8314,14 +8333,169 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
         "atmospheric_pressure = -1\n"
     )
 
+    import json
+
+    def _profil_ke_json(p):
+        d = {}
+        for k, v in p.items():
+            if k == "panorama_img" or k.startswith("_"):
+                continue
+            if isinstance(v, np.ndarray):
+                d[k] = v.tolist()
+            elif isinstance(v, (np.float64, np.float32)):
+                d[k] = float(v)
+            elif isinstance(v, (np.int64, np.int32)):
+                d[k] = int(v)
+            elif isinstance(v, (str, int, float, bool, list, dict, type(None))):
+                d[k] = v
+        return json.dumps(d)
+
+    isi_horizon_txt = "\n".join(
+        f"{az:.3f} {sudut:.3f}"
+        for az, sudut in zip(profil["azimuth"], profil["sudut_horizon"])
+    ) + "\n"
+
     with zipfile.ZipFile(path_zip, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("landscape.ini", isi_landscape_ini)
         zf.writestr("panorama.png", buf_png.getvalue())
+        zf.writestr("horizon.txt", isi_horizon_txt)
+        zf.writestr("profil.json", _profil_ke_json(profil))
         if isi_gazetteer_txt:
             zf.writestr("gazetteer.en.utf8", isi_gazetteer_txt)
             zf.writestr("gazetteer.id.utf8", isi_gazetteer_txt)
 
     return path_zip
+
+
+def _json_ke_profil(json_str):
+    import json
+    data = json.loads(json_str)
+    profil = {}
+    for k, v in data.items():
+        if k in ("azimuth", "sudut_horizon", "jarak_horizon_km", "elevasi_titik_m", "matriks_sudut", "matriks_jarak_km"):
+            profil[k] = np.array(v, dtype=float)
+        else:
+            profil[k] = v
+    return profil
+
+
+def muat_profil_cakrawala_stellarium_zip(path_zip):
+    """Membaca file .zip landscape Stellarium (baik tipe polygonal, ridge line,
+    maupun terrain 3D esri) dan merekonstruksi dict profil cakrawala siap-pakai
+    untuk Simulasi Hilal di HisabWin.
+    """
+    import zipfile
+    import configparser
+    import json
+
+    with zipfile.ZipFile(path_zip, "r") as zf:
+        namelist = zf.namelist()
+
+        # 1. Jika ada profil.json internal HisabWin, muat langsung dengan data presisi penuh
+        if "profil.json" in namelist:
+            isi_json = zf.read("profil.json").decode("utf-8")
+            res_p = _json_ke_profil(isi_json)
+            if "panorama.png" in namelist:
+                try:
+                    from PIL import Image
+                    import io
+                    buf_p = zf.read("panorama.png")
+                    res_p["panorama_img"] = Image.open(io.BytesIO(buf_p)).convert("RGBA")
+                except Exception:
+                    pass
+            return res_p
+
+        # 2. Jika tidak ada profil.json, parse landscape.ini + horizon.txt / gazetteer
+        lat, lon, alt = 0.0, 0.0, 0.0
+        nama_lokasi = os.path.basename(path_zip)
+
+        if "landscape.ini" in namelist:
+            ini_content = zf.read("landscape.ini").decode("utf-8", errors="ignore")
+            config = configparser.ConfigParser(strict=False)
+            config.read_string(ini_content)
+
+            if "location" in config:
+                loc = config["location"]
+                lat = float(loc.get("latitude", 0.0))
+                lon = float(loc.get("longitude", 0.0))
+                alt = float(loc.get("altitude", 0.0))
+                if "name" in loc:
+                    nama_lokasi = loc["name"]
+            elif "landscape" in config and "name" in config["landscape"]:
+                nama_lokasi = config["landscape"]["name"]
+
+        azimuth_list = []
+        sudut_list = []
+
+        if "horizon.txt" in namelist:
+            isi_horiz = zf.read("horizon.txt").decode("utf-8", errors="ignore")
+            for line in isi_horiz.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split()
+                if len(parts) >= 2:
+                    try:
+                        az = float(parts[0])
+                        alt_val = float(parts[1])
+                        if az <= 360.0 or not azimuth_list:
+                            azimuth_list.append(az % 360.0)
+                            sudut_list.append(alt_val)
+                    except ValueError:
+                        continue
+
+        puncak_berlabel = []
+        for g_name in ("gazetteer.id.utf8", "gazetteer.en.utf8"):
+            if g_name in namelist:
+                isi_g = zf.read(g_name).decode("utf-8", errors="ignore")
+                for line in isi_g.splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split("|")
+                    if len(parts) >= 5:
+                        try:
+                            az_g = float(parts[0])
+                            alt_g = float(parts[1])
+                            nama_g = parts[4].strip()
+                            puncak_berlabel.append((az_g, alt_g, nama_g))
+                        except ValueError:
+                            continue
+                break
+
+        if not azimuth_list:
+            azimuth_list = np.linspace(0, 360, 180, endpoint=False).tolist()
+            sudut_list = [0.0] * 180
+
+        az_arr = np.array(azimuth_list, dtype=float)
+        sudut_arr = np.array(sudut_list, dtype=float)
+
+        panorama_img = None
+        if "panorama.png" in namelist:
+            try:
+                from PIL import Image
+                import io
+                buf_p = zf.read("panorama.png")
+                panorama_img = Image.open(io.BytesIO(buf_p)).convert("RGBA")
+            except Exception:
+                panorama_img = None
+
+        sort_idx = np.argsort(az_arr)
+        az_arr = az_arr[sort_idx]
+        sudut_arr = sudut_arr[sort_idx]
+
+        res_dict = {
+            "lat": lat, "lon": lon, "tinggi_mata": 2.0, "radius_km": 30.0,
+            "elev_tanah": alt, "tinggi_pengamat": alt,
+            "azimuth": az_arr, "sudut_horizon": sudut_arr,
+            "jarak_horizon_km": np.zeros(len(az_arr)),
+            "elevasi_titik_m": np.zeros(len(az_arr)),
+            "puncak_berlabel": puncak_berlabel,
+            "nama_lokasi": nama_lokasi,
+        }
+        if panorama_img is not None:
+            res_dict["panorama_img"] = panorama_img
+        return res_dict
 
 
 def ekspor_profil_ke_stellarium_panorama(
@@ -9804,9 +9978,19 @@ def buat_figure_simulasi_hilal(profil, hasil):
     # ["matriks_jarak_km"] (cuma ada di profil yg dihitung/dimuat SETELAH
     # fitur Ridge Line ditambahkan) -- profil lama tanpa itu tetap dapat
     # fallback isian datar spt sebelumnya, TIDAK error.
+    panorama_img = profil.get("panorama_img")
     matriks_sudut = profil.get("matriks_sudut")
     matriks_jarak_km = profil.get("matriks_jarak_km")
-    if matriks_sudut is not None and matriks_jarak_km is not None:
+
+    if panorama_img is not None:
+        img_arr = np.asarray(panorama_img)
+        h_p, w_p = img_arr.shape[:2]
+        # Align Stellarium spherical texture (Column 0 = 90° East) to Matplotlib X-axis (Column 0 = 0° North)
+        img_aligned = np.roll(img_arr, int(w_p / 4), axis=1)
+        ax.imshow(img_aligned, extent=[0.0, 360.0, -90.0, 90.0], origin="upper", aspect="auto", zorder=1)
+        h_topo, = ax.plot(azimuth, sudut_horizon, color=_GAYA_UFUK["topo"]["warna"], linewidth=1.2,
+                           zorder=3, label="Ufuk topografi (cakrawala nyata)")
+    elif matriks_sudut is not None and matriks_jarak_km is not None:
         import matplotlib.colors as mcolors
         norm = mcolors.Normalize(vmin=matriks_jarak_km.min(), vmax=matriks_jarak_km.max())
         cmap = plt.get_cmap("copper_r")
@@ -13943,6 +14127,10 @@ class HisabWinApp(tk.Tk):
             frame_pilih_profil, text="🔄", width=3,
             command=self._muat_ulang_daftar_profil_simulasi_hilal
         ).pack(side="left", padx=(4, 0))
+        ttk.Button(
+            frame_pilih_profil, text="📂 Muat File (.txt / .zip Stellarium)...",
+            command=self._on_buka_file_profil_simulasi_hilal
+        ).pack(side="left", padx=(4, 0))
 
         # Sama seperti di akordeon 🏔️ Profil Cakrawala: tombol ini pakai
         # handler & state (self._hasil_cakrawala_terakhir) yang SAMA persis
@@ -14896,25 +15084,27 @@ for i in range(7):
             btn_ridge.config(state="normal")
 
     def _daftar_profil_cakrawala_tersimpan(self):
-        """List (label, path) semua profil .txt di folder data terkelola
+        """List (label, path) semua profil .txt / .zip di folder data terkelola
         (_folder_data_profil_cakrawala()), terbaru dulu -- dipakai combobox
-        pilih-cepat di akordeon Simulasi Hilal (BUKAN dialog Manajer Profil
-        yang penuh, cukup pilih langsung dari dropdown)."""
+        pilih-cepat di akordeon Simulasi Hilal."""
         folder = _folder_data_profil_cakrawala()
         try:
-            nama_file = [n for n in os.listdir(folder) if n.lower().endswith(".txt")]
+            nama_file = [n for n in os.listdir(folder) if n.lower().endswith((".txt", ".zip"))]
         except OSError:
             return []
         nama_file.sort(key=lambda n: os.path.getmtime(os.path.join(folder, n)), reverse=True)
         hasil = []
         for nama in nama_file:
             path = os.path.join(folder, nama)
-            meta = _baca_meta_profil_cakrawala_txt(path) or {}
-            try:
-                lat, lon = float(meta.get("lat")), float(meta.get("lon"))
-                label = f"({lat:.4f}, {lon:.4f}) — {nama}"
-            except (TypeError, ValueError):
-                label = nama
+            if nama.lower().endswith(".zip"):
+                label = f"📦 {nama}"
+            else:
+                meta = _baca_meta_profil_cakrawala_txt(path) or {}
+                try:
+                    lat, lon = float(meta.get("lat")), float(meta.get("lon"))
+                    label = f"({lat:.4f}, {lon:.4f}) — {nama}"
+                except (TypeError, ValueError):
+                    label = nama
             hasil.append((label, path))
         return hasil
 
@@ -14922,7 +15112,7 @@ for i in range(7):
         """Segarkan isi combobox pilih-profil dari folder data terkelola.
         Dipanggil saat akordeon ini pertama dibangun, saat tombol 🔄
         ditekan, dan otomatis tiap kali ada profil baru selesai
-        dihitung/disimpan/diimpor (lihat pemanggilnya)."""
+        dihitung/disimpan/diimpor."""
         daftar = self._daftar_profil_cakrawala_tersimpan()
         self._peta_label_ke_path_profil_simulasi_hilal = dict(daftar)
         self.combo_pilih_profil_simulasi_hilal["values"] = [label for label, _ in daftar]
@@ -14930,18 +15120,15 @@ for i in range(7):
             self.var_pilih_profil_simulasi_hilal.set("")
 
     def _on_pilih_profil_simulasi_hilal(self, event=None):
-        """Begitu user memilih 1 item combobox, LANGSUNG muat profilnya --
-        tanpa dialog, tanpa langkah tambahan apa pun. Kalau file-nya
-        profil LAMA yang belum punya elev_tanah (dipakai utk "ufuk dip"),
-        profil TETAP langsung dipakai apa adanya (fallback elev_tanah=0.0,
-        tidak memblokir UI), sambil sekalian dilengkapi & disimpan balik
-        di latar belakang -- lihat _lengkapi_elev_tanah_simulasi_hilal_thread."""
         label = self.var_pilih_profil_simulasi_hilal.get()
         path = self._peta_label_ke_path_profil_simulasi_hilal.get(label)
         if not path:
             return
         try:
-            profil = muat_profil_cakrawala_txt(path)
+            if path.lower().endswith(".zip"):
+                profil = muat_profil_cakrawala_stellarium_zip(path)
+            else:
+                profil = muat_profil_cakrawala_txt(path)
         except Exception as e:
             messagebox.showerror("Gagal membaca profil", f"Tidak bisa membaca:\n{path}\n\n{e}")
             return
@@ -14949,12 +15136,40 @@ for i in range(7):
         self._perbarui_status_profil_simulasi_hilal()
         self._log(f"Profil Cakrawala dipilih utk Simulasi Hilal: {os.path.basename(path)}")
 
-        if not profil.get("_elev_tanah_dari_file", True):
+        if not profil.get("_elev_tanah_dari_file", True) and path.lower().endswith(".txt"):
             self._log("  (profil lama, belum ada data elevasi tanah -- melengkapi "
                        "otomatis di latar belakang, butuh internet...)")
             threading.Thread(
                 target=self._lengkapi_elev_tanah_simulasi_hilal_thread,
                 args=(path, profil), daemon=True).start()
+
+    def _on_buka_file_profil_simulasi_hilal(self):
+        """Membuka file dialog untuk memilih file profil (.txt) ATAU file
+        landscape Stellarium (.zip, baik Terrain 3D, Ridge Line, maupun Polygonal).
+        """
+        path = filedialog.askopenfilename(
+            filetypes=[
+                ("Profil Cakrawala / Landscape Stellarium", "*.zip *.txt"),
+                ("Landscape Stellarium (.zip)", "*.zip"),
+                ("Profil Cakrawala (.txt)", "*.txt"),
+                ("Semua File", "*.*")
+            ],
+            title="Buka File Profil / Landscape Stellarium"
+        )
+        if not path:
+            return
+        try:
+            if path.lower().endswith(".zip"):
+                profil = muat_profil_cakrawala_stellarium_zip(path)
+            else:
+                profil = muat_profil_cakrawala_txt(path)
+            self._hasil_cakrawala_terakhir = profil
+            self._perbarui_status_profil_simulasi_hilal()
+            nama_f = os.path.basename(path)
+            self._log(f"Profil Cakrawala dimuat dari file: {nama_f}")
+            messagebox.showinfo("Profil Dimuat", f"Profil Cakrawala berhasil dimuat dari file:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Gagal membaca profil", f"Tidak bisa membaca file:\n{path}\n\n{e}")
 
     def _lengkapi_elev_tanah_simulasi_hilal_thread(self, path, profil):
         try:
