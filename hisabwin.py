@@ -7815,13 +7815,38 @@ def hitung_profil_cakrawala(lat, lon, tinggi_mata=2.0, radius_km=30, n_azimuth=1
 
     progress_cb(f"{len(puncak_berlabel)} dari {len(idx_puncak)} kandidat puncak berhasil diberi nama.")
 
+    progress_cb("Mengunduh & mengolah citra satelit Esri (ArcGIS World Imagery)...")
+    res_esri = None
+    try:
+        res_esri = ambil_citra_satelit_esri(lat, lon, radius_km, progress_cb=progress_cb)
+        if res_esri is not None:
+            progress_cb("Citra satelit Esri (area luas) berhasil diunduh & diolah.")
+    except Exception as e:
+        progress_cb(f"  (Citra satelit Esri diabaikan: {e})")
+
+    # Unduh citra nadir (zoom maksimal, area sempit ~0.5 km di sekitar pengamat)
+    # untuk tekstur tanah berpijak (ground cap) di Terrain 3D.
+    res_esri_nadir = None
+    try:
+        progress_cb("Mengunduh citra satelit nadir (zoom maks, medan dekat)...")
+        res_esri_nadir = ambil_citra_satelit_esri(lat, lon, 0.5, progress_cb=progress_cb)
+        if res_esri_nadir is not None:
+            progress_cb("Citra satelit nadir (ground cap) berhasil diunduh.")
+    except Exception as e:
+        progress_cb(f"  (Citra nadir diabaikan: {e})")
+
+    nama_lokasi = dapatkan_nama_lokasi_reverse_geocode(lat, lon)
+
     return {
         "lat": lat, "lon": lon, "tinggi_mata": tinggi_mata, "radius_km": radius_km,
         "elev_tanah": float(elev_tanah), "tinggi_pengamat": float(tinggi_pengamat),
+        "nama_lokasi": nama_lokasi,
         "azimuth": azimuth, "sudut_horizon": sudut_horizon,
         "jarak_horizon_km": jarak_horizon / 1000.0, "elevasi_titik_m": elevasi_horizon,
         "puncak_berlabel": puncak_berlabel,
         "matriks_sudut": matriks_sudut, "matriks_jarak_km": jarak_arr / 1000.0,
+        "esri_satelit_res": res_esri,
+        "esri_nadir_res": res_esri_nadir,
     }
 
 
@@ -7930,12 +7955,13 @@ def ekspor_profil_ke_stellarium(profil, path_zip, nama_lokasi=None, penulis="His
 _CACHE_CITRA_ESRI = {}
 
 
-def ambil_citra_satelit_esri(lat, lon, radius_km, size_px=1024, timeout=25):
+def ambil_citra_satelit_esri(lat, lon, radius_km, size_px=2048, timeout=25, progress_cb=lambda msg: None):
     """Mengunduh citra satelit Esri World Imagery (ArcGIS MapServer) untuk area
     lingkaran pengamat dengan radius_km.
 
-    Mencoba ukuran `size_px` (default 1024 agar cepat & hemat kuota).
-    Jika timeout, otomatis melakukan retry dengan ukuran lebih kecil (512px) dan timeout lebih panjang.
+    Mencoba mengunduh mosaik 2x2 sub-tile paralel (4 tile x 1024px = 2048x2048px,
+    zoom level lebih tinggi & detail tajam).
+    Jika timeout/offline, otomatis fallback ke single export 1024px atau 512px.
 
     Returns: (img_pil, (min_lon, min_lat, max_lon, max_lat))
     atau None jika gagal (offline/timeout).
@@ -7943,6 +7969,10 @@ def ambil_citra_satelit_esri(lat, lon, radius_km, size_px=1024, timeout=25):
     cache_key = (round(lat, 4), round(lon, 4), round(radius_km, 1), size_px)
     if cache_key in _CACHE_CITRA_ESRI:
         return _CACHE_CITRA_ESRI[cache_key]
+
+    for (clat, clon, cradius, _), res in _CACHE_CITRA_ESRI.items():
+        if clat == round(lat, 4) and clon == round(lon, 4) and cradius == round(radius_km, 1):
+            return res
 
     dlat = (radius_km * 1.05) / 111.32
     cos_lat = max(0.01, math.cos(math.radians(lat)))
@@ -7953,18 +7983,56 @@ def ambil_citra_satelit_esri(lat, lon, radius_km, size_px=1024, timeout=25):
     min_lon = max(-180.0, lon - dlon)
     max_lon = min(180.0, lon + dlon)
 
-    opsi_size = [size_px]
-    if size_px > 1024:
-        opsi_size.append(1024)
-    if 512 not in opsi_size:
-        opsi_size.append(512)
-
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 HisabWin/1.0"
     }
 
     from PIL import Image
+    import concurrent.futures
 
+    # 1. Coba Mosaik Multi-Tile Paralel (2x2 grid, 4 sub-tile 1024px -> total 2048x2048px detail tinggi)
+    if size_px >= 2048:
+        try:
+            progress_cb("  Mengunduh mosaik satelit Esri HD 2048px (4 tile paralel)...")
+            d_lon = (max_lon - min_lon) / 2.0
+            d_lat = (max_lat - min_lat) / 2.0
+            tasks = []
+            for r in range(2):
+                for c in range(2):
+                    s_min_lon = min_lon + c * d_lon
+                    s_max_lon = min_lon + (c + 1) * d_lon
+                    s_max_lat = max_lat - r * d_lat
+                    s_min_lat = max_lat - (r + 1) * d_lat
+                    tasks.append((r, c, s_min_lon, s_min_lat, s_max_lon, s_max_lat))
+
+            def _unduh_sub(tup):
+                r, c, s_min_lon, s_min_lat, s_max_lon, s_max_lat = tup
+                url = (
+                    "https://services.arcgisonline.com/arcgis/rest/services/World_Imagery/MapServer/export"
+                    f"?bbox={s_min_lon:.6f},{s_min_lat:.6f},{s_max_lon:.6f},{s_max_lat:.6f}"
+                    "&bboxSR=4326&imageSR=4326"
+                    "&size=1024,1024&format=jpg&f=image"
+                )
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    data = resp.read()
+                return r, c, Image.open(io.BytesIO(data)).convert("RGB")
+
+            mosaic_img = Image.new("RGB", (2048, 2048))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                futs = [executor.submit(_unduh_sub, task) for task in tasks]
+                for fut in concurrent.futures.as_completed(futs):
+                    r, c, sub_img = fut.result()
+                    mosaic_img.paste(sub_img, (c * 1024, r * 1024))
+
+            res = (mosaic_img, (min_lon, min_lat, max_lon, max_lat))
+            _CACHE_CITRA_ESRI[cache_key] = res
+            return res
+        except Exception as e:
+            progress_cb(f"  (Multi-tile 2048px gagal, fallback single tile: {e})")
+
+    # 2. Fallback single-export (1024px / 512px)
+    opsi_size = [1024, 512]
     for s_px in opsi_size:
         url = (
             "https://services.arcgisonline.com/arcgis/rest/services/World_Imagery/MapServer/export"
@@ -7981,7 +8049,7 @@ def ambil_citra_satelit_esri(lat, lon, radius_km, size_px=1024, timeout=25):
             _CACHE_CITRA_ESRI[cache_key] = res
             return res
         except Exception as e:
-            print(f"Percobaan unduh satelit Esri ({s_px}px) gagal: {e}")
+            progress_cb(f"  (Unduh satelit Esri {s_px}px: {e})")
             continue
 
     return None
@@ -7989,7 +8057,7 @@ def ambil_citra_satelit_esri(lat, lon, radius_km, size_px=1024, timeout=25):
 
 def ekspor_profil_ke_stellarium_terrain3d_satellite(
         profil, path_zip, nama_lokasi=None, penulis="HisabWin",
-        lebar_px=8192, margin_atas_derajat=8.0, alt_bawah=-30.0):
+        lebar_px=4096, margin_atas_derajat=8.0, alt_bawah=-30.0):
     """Mengekspor landscape Stellarium tipe 'spherical' dengan tekstur permukaan
     terrain berupa foto satelit Esri (ArcGIS World Imagery) nyata per lapisan
     jarak, digabung dengan TIGA garis referensi ufuk (astronomis 0 derajat,
@@ -8097,13 +8165,15 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
     siluet_mentah_azpx = _interp_lingkar(siluet_mentah, kernel_az=3)
 
     # Interpolate matriks_sudut secara halus melingkar: shape (lebar_px, n_layer)
+    # kernel_az=5 menghaluskan artefak tangga DEM 30m antar azimuth tetangga.
     matriks_sudut_px = np.zeros((lebar_px, n_layer))
     for s in range(n_layer):
-        matriks_sudut_px[:, s] = _interp_lingkar(matriks_sudut[:, s])
+        matriks_sudut_px[:, s] = _interp_lingkar(matriks_sudut[:, s], kernel_az=5)
 
-    # Unduh citra satelit Esri untuk seluruh radius profil
-    radius_max_km = float(matriks_jarak_km.max())
-    res_esri = ambil_citra_satelit_esri(lat, lon, radius_max_km, size_px=2048)
+    radius_max_km = float(profil.get("radius_km") or matriks_jarak_km.max())
+    res_esri = profil.get("esri_satelit_res")
+    if res_esri is None:
+        res_esri = ambil_citra_satelit_esri(lat, lon, radius_max_km, size_px=1024)
 
     arr_esri = None
     if res_esri is not None:
@@ -8118,14 +8188,30 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
     if arr_esri is not None:
         # Pemetaan 2D Perspektif Geografis Monotonik Presisi
         R_km = np.zeros((tinggi_px, lebar_px), dtype=float)
-        # Tinggi mata pengamat di atas permukaan tanah lokal (misal 2.0 meter)
-        # BUKAN elevasi permukaan laut (1566m), agar pandangan ke bawah kaki
-        # mengambil citra tanah puncakan tempat berdiri (1m-100m), bukan kota di lembah 5km.
         h_local_m = max(float(profil.get("tinggi_mata", 2.0)), 2.0)
+
+        # Radii geometris tanah datar di bawah mata pengamat (h_local_m = 2.0m):
+        # r = h / tan(|alt|). Murni kurva trigonometri kontinu, 100% simetris & mulus 360°.
+        tan_alt_abs = np.maximum(np.abs(np.tan(np.radians(np.minimum(alt_grid, -0.001)))), 1e-6)
+        r_ground_km = (h_local_m / 1000.0) / tan_alt_abs
+
+        k_rad = max(n_layer // 6, 3)
+        x_rad = np.linspace(-3, 3, 2 * k_rad + 1)
+        g_rad = np.exp(-x_rad**2 / 2)
+        g_rad /= g_rad.sum()
 
         for col in range(lebar_px):
             angles_col = np.nan_to_num(
                 matriks_sudut_px[col, :], nan=-90.0, posinf=90.0, neginf=-90.0)
+
+            # Smooth radial HANYA pada layer dalam 1 km pertama dari pengamat
+            # untuk menghilangkan loncatan tangga DEM 30m di area dekat.
+            n_dekat = int(np.searchsorted(matriks_jarak_km, 1.0, side='right'))
+            n_dekat = max(n_dekat, 4)
+            if n_dekat > 2 * k_rad + 1:
+                bagian_dekat = np.convolve(angles_col[:n_dekat], g_rad, mode='same')
+                angles_col = angles_col.copy()
+                angles_col[:n_dekat] = bagian_dekat
 
             env_angle = np.maximum.accumulate(angles_col)
             eps = np.arange(len(env_angle), dtype=float) * 1e-7
@@ -8136,15 +8222,22 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
                 left=float(matriks_jarak_km[0]), right=radius_max_km)
 
             first_angle = float(angles_col[0])
-            tan_alt = np.tan(np.radians(np.minimum(alt_grid, -0.001)))
-            tan_alt = np.where(np.abs(tan_alt) < 1e-8, -1e-8, tan_alt)
-            # Formulasi Kontinu Presisi: Pada alt = first_angle, r_flat tepat sama dengan matriks_jarak_km[0].
-            # Tidak ada lompatan radius (zero radius jump), sehingga tidak ada garis kontur bergerigi/patah.
-            tan_first = math.tan(math.radians(min(first_angle, -0.01)))
-            r_flat_continuous = float(matriks_jarak_km[0]) * np.abs(tan_first / tan_alt)
-            r_flat_continuous = np.clip(r_flat_continuous, 0.001, float(matriks_jarak_km[0]))
             mask_flat = alt_grid < first_angle
+
+            # Di atas kaki gunung: proyeksi DEM r_interp
+            # Di tanah bawah (ground cap): proyeksi perspektif tanah datar kontinu (r_ground_km)
+            r_flat_col = np.minimum(r_interp, r_ground_km)
             R_km[:, col] = r_interp
+            R_km[mask_flat, col] = r_flat_col[mask_flat]
+
+        # Smoothing horizontal melingkar (wrap-around 360°) pada R_km
+        k_smooth = max(lebar_px // 200, 8)
+        x_g = np.linspace(-3, 3, 2 * k_smooth + 1)
+        gauss_win = np.exp(-x_g**2 / 2)
+        gauss_win /= gauss_win.sum()
+        for row in range(tinggi_px):
+            padded = np.concatenate([R_km[row, -k_smooth:], R_km[row, :], R_km[row, :k_smooth]])
+            R_km[row, :] = np.convolve(padded, gauss_win, mode='same')[k_smooth:-k_smooth]
 
         AZ_RAD = np.radians(az_query)[None, :]
         D_NORTH = R_km * np.cos(AZ_RAD)
@@ -8192,13 +8285,52 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
         kanvas[..., :3][mask_mountain] = sampled_rgb[mask_mountain]
         kanvas[..., 3][mask_mountain] = 255
 
-        # 2. Tanah Berpijak Padat (Ground Cap): Warna tanah solid Stellarium (RGB 38, 25, 13) di bawah kaki gunung
-        # Bebas garis vertikal/garis memanjang ke bawah dan bebas gerigi tangga.
+        # 2. Tanah Berpijak (Ground Cap): Tekstur satelit nadir zoom maks jika tersedia,
+        #    fallback warna tanah solid Stellarium (RGB 38, 25, 13).
         mask_ground_cap = ALT < first_angle_smooth[None, :]
-        kanvas[..., 0][mask_ground_cap] = 38   # 0.15 * 255 (ground_color Stellarium)
-        kanvas[..., 1][mask_ground_cap] = 25   # 0.10 * 255
-        kanvas[..., 2][mask_ground_cap] = 13   # 0.05 * 255
-        kanvas[..., 3][mask_ground_cap] = 255
+
+        # Coba gunakan citra nadir (zoom tinggi, area sempit ~0.5 km)
+        res_nadir = profil.get("esri_nadir_res")
+        nadir_applied = False
+        if res_nadir is not None:
+            try:
+                img_nadir, (n_min_lon, n_min_lat, n_max_lon, n_max_lat) = res_nadir
+                arr_nadir = np.array(img_nadir)
+                H_n, W_n, _ = arr_nadir.shape
+
+                # Sampling bilinear dari citra nadir untuk area ground cap
+                U_n = (P_LON - n_min_lon) / (n_max_lon - n_min_lon)
+                V_n = (n_max_lat - P_LAT) / (n_max_lat - n_min_lat)
+                fx_n = np.clip(U_n * (W_n - 1), 0.0, W_n - 1.0)
+                fy_n = np.clip(V_n * (H_n - 1), 0.0, H_n - 1.0)
+                x0_n = np.floor(fx_n).astype(np.int32)
+                y0_n = np.floor(fy_n).astype(np.int32)
+                x1_n = np.minimum(x0_n + 1, W_n - 1)
+                y1_n = np.minimum(y0_n + 1, H_n - 1)
+                wx_n = (fx_n - x0_n).astype(np.float32)
+                wy_n = (fy_n - y0_n).astype(np.float32)
+                c00_n = arr_nadir[y0_n, x0_n, :3].astype(np.float32)
+                c10_n = arr_nadir[y0_n, x1_n, :3].astype(np.float32)
+                c01_n = arr_nadir[y1_n, x0_n, :3].astype(np.float32)
+                c11_n = arr_nadir[y1_n, x1_n, :3].astype(np.float32)
+                wx3_n = wx_n[..., None]
+                wy3_n = wy_n[..., None]
+                sampled_nadir = (c00_n * (1.0 - wx3_n) * (1.0 - wy3_n)
+                                 + c10_n * wx3_n * (1.0 - wy3_n)
+                                 + c01_n * (1.0 - wx3_n) * wy3_n
+                                 + c11_n * wx3_n * wy3_n).astype(np.uint8)
+
+                kanvas[..., :3][mask_ground_cap] = sampled_nadir[mask_ground_cap]
+                kanvas[..., 3][mask_ground_cap] = 255
+                nadir_applied = True
+            except Exception:
+                pass
+
+        if not nadir_applied:
+            kanvas[..., 0][mask_ground_cap] = 38   # 0.15 * 255 (ground_color Stellarium)
+            kanvas[..., 1][mask_ground_cap] = 25   # 0.10 * 255
+            kanvas[..., 2][mask_ground_cap] = 13   # 0.05 * 255
+            kanvas[..., 3][mask_ground_cap] = 255
 
         # --- RIDGELINE SHADOW / DEPTH EFFECT ---
         # Setiap lapisan ridgeline (dari dekat ke jauh) membuat bayangan di
@@ -9087,11 +9219,9 @@ def ekspor_profil_ke_cartes_du_ciel(profil, path_png, lebar_px=8192, margin_atas
     kanvas = np.array(img)
 
     img_final = Image.fromarray(kanvas, mode="RGBA")
-    img_final.save(path_png, format="PNG")
-
-    # -- 5. landscape.ini MINIMAL di folder yg sama, cuma angle_rotatez -- --
-    # -- (dok CdC: dibaca otomatis dari file bernama PERSIS "landscape. --
-    # -- ini" di folder yg sama dgn gambar, biar rotasi tdk perlu --
+    # -- 5. landscape.ini MINIMAL di folder yg sama, cuma angle_rotatez --
+    # -- (dok CdC: dibaca otomatis dari file bernama PERSIS "landscape.
+    # -- ini" di folder yg sama dgn gambar, biar rotasi tdk perlu
     # -- diketik manual di dialog "Use an horizon picture"). --
     folder_tujuan = os.path.dirname(os.path.abspath(path_png)) or "."
     path_ini = os.path.join(folder_tujuan, "landscape.ini")
@@ -9111,6 +9241,22 @@ def simpan_profil_cakrawala_txt(path, profil):
     RENCANANYA jadi input WAJIB fitur Simulasi Hilal (menyusul, belum
     dibuat). Baris '#' = metadata/komentar, diabaikan pemroses lain kalau
     tidak dikenali."""
+    res_esri = profil.get("esri_satelit_res")
+    if res_esri is None:
+        cache_key = (round(profil["lat"], 4), round(profil["lon"], 4), round(profil.get("radius_km", 30.0), 1))
+        for (clat, clon, cradius, _), res in _CACHE_CITRA_ESRI.items():
+            if clat == cache_key[0] and clon == cache_key[1] and cradius == cache_key[2]:
+                res_esri = res
+                break
+
+    if res_esri is None and profil.get("radius_km", 0) > 0:
+        try:
+            res_esri = ambil_citra_satelit_esri(profil["lat"], profil["lon"], profil["radius_km"], size_px=1024)
+            if res_esri is not None:
+                profil["esri_satelit_res"] = res_esri
+        except Exception:
+            pass
+
     with open(path, "w", encoding="utf-8") as f:
         f.write("# HisabWin - Profil Cakrawala\n")
         f.write(f"# lat={profil['lat']:.6f}\n")
@@ -9118,7 +9264,16 @@ def simpan_profil_cakrawala_txt(path, profil):
         f.write(f"# tinggi_mata_m={profil['tinggi_mata']:.2f}\n")
         f.write(f"# elev_tanah_m={profil.get('elev_tanah', 0.0):.2f}\n")
         f.write(f"# radius_km={profil['radius_km']:.2f}\n")
+        if profil.get("nama_lokasi"):
+            f.write(f"# nama_lokasi={profil['nama_lokasi']}\n")
         f.write(f"# dibuat={datetime.now().isoformat(timespec='seconds')}\n")
+        if res_esri is not None:
+            _, bbox = res_esri
+            f.write(f"# esri_bbox={bbox[0]:.6f},{bbox[1]:.6f},{bbox[2]:.6f},{bbox[3]:.6f}\n")
+        res_nadir = profil.get("esri_nadir_res")
+        if res_nadir is not None:
+            _, bbox_n = res_nadir
+            f.write(f"# esri_nadir_bbox={bbox_n[0]:.6f},{bbox_n[1]:.6f},{bbox_n[2]:.6f},{bbox_n[3]:.6f}\n")
         f.write("# kolom: azimuth_deg,sudut_horizon_deg,jarak_horizon_km,elevasi_titik_m\n")
         for az, sudut, jarak, elev in zip(profil["azimuth"], profil["sudut_horizon"],
                                            profil["jarak_horizon_km"], profil["elevasi_titik_m"]):
@@ -9141,6 +9296,23 @@ def simpan_profil_cakrawala_txt(path, profil):
             for az_idx in range(matriks_sudut.shape[0]):
                 nilai_str = ",".join(f"{v:.3f}" for v in matriks_sudut[az_idx])
                 f.write(f"#LAYER,{az_idx},{nilai_str}\n")
+
+    if res_esri is not None:
+        try:
+            path_esri = os.path.splitext(path)[0] + "_esri.jpg"
+            img_esri, _ = res_esri
+            img_esri.save(path_esri, format="JPEG", quality=90)
+        except Exception as e:
+            print(f"Gagal menyimpan file citra Esri ({path}): {e}")
+
+    res_nadir = profil.get("esri_nadir_res")
+    if res_nadir is not None:
+        try:
+            path_nadir = os.path.splitext(path)[0] + "_esri_nadir.jpg"
+            img_nadir, _ = res_nadir
+            img_nadir.save(path_nadir, format="JPEG", quality=90)
+        except Exception as e:
+            print(f"Gagal menyimpan file citra nadir ({path}): {e}")
 
 
 def muat_profil_cakrawala_txt(path):
@@ -9175,13 +9347,9 @@ def muat_profil_cakrawala_txt(path):
                 jarak_horizon_km.append(float(jarak))
                 elevasi_titik_m.append(float(elev))
     tinggi_mata = float(meta.get("tinggi_mata_m", 2.0))
-    # elev_tanah_m tidak ada di file lama (sebelum field ini ditambahkan) --
-    # default 0.0 (anggap tanah setinggi laut), TETAP LEBIH AMAN drpd
-    # mengarang angka; dip yg dihitung darinya jadi sedikit under-estimate
-    # utk profil lama yg lokasinya tinggi, tapi tidak fatal (cuma dipakai
-    # sbg garis pembanding "ufuk dip" di Simulasi Hilal). "_elev_tanah_dari_file"
-    # dicatat SUPAYA PEMANGGIL TAHU file ini perlu dilengkapi -- lihat
-    # lengkapi_elev_tanah_profil_txt() di bawah, dipanggil dari Simulasi Hilal.
+    lat = float(meta.get("lat", 0.0))
+    lon = float(meta.get("lon", 0.0))
+    radius_km = float(meta.get("radius_km", 0.0))
     elev_tanah_dari_file = "elev_tanah_m" in meta
     elev_tanah = float(meta.get("elev_tanah_m", 0.0))
 
@@ -9194,24 +9362,79 @@ def muat_profil_cakrawala_txt(path):
         baris_layer.sort(key=lambda t: t[0])
         matriks_sudut = np.array([nilai for _, nilai in baris_layer])
 
+    # Cek ketersediaan file _esri.jpg bersandingan
+    res_esri = None
+    path_esri = os.path.splitext(path)[0] + "_esri.jpg"
+    if not os.path.isfile(path_esri):
+        path_esri_png = os.path.splitext(path)[0] + "_esri.png"
+        if os.path.isfile(path_esri_png):
+            path_esri = path_esri_png
+        else:
+            path_esri = None
+
+    if path_esri and os.path.isfile(path_esri):
+        try:
+            from PIL import Image
+            img_esri = Image.open(path_esri).convert("RGB")
+            if "esri_bbox" in meta:
+                b = [float(x) for x in meta["esri_bbox"].split(",")]
+                bbox = (b[0], b[1], b[2], b[3])
+            else:
+                dlat = (radius_km * 1.05) / 111.32 if radius_km > 0 else 0.3
+                cos_lat = max(0.01, math.cos(math.radians(lat)))
+                dlon = (radius_km * 1.05) / (111.32 * cos_lat) if radius_km > 0 else 0.3
+                bbox = (max(-180.0, lon - dlon), max(-90.0, lat - dlat),
+                        min(180.0, lon + dlon), min(90.0, lat + dlat))
+            res_esri = (img_esri, bbox)
+            cache_key = (round(lat, 4), round(lon, 4), round(radius_km, 1), img_esri.width)
+            _CACHE_CITRA_ESRI[cache_key] = res_esri
+        except Exception as e:
+            print(f"Gagal membaca file citra Esri lokal {path_esri}: {e}")
+
+    # Cek ketersediaan file _esri_nadir.jpg bersandingan (citra zoom maks area dekat)
+    res_esri_nadir = None
+    path_nadir = os.path.splitext(path)[0] + "_esri_nadir.jpg"
+    if os.path.isfile(path_nadir):
+        try:
+            from PIL import Image
+            img_nadir = Image.open(path_nadir).convert("RGB")
+            if "esri_nadir_bbox" in meta:
+                b = [float(x) for x in meta["esri_nadir_bbox"].split(",")]
+                bbox_n = (b[0], b[1], b[2], b[3])
+            else:
+                dlat_n = (0.5 * 1.05) / 111.32
+                cos_lat_n = max(0.01, math.cos(math.radians(lat)))
+                dlon_n = (0.5 * 1.05) / (111.32 * cos_lat_n)
+                bbox_n = (max(-180.0, lon - dlon_n), max(-90.0, lat - dlat_n),
+                          min(180.0, lon + dlon_n), min(90.0, lat + dlat_n))
+            res_esri_nadir = (img_nadir, bbox_n)
+            cache_key_n = (round(lat, 4), round(lon, 4), 0.5, img_nadir.width)
+            _CACHE_CITRA_ESRI[cache_key_n] = res_esri_nadir
+        except Exception as e:
+            print(f"Gagal membaca file citra nadir lokal {path_nadir}: {e}")
+
     # -- Clamp sudut_horizon: minimal = -dip (sama spt hitung_profil_cakrawala) --
     # Profil lama yg tersimpan sebelum fix ini bisa punya nilai di bawah dip;
     # di-clamp saat muat supaya konsisten.
     tinggi_pengamat_val = tinggi_mata + elev_tanah
     dip_derajat_muat = 0.0293 * math.sqrt(max(tinggi_pengamat_val, 0.0))
     arr_sudut_horizon = np.maximum(np.array(sudut_horizon), -dip_derajat_muat)
+    nama_lokasi = meta.get("nama_lokasi") or dapatkan_nama_lokasi_reverse_geocode(lat, lon)
 
     return {
-        "lat": float(meta.get("lat", 0.0)), "lon": float(meta.get("lon", 0.0)),
+        "lat": lat, "lon": lon,
         "tinggi_mata": tinggi_mata, "elev_tanah": elev_tanah,
         "tinggi_pengamat": tinggi_pengamat_val,
+        "nama_lokasi": nama_lokasi,
         "_elev_tanah_dari_file": elev_tanah_dari_file,
-        "radius_km": float(meta.get("radius_km", 0.0)),
+        "radius_km": radius_km,
         "azimuth": np.array(azimuth), "sudut_horizon": arr_sudut_horizon,
         "jarak_horizon_km": np.array(jarak_horizon_km),
         "elevasi_titik_m": np.array(elevasi_titik_m),
         "puncak_berlabel": puncak_berlabel,
         "matriks_sudut": matriks_sudut, "matriks_jarak_km": matriks_jarak_km,
+        "esri_satelit_res": res_esri,
+        "esri_nadir_res": res_esri_nadir,
     }
 
 
@@ -9365,8 +9588,8 @@ def buat_figure_terrain3d_cakrawala(profil, elevasi_maks_jarak_km=None, pakai_sa
     Yp = np.vstack([Y, Y[0:1, :]])
     Zp = np.vstack([z_rel, z_rel[0:1, :]])
 
-    res_esri = None
-    if pakai_satelit_esri:
+    res_esri = profil.get("esri_satelit_res")
+    if res_esri is None and pakai_satelit_esri:
         radius_max = float(jarak_km.max())
         res_esri = ambil_citra_satelit_esri(lat, lon, radius_max, size_px=2048)
 
@@ -9651,6 +9874,54 @@ def hitung_kriteria_odeh(arcv, arcl, sd_bulan_arcmin=15.5):
         "keterangan": ket,
         "singkatan": singk,
     }
+
+
+_CACHE_REVERSE_GEOCODE = {}
+
+def dapatkan_nama_lokasi_reverse_geocode(lat, lon, timeout=5):
+    """Mencari nama kota/wilayah (reverse geocoding) dari lat/lon via Nominatim OSM.
+    Menggunakan cache lokal agar tidak mengulang request HTTP."""
+    cache_key = (round(lat, 3), round(lon, 3))
+    if cache_key in _CACHE_REVERSE_GEOCODE and _CACHE_REVERSE_GEOCODE[cache_key]:
+        return _CACHE_REVERSE_GEOCODE[cache_key]
+
+    url = f"https://nominatim.openstreetmap.org/reverse?lat={lat:.5f}&lon={lon:.5f}&format=json&accept-language=id"
+    headers = {
+        "User-Agent": "HisabWin/1.0 (Aplikasi Astronomi Islam Indonesia; contact@hisabwin.org)"
+    }
+    try:
+        import json
+        import urllib.request
+        import ssl
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        name = data.get("name", "")
+        addr = data.get("address", {})
+        wilayah = (addr.get("city") or addr.get("regency") or addr.get("county") or
+                   addr.get("town") or addr.get("municipality") or addr.get("district") or
+                   addr.get("village") or addr.get("subdistrict") or addr.get("state") or "")
+
+        if name and wilayah and name != wilayah:
+            hasil_nama = f"{name}, {wilayah}"
+        elif name:
+            hasil_nama = name
+        elif wilayah:
+            hasil_nama = wilayah
+        else:
+            hasil_nama = data.get("display_name", "").split(",")[0]
+
+        if hasil_nama:
+            _CACHE_REVERSE_GEOCODE[cache_key] = hasil_nama
+            return hasil_nama
+    except Exception as e:
+        print(f"Reverse geocode error: {e}")
+
+    return None
 
 
 def simulasikan_hilal(profil, tanggal, zona_offset_jam, ts=None, eph=None,
@@ -10065,7 +10336,9 @@ def buat_figure_simulasi_hilal(profil, hasil):
     ax.set_xlabel("Azimuth (°, dari Utara searah jarum jam)")
     ax.set_ylabel("Sudut elevasi (°)")
     tgl = hasil["tanggal"]
-    ax.set_title(f"Simulasi Hilal — {tgl.day:02d}-{tgl.month:02d}-{tgl.year} — "
+    nama_tempat = profil.get("nama_lokasi") or dapatkan_nama_lokasi_reverse_geocode(profil["lat"], profil["lon"])
+    str_lokasi = f" — {nama_tempat}" if nama_tempat else ""
+    ax.set_title(f"Simulasi Hilal{str_lokasi} — {tgl.day:02d}-{tgl.month:02d}-{tgl.year} — "
                  f"({profil['lat']:.4f}, {profil['lon']:.4f})")
 
     # === LEGENDA: garis referensi (ringkas) + tabel data ghurub (informatif) ===
@@ -13828,7 +14101,7 @@ class HisabWinApp(tk.Tk):
         if not path:
             return
         try:
-            self._log("Mengunduh citra satelit Esri & melukis panorama Stellarium 3D...")
+            self._log("Melukis panorama Stellarium Terrain 3D (Satelit Esri)...")
             ekspor_profil_ke_stellarium_terrain3d_satellite(profil, path)
             messagebox.showinfo(
                 "Tersimpan",
@@ -14114,12 +14387,12 @@ class HisabWinApp(tk.Tk):
         self.label_profil_simulasi_hilal.pack(anchor="w", padx=10, pady=(8, 4))
 
         frame_pilih_profil = ttk.Frame(frame_profil)
-        frame_pilih_profil.pack(fill="x", padx=10, pady=(0, 10))
+        frame_pilih_profil.pack(fill="x", padx=10, pady=(0, 4))
         self._peta_label_ke_path_profil_simulasi_hilal = {}
         self.var_pilih_profil_simulasi_hilal = tk.StringVar()
         self.combo_pilih_profil_simulasi_hilal = ttk.Combobox(
             frame_pilih_profil, textvariable=self.var_pilih_profil_simulasi_hilal,
-            state="readonly", width=26)
+            state="readonly", width=22)
         self.combo_pilih_profil_simulasi_hilal.pack(side="left", fill="x", expand=True)
         self.combo_pilih_profil_simulasi_hilal.bind(
             "<<ComboboxSelected>>", self._on_pilih_profil_simulasi_hilal)
@@ -14127,10 +14400,11 @@ class HisabWinApp(tk.Tk):
             frame_pilih_profil, text="🔄", width=3,
             command=self._muat_ulang_daftar_profil_simulasi_hilal
         ).pack(side="left", padx=(4, 0))
+
         ttk.Button(
-            frame_pilih_profil, text="📂 Muat File (.txt / .zip Stellarium)...",
+            frame_profil, text="📂 Muat File (.txt / .zip Stellarium)...",
             command=self._on_buka_file_profil_simulasi_hilal
-        ).pack(side="left", padx=(4, 0))
+        ).pack(fill="x", padx=10, pady=(0, 6))
 
         # Sama seperti di akordeon 🏔️ Profil Cakrawala: tombol ini pakai
         # handler & state (self._hasil_cakrawala_terakhir) yang SAMA persis
