@@ -7835,6 +7835,18 @@ def hitung_profil_cakrawala(lat, lon, tinggi_mata=2.0, radius_km=30, n_azimuth=1
     except Exception as e:
         progress_cb(f"  (Citra nadir diabaikan: {e})")
 
+    # Unduh citra dip (area datar/laut hingga ufuk dip jika r_dip_km > radius_km)
+    r_dip_km = max(3.57 * math.sqrt(max(float(tinggi_pengamat), 0.0)), radius_km)
+    res_esri_dip = None
+    if r_dip_km > radius_km + 0.1:
+        try:
+            progress_cb(f"Mengunduh citra satelit dip (ufuk laut/datar ~{r_dip_km:.1f} km)...")
+            res_esri_dip = ambil_citra_satelit_esri(lat, lon, r_dip_km, progress_cb=progress_cb)
+            if res_esri_dip is not None:
+                progress_cb("Citra satelit dip berhasil diunduh.")
+        except Exception as e:
+            progress_cb(f"  (Citra dip diabaikan: {e})")
+
     nama_lokasi = dapatkan_nama_lokasi_reverse_geocode(lat, lon)
 
     return {
@@ -7847,6 +7859,7 @@ def hitung_profil_cakrawala(lat, lon, tinggi_mata=2.0, radius_km=30, n_azimuth=1
         "matriks_sudut": matriks_sudut, "matriks_jarak_km": jarak_arr / 1000.0,
         "esri_satelit_res": res_esri,
         "esri_nadir_res": res_esri_nadir,
+        "esri_dip_res": res_esri_dip,
     }
 
 
@@ -8136,7 +8149,7 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
         else:
             aktif = np.ones(lebar_px, dtype=bool)
         kolom_aktif = kolom[aktif]
-        for tebal in (-1, 0, 1):
+        for tebal in (0,):
             b = max(0, min(tinggi_px - 1, b0 + tebal))
             kanvas[b, kolom_aktif, 0] = warna_rgb[0]
             kanvas[b, kolom_aktif, 1] = warna_rgb[1]
@@ -8147,7 +8160,7 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
         baris = np.clip(
             np.round((alt_atas - sudut_per_kolom) / (alt_atas - alt_bawah_full) * (tinggi_px - 1)).astype(int),
             0, tinggi_px - 1)
-        for tebal in (-1, 0, 1):
+        for tebal in (0,):
             b = np.clip(baris + tebal, 0, tinggi_px - 1)
             kanvas[b, np.arange(lebar_px), 0] = warna_rgb[0]
             kanvas[b, np.arange(lebar_px), 1] = warna_rgb[1]
@@ -8190,15 +8203,20 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
         R_km = np.zeros((tinggi_px, lebar_px), dtype=float)
         h_local_m = max(float(profil.get("tinggi_mata", 2.0)), 2.0)
 
-        # Radii geometris tanah datar di bawah mata pengamat (h_local_m = 2.0m):
-        # r = h / tan(|alt|). Murni kurva trigonometri kontinu, 100% simetris & mulus 360°.
-        tan_alt_abs = np.maximum(np.abs(np.tan(np.radians(np.minimum(alt_grid, -0.001)))), 1e-6)
-        r_ground_km = (h_local_m / 1000.0) / tan_alt_abs
-
         k_rad = max(n_layer // 6, 3)
         x_rad = np.linspace(-3, 3, 2 * k_rad + 1)
         g_rad = np.exp(-x_rad**2 / 2)
         g_rad /= g_rad.sum()
+
+        # Smooth first_angle (sudut lereng DEM terdekat) lintas 360° azimuth
+        # agar batas ground-cap mulus tanpa tirai vertikal per-kolom.
+        all_first_angles = np.nan_to_num(matriks_sudut_px[:, 0], nan=-2.0)
+        k_fa = max(lebar_px // 20, 32)
+        pad_fa = np.concatenate([all_first_angles[-k_fa:], all_first_angles, all_first_angles[:k_fa]])
+        win_fa = np.ones(2 * k_fa + 1) / (2 * k_fa + 1)
+        first_angle_smooth_arr = np.convolve(pad_fa, win_fa, mode='same')[k_fa:-k_fa]
+
+        r_boundary = float(matriks_jarak_km[0])  # jarak layer DEM terdekat (m → km)
 
         for col in range(lebar_px):
             angles_col = np.nan_to_num(
@@ -8219,16 +8237,25 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
 
             r_interp = np.interp(
                 alt_grid, env_for_interp, matriks_jarak_km,
-                left=float(matriks_jarak_km[0]), right=radius_max_km)
+                left=r_boundary, right=radius_max_km)
 
-            first_angle = float(angles_col[0])
-            mask_flat = alt_grid < first_angle
+            # Batas ground cap: pakai first_angle yg sudah di-smooth lintas 360° azimuth
+            fa_smooth = float(first_angle_smooth_arr[col])
+            mask_flat = alt_grid < fa_smooth
 
-            # Di atas kaki gunung: proyeksi DEM r_interp
-            # Di tanah bawah (ground cap): proyeksi perspektif tanah datar kontinu (r_ground_km)
-            r_flat_col = np.minimum(r_interp, r_ground_km)
             R_km[:, col] = r_interp
-            R_km[mask_flat, col] = r_flat_col[mask_flat]
+
+            # Ground cap: ekstrapolasi perspektif KONTINU dari titik boundary DEM.
+            # r = r_boundary * tan(fa_smooth) / tan(alt)
+            # Di alt = fa_smooth: r = r_boundary (KONTINU, tanpa celah/lompatan)
+            # Di alt < fa_smooth: r < r_boundary (makin dekat ke kaki pengamat)
+            # Formula ini memetakan area tanah di sekitar pengamat ke citra nadir.
+            if np.any(mask_flat):
+                tan_fa = max(abs(math.tan(math.radians(fa_smooth))), 1e-7)
+                tan_below = np.maximum(
+                    np.abs(np.tan(np.radians(alt_grid[mask_flat]))), 1e-7)
+                r_extrap = r_boundary * (tan_fa / tan_below)
+                R_km[mask_flat, col] = np.clip(r_extrap, 0.001, r_boundary)
 
         # Smoothing horizontal melingkar (wrap-around 360°) pada R_km
         k_smooth = max(lebar_px // 200, 8)
@@ -8270,67 +8297,67 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
                        + c01 * (1.0 - wx3) * wy3
                        + c11 * wx3 * wy3).astype(np.uint8)
 
-        # Hitung garis batas bawah lereng gunung secara halus (smooth 360 derajat)
-        angles_first = matriks_sudut_px[:, 0]
-        k_sz = max(lebar_px // 40, 64)
-        pad_f = np.concatenate([angles_first[-k_sz:], angles_first, angles_first[:k_sz]])
-        win_f = np.ones(2 * k_sz + 1) / (2 * k_sz + 1)
-        first_angle_smooth = np.convolve(pad_f, win_f, mode='same')[k_sz:-k_sz]
-
         # Mask ground: batas skyline MENTAH (DEM asli)
         MASK_GROUND = ALT <= siluet_mentah_azpx[None, :]
 
-        # 1. Foto Satelit ESRI 3D pada lereng & puncakan gunung (di atas batas kaki gunung)
-        mask_mountain = MASK_GROUND & (ALT >= first_angle_smooth[None, :])
-        kanvas[..., :3][mask_mountain] = sampled_rgb[mask_mountain]
-        kanvas[..., 3][mask_mountain] = 255
+        # 1. Lapisi seluruh area permukaan tanah (gunung, lereng, kawah, lembah, dan ground cap)
+        #    dengan foto satelit ESRI 3D secara 100% penuh (TIDAK ADA LUBANG COKLAT).
+        kanvas[..., :3][MASK_GROUND] = sampled_rgb[MASK_GROUND]
+        kanvas[..., 3][MASK_GROUND] = 255
 
-        # 2. Tanah Berpijak (Ground Cap): Tekstur satelit nadir zoom maks jika tersedia,
-        #    fallback warna tanah solid Stellarium (RGB 38, 25, 13).
-        mask_ground_cap = ALT < first_angle_smooth[None, :]
-
-        # Coba gunakan citra nadir (zoom tinggi, area sempit ~0.5 km)
+        # 2. Hamparan Citra Satelit Nadir Ultra-Tinggi (Zoom Maksimum, ~0.5 km)
+        #    Jika citra nadir tersedia, lapisi area tempat berpijak di sekitar pengamat
+        #    dengan FEATHERING (gradasi mulus) di tepi agar transisi ke ESRI luas seamless.
         res_nadir = profil.get("esri_nadir_res")
-        nadir_applied = False
         if res_nadir is not None:
             try:
                 img_nadir, (n_min_lon, n_min_lat, n_max_lon, n_max_lat) = res_nadir
                 arr_nadir = np.array(img_nadir)
                 H_n, W_n, _ = arr_nadir.shape
 
-                # Sampling bilinear dari citra nadir untuk area ground cap
+                # Sampling bilinear dari citra nadir
                 U_n = (P_LON - n_min_lon) / (n_max_lon - n_min_lon)
                 V_n = (n_max_lat - P_LAT) / (n_max_lat - n_min_lat)
-                fx_n = np.clip(U_n * (W_n - 1), 0.0, W_n - 1.0)
-                fy_n = np.clip(V_n * (H_n - 1), 0.0, H_n - 1.0)
-                x0_n = np.floor(fx_n).astype(np.int32)
-                y0_n = np.floor(fy_n).astype(np.int32)
-                x1_n = np.minimum(x0_n + 1, W_n - 1)
-                y1_n = np.minimum(y0_n + 1, H_n - 1)
-                wx_n = (fx_n - x0_n).astype(np.float32)
-                wy_n = (fy_n - y0_n).astype(np.float32)
-                c00_n = arr_nadir[y0_n, x0_n, :3].astype(np.float32)
-                c10_n = arr_nadir[y0_n, x1_n, :3].astype(np.float32)
-                c01_n = arr_nadir[y1_n, x0_n, :3].astype(np.float32)
-                c11_n = arr_nadir[y1_n, x1_n, :3].astype(np.float32)
-                wx3_n = wx_n[..., None]
-                wy3_n = wy_n[..., None]
-                sampled_nadir = (c00_n * (1.0 - wx3_n) * (1.0 - wy3_n)
-                                 + c10_n * wx3_n * (1.0 - wy3_n)
-                                 + c01_n * (1.0 - wx3_n) * wy3_n
-                                 + c11_n * wx3_n * wy3_n).astype(np.uint8)
 
-                kanvas[..., :3][mask_ground_cap] = sampled_nadir[mask_ground_cap]
-                kanvas[..., 3][mask_ground_cap] = 255
-                nadir_applied = True
-            except Exception:
-                pass
+                # Mask valid nadir: piksel yang berada di dalam bounding box nadir tile
+                mask_nadir_box = MASK_GROUND & (U_n >= 0.0) & (U_n <= 1.0) & (V_n >= 0.0) & (V_n <= 1.0)
 
-        if not nadir_applied:
-            kanvas[..., 0][mask_ground_cap] = 38   # 0.15 * 255 (ground_color Stellarium)
-            kanvas[..., 1][mask_ground_cap] = 25   # 0.10 * 255
-            kanvas[..., 2][mask_ground_cap] = 13   # 0.05 * 255
-            kanvas[..., 3][mask_ground_cap] = 255
+                if np.any(mask_nadir_box):
+                    fx_n = np.clip(U_n * (W_n - 1), 0.0, W_n - 1.0)
+                    fy_n = np.clip(V_n * (H_n - 1), 0.0, H_n - 1.0)
+                    x0_n = np.floor(fx_n).astype(np.int32)
+                    y0_n = np.floor(fy_n).astype(np.int32)
+                    x1_n = np.minimum(x0_n + 1, W_n - 1)
+                    y1_n = np.minimum(y0_n + 1, H_n - 1)
+                    wx_n = (fx_n - x0_n).astype(np.float32)
+                    wy_n = (fy_n - y0_n).astype(np.float32)
+                    c00_n = arr_nadir[y0_n, x0_n, :3].astype(np.float32)
+                    c10_n = arr_nadir[y0_n, x1_n, :3].astype(np.float32)
+                    c01_n = arr_nadir[y1_n, x0_n, :3].astype(np.float32)
+                    c11_n = arr_nadir[y1_n, x1_n, :3].astype(np.float32)
+                    wx3_n = wx_n[..., None]
+                    wy3_n = wy_n[..., None]
+                    sampled_nadir = (c00_n * (1.0 - wx3_n) * (1.0 - wy3_n)
+                                     + c10_n * wx3_n * (1.0 - wy3_n)
+                                     + c01_n * (1.0 - wx3_n) * wy3_n
+                                     + c11_n * wx3_n * wy3_n).astype(np.float32)
+
+                    # Feathering: gradasi alpha dari 1.0 (pusat) ke 0.0 (tepi bbox)
+                    # agar transisi nadir→ESRI seamless tanpa lancip/garis tepi.
+                    feather_margin = 0.15  # 15% lebar bbox sebagai zona transisi
+                    dist_from_edge = np.minimum(
+                        np.minimum(U_n, 1.0 - U_n),
+                        np.minimum(V_n, 1.0 - V_n))
+                    blend_alpha = np.clip(dist_from_edge / feather_margin, 0.0, 1.0)
+
+                    alpha3 = blend_alpha[mask_nadir_box][..., None].astype(np.float32)
+                    esri_under = kanvas[..., :3][mask_nadir_box].astype(np.float32)
+                    nadir_over = sampled_nadir[mask_nadir_box]
+                    blended = (nadir_over * alpha3 + esri_under * (1.0 - alpha3))
+                    kanvas[..., :3][mask_nadir_box] = np.clip(blended, 0, 255).astype(np.uint8)
+                    kanvas[..., 3][mask_nadir_box] = 255
+            except Exception as e:
+                print(f"Sampling nadir error: {e}")
 
         # --- RIDGELINE SHADOW / DEPTH EFFECT ---
         # Setiap lapisan ridgeline (dari dekat ke jauh) membuat bayangan di
@@ -8355,7 +8382,7 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
                         shadow_map[b_top:b_bot, col_idx] = np.maximum(
                             shadow_map[b_top:b_bot, col_idx], grad)
 
-        shadow_mask = mask_mountain & (shadow_map > 0.01)
+        shadow_mask = MASK_GROUND & (shadow_map > 0.01)
         if np.any(shadow_mask):
             darken_factor = 1.0 - shadow_map
             terrain_rgb = kanvas[..., :3].astype(np.float32)
@@ -8381,46 +8408,96 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
             kanvas[..., 2][mask] = warna[2]
             kanvas[..., 3][mask] = 255
 
-    # --- DISTANT GROUND HAZE di celah antara Dip dan batas Topo DEM ---
-    # Di arah di mana radius DEM berakhir sebelum mencapai ufuk dip (laut/rata):
-    # celah ini merepresentasikan daratan jauh yang memudar di horizon.
-    # Warna: muted distant terrain (hijau-kelabu tanah berkabut, BUKAN biru langit)
-    # Alpha: memudar mulus dari 255 (di batas DEM) hingga 0 (di garis dip)
-    # sehingga menyatu alami dengan langit dinamis Stellarium tanpa garis keras atau artefak biru.
+    # --- RENDER DATARAN UFUK DIP (ANTARA DIP HORIZON DAN DEM SILUET MENTAH) MENGGUNAKAN CITRA ESRI DIP ---
     dip_derajat = 0.0293 * math.sqrt(max(tinggi_pengamat, 0.0))
     dip_alt = -dip_derajat
+    r_dip_km = max(3.57 * math.sqrt(max(tinggi_pengamat, 0.0)), radius_max_km)
 
-    # Baris garis dip (garis lurus di alt = dip_alt)
-    baris_dip = int(round((alt_atas - dip_alt) / (alt_atas - alt_bawah_full) * (tinggi_px - 1)))
-    baris_dip = max(0, min(tinggi_px - 1, baris_dip))
+    res_esri_dip = profil.get("esri_dip_res")
+    if res_esri_dip is None and r_dip_km > radius_max_km + 0.1:
+        try:
+            res_esri_dip = ambil_citra_satelit_esri(lat, lon, r_dip_km, size_px=1024)
+            if res_esri_dip is not None:
+                profil["esri_dip_res"] = res_esri_dip
+        except Exception:
+            pass
 
-    # Warna kabut daratan jauh (muted slate green-brown / earth mist)
-    mist_top_r, mist_top_g, mist_top_b = 70, 80, 75    # dekat garis dip (kabut tipis)
-    mist_bot_r, mist_bot_g, mist_bot_b = 60, 75, 55    # dekat batas topo DEM (daratan jauh)
+    citra_dip_terpakai = res_esri_dip or res_esri
+    if citra_dip_terpakai is not None:
+        try:
+            img_d, (d_min_lon, d_min_lat, d_max_lon, d_max_lat) = citra_dip_terpakai
+            arr_d = np.array(img_d)
+            H_d, W_d, _ = arr_d.shape
+            baris_dip = int(round((alt_atas - dip_alt) / (alt_atas - alt_bawah_full) * (tinggi_px - 1)))
+            baris_dip = max(0, min(tinggi_px - 1, baris_dip))
 
-    for col_idx in range(lebar_px):
-        topo_col = siluet_mentah_azpx[col_idx]
-        # Hanya isi gap jika DEM berakhir DI BAWAH garis dip (ada gap daratan jauh)
-        if topo_col < dip_alt:
-            baris_topo_col = int(round((alt_atas - topo_col) / (alt_atas - alt_bawah_full) * (tinggi_px - 1)))
-            baris_topo_col = max(0, min(tinggi_px - 1, baris_topo_col))
-            if baris_topo_col > baris_dip:
-                panjang = baris_topo_col - baris_dip
-                for i in range(panjang):
-                    row = baris_dip + i
-                    # Jangan menimpa jika sudah ada piksel terrain nyata
-                    if kanvas[row, col_idx, 3] == 255 and (ALT[row, 0] <= topo_col):
-                        continue
-                    # t=0 di garis dip (atas), t=1 di batas DEM (bawah)
-                    t = i / max(panjang - 1, 1)
-                    # Horizon daratan solid (alpha=255 penuh, tidak tembus pandang)
-                    r = int(mist_top_r * (1.0 - t) + mist_bot_r * t)
-                    g = int(mist_top_g * (1.0 - t) + mist_bot_g * t)
-                    b = int(mist_top_b * (1.0 - t) + mist_bot_b * t)
-                    kanvas[row, col_idx, 0] = r
-                    kanvas[row, col_idx, 1] = g
-                    kanvas[row, col_idx, 2] = b
-                    kanvas[row, col_idx, 3] = 255
+            for col_idx in range(lebar_px):
+                topo_col = siluet_mentah_azpx[col_idx]
+                if topo_col < dip_alt:
+                    baris_topo_col = int(round((alt_atas - topo_col) / (alt_atas - alt_bawah_full) * (tinggi_px - 1)))
+                    baris_topo_col = max(0, min(tinggi_px - 1, baris_topo_col))
+
+                    if baris_topo_col > baris_dip:
+                        panjang = baris_topo_col - baris_dip
+                        az_deg = az_query[col_idx]
+                        az_rad = math.radians(az_deg)
+                        cos_az = math.cos(az_rad)
+                        sin_az = math.sin(az_rad)
+
+                        for i in range(panjang):
+                            row = baris_dip + i
+                            if kanvas[row, col_idx, 3] == 255 and (ALT[row, 0] <= topo_col):
+                                continue
+
+                            # Koreksi Distorsi Perspektif Spherical / Bumi Bulat
+                            # r = R_E * (theta - sqrt(theta^2 - 2h/R_E))
+                            # Menghilangkan penumpukan/penyeretan garis pantai, memetakan jarak
+                            # optik secara hiperbolik presisi ke altitude baris panorama.
+                            alt_deg_row = float(ALT[row, 0])
+                            theta_rad = max(math.radians(-alt_deg_row), 1e-6)
+                            h_km = max(tinggi_pengamat, 0.0) / 1000.0
+                            R_E = 6371.0
+                            disc = theta_rad * theta_rad - (2.0 * h_km / R_E)
+                            if disc >= 0:
+                                r_dist = R_E * (theta_rad - math.sqrt(disc))
+                            else:
+                                r_dist = r_dip_km
+
+                            r_dist = float(np.clip(r_dist, radius_max_km, r_dip_km))
+
+                            d_north = r_dist * cos_az
+                            d_east = r_dist * sin_az
+                            p_lat = lat + (d_north / 111.32)
+                            p_lon = lon + (d_east / (111.32 * cos_lat))
+
+                            u_d = np.clip((p_lon - d_min_lon) / (d_max_lon - d_min_lon), 0.0, 1.0)
+                            v_d = np.clip((d_max_lat - p_lat) / (d_max_lat - d_min_lat), 0.0, 1.0)
+
+                            fx_d = np.clip(u_d * (W_d - 1), 0.0, W_d - 1.0)
+                            fy_d = np.clip(v_d * (H_d - 1), 0.0, H_d - 1.0)
+                            x0_d = int(math.floor(fx_d))
+                            y0_d = int(math.floor(fy_d))
+                            x1_d = min(x0_d + 1, W_d - 1)
+                            y1_d = min(y0_d + 1, H_d - 1)
+                            wx_d = fx_d - x0_d
+                            wy_d = fy_d - y0_d
+
+                            c00_d = arr_d[y0_d, x0_d, :3].astype(float)
+                            c10_d = arr_d[y0_d, x1_d, :3].astype(float)
+                            c01_d = arr_d[y1_d, x0_d, :3].astype(float)
+                            c11_d = arr_d[y1_d, x1_d, :3].astype(float)
+
+                            pix_rgb = (c00_d * (1.0 - wx_d) * (1.0 - wy_d) +
+                                       c10_d * wx_d * (1.0 - wy_d) +
+                                       c01_d * (1.0 - wx_d) * wy_d +
+                                       c11_d * wx_d * wy_d).astype(np.uint8)
+
+                            kanvas[row, col_idx, 0] = pix_rgb[0]
+                            kanvas[row, col_idx, 1] = pix_rgb[1]
+                            kanvas[row, col_idx, 2] = pix_rgb[2]
+                            kanvas[row, col_idx, 3] = 255
+        except Exception as e:
+            print(f"Gagal render ESRI dip: {e}")
 
     # TIGA GARIS UFUK (Astronomis 0°, Dip, Topografi) dilukis di atas tekstur satelit
     _gambar_garis_datar(0.0, _hex_ke_rgb(_GAYA_UFUK["astro"]["warna"]), "dashed")
@@ -9274,6 +9351,10 @@ def simpan_profil_cakrawala_txt(path, profil):
         if res_nadir is not None:
             _, bbox_n = res_nadir
             f.write(f"# esri_nadir_bbox={bbox_n[0]:.6f},{bbox_n[1]:.6f},{bbox_n[2]:.6f},{bbox_n[3]:.6f}\n")
+        res_dip = profil.get("esri_dip_res")
+        if res_dip is not None:
+            _, bbox_d = res_dip
+            f.write(f"# esri_dip_bbox={bbox_d[0]:.6f},{bbox_d[1]:.6f},{bbox_d[2]:.6f},{bbox_d[3]:.6f}\n")
         f.write("# kolom: azimuth_deg,sudut_horizon_deg,jarak_horizon_km,elevasi_titik_m\n")
         for az, sudut, jarak, elev in zip(profil["azimuth"], profil["sudut_horizon"],
                                            profil["jarak_horizon_km"], profil["elevasi_titik_m"]):
@@ -9313,6 +9394,15 @@ def simpan_profil_cakrawala_txt(path, profil):
             img_nadir.save(path_nadir, format="JPEG", quality=90)
         except Exception as e:
             print(f"Gagal menyimpan file citra nadir ({path}): {e}")
+
+    res_dip = profil.get("esri_dip_res")
+    if res_dip is not None:
+        try:
+            path_dip = os.path.splitext(path)[0] + "_esri_dip.jpg"
+            img_dip, _ = res_dip
+            img_dip.save(path_dip, format="JPEG", quality=90)
+        except Exception as e:
+            print(f"Gagal menyimpan file citra dip ({path}): {e}")
 
 
 def muat_profil_cakrawala_txt(path):
@@ -9413,6 +9503,44 @@ def muat_profil_cakrawala_txt(path):
         except Exception as e:
             print(f"Gagal membaca file citra nadir lokal {path_nadir}: {e}")
 
+    # Cek ketersediaan file _esri_dip.jpg bersandingan (citra area datar/laut hingga dip horizon)
+    res_esri_dip = None
+    path_dip = os.path.splitext(path)[0] + "_esri_dip.jpg"
+    if os.path.isfile(path_dip):
+        try:
+            from PIL import Image
+            img_dip = Image.open(path_dip).convert("RGB")
+            if "esri_dip_bbox" in meta:
+                b = [float(x) for x in meta["esri_dip_bbox"].split(",")]
+                bbox_d = (b[0], b[1], b[2], b[3])
+            else:
+                r_dip_km = max(3.57 * math.sqrt(max(tinggi_pengamat, 0.0)), radius_km)
+                dlat_d = (r_dip_km * 1.05) / 111.32
+                cos_lat_d = max(0.01, math.cos(math.radians(lat)))
+                dlon_d = (r_dip_km * 1.05) / (111.32 * cos_lat_d)
+                bbox_d = (max(-180.0, lon - dlon_d), max(-90.0, lat - dlat_d),
+                          min(180.0, lon + dlon_d), min(90.0, lat + dlat_d))
+            res_esri_dip = (img_dip, bbox_d)
+            cache_key_d = (round(lat, 4), round(lon, 4), round(radius_km, 1), img_dip.width)
+            _CACHE_CITRA_ESRI[cache_key_d] = res_esri_dip
+        except Exception as e:
+            print(f"Gagal membaca file citra dip lokal {path_dip}: {e}")
+
+    # Jika profil LAMA belum punya _esri_dip.jpg, unduh otomatis sekali & simpan
+    tinggi_pengamat_val = tinggi_mata + elev_tanah
+    r_dip_km_val = max(3.57 * math.sqrt(max(tinggi_pengamat_val, 0.0)), radius_km)
+    if res_esri_dip is None and r_dip_km_val > radius_km + 0.1:
+        try:
+            res_esri_dip = ambil_citra_satelit_esri(lat, lon, r_dip_km_val, size_px=1024)
+            if res_esri_dip is not None:
+                try:
+                    img_d, _ = res_esri_dip
+                    img_d.save(path_dip, format="JPEG", quality=90)
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"Gagal mengunduh citra dip otomatis untuk profil lama: {e}")
+
     # -- Clamp sudut_horizon: minimal = -dip (sama spt hitung_profil_cakrawala) --
     # Profil lama yg tersimpan sebelum fix ini bisa punya nilai di bawah dip;
     # di-clamp saat muat supaya konsisten.
@@ -9435,6 +9563,7 @@ def muat_profil_cakrawala_txt(path):
         "matriks_sudut": matriks_sudut, "matriks_jarak_km": matriks_jarak_km,
         "esri_satelit_res": res_esri,
         "esri_nadir_res": res_esri_nadir,
+        "esri_dip_res": res_esri_dip,
     }
 
 
