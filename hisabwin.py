@@ -7465,6 +7465,21 @@ class ClosableNotebook(ttk.Notebook):
 R_BUMI_CAKRAWALA = 6371000.0        # jari-jari Bumi (meter), utk koreksi kelengkungan
 REFRAKSI_CAKRAWALA = 0.13           # koefisien refraksi atmosfer standar
 _CAKRAWALA_TILE_ZOOM = 12           # detail DEM: 11=kasar/cepat, 13=detail/lambat
+# Jumlah ring DEM tambahan di luar radius utama sampai batas ufuk dip.
+# Ring jauh dibuat lebih jarang supaya gunung >30 km tetap punya bentuk/ridge
+# line tanpa biaya grid penuh seperti zona dekat.
+_CAKRAWALA_N_SAMPLE_JAUH = 24
+# Jarak minimum (meter) sebelum sebuah puncak katalog (gunung_indonesia.csv)
+# diikutkan ke refine presisi di hitung_profil_cakrawala(). Kalau pengamat
+# berdiri DI/DEKAT sebuah puncak yg juga ada di katalog (mis. mendaki lalu
+# lokasi diisi persis di sekitar puncak itu sendiri), jarak observer->puncak
+# bisa jatuh sangat kecil -- formula atan((elev-tinggi)/jarak) jadi sangat
+# sensitif di jarak sekecil itu (sedikit saja beda elevasi/posisi bisa
+# menghasilkan sudut ~90 derajat, muncul sbg lonjakan/distorsi tajam di
+# siluet tanah persis di sekitar pengamat). Di jarak sedekat ini grid
+# radial rapat (t^1.8, dekat d_min=100m) sudah cukup mewakili medan lokal
+# apa adanya -- refine presisi per-titik tidak dibutuhkan \u0026 malah berisiko.
+JARAK_MIN_REFINE_CAKRAWALA_M = 600.0
 _CAKRAWALA_URL_TILE = ("https://s3.amazonaws.com/elevation-tiles-prod/"
                         "terrarium/{z}/{x}/{y}.png")
 ASET_GUNUNG_INDONESIA = os.path.join(_SCRIPT_DIR, "gunung_indonesia.csv")
@@ -7596,6 +7611,19 @@ def _cakrawala_haversine_km(lat1, lon1, lat2, lon2):
     return 2 * R * math.asin(math.sqrt(a))
 
 
+def _cakrawala_bearing_derajat(lat1, lon1, lat2, lon2):
+    """Bearing awal (derajat, 0-360 dari Utara searah jarum jam) dari titik 1
+    ke titik 2 -- kebalikan dari _cakrawala_titik_tujuan (yg menjawab "ada di
+    mana titik tujuan", ini menjawab "ke arah mana titik tujuan itu"). Dipakai
+    utk menentukan bin azimuth mana yg harus di-refine dgn jarak presisi ke
+    puncak katalog (lihat hitung_profil_cakrawala)."""
+    lat1r, lat2r = math.radians(lat1), math.radians(lat2)
+    dlon = math.radians(lon2 - lon1)
+    y = math.sin(dlon) * math.cos(lat2r)
+    x = math.cos(lat1r) * math.sin(lat2r) - math.sin(lat1r) * math.cos(lat2r) * math.cos(dlon)
+    return math.degrees(math.atan2(y, x)) % 360.0
+
+
 def _deteksi_puncak_horizon_numpy(sudut, prominence_min=0.3):
     """Deteksi indeks puncak lokal pada array `sudut` (melingkar -- azimuth
     0 & 360 derajat disambung), dgn syarat "penonjolan" (prominence) minimal
@@ -7677,13 +7705,17 @@ def _muat_gunung_indonesia_csv():
 def _cakrawala_cari_nama_puncak_lokal(lat, lon, radius_m, progress_cb=lambda msg: None):
     """Cari nama gunung/puncak di sekitar (lat,lon) dlm radius_m meter dari
     database LOKAL gunung_indonesia.csv (lihat ASET_GUNUNG_INDONESIA).
-    Return list (nama, lat, lon) -- sama persis kontrak/formatnya dgn versi
-    lama yg query Overpass API (OSM) scr live, tapi versi ini TIDAK butuh
-    koneksi internet sama sekali & tidak ada risiko timeout/rate-limit,
-    krn tinggal filter jarak haversine (vektor numpy) dari data yg sudah
-    dimuat di memori. Kalau database kosong/tidak ketemu, return list
-    kosong -- bukan error fatal, profil cakrawala tetap valid tanpa label
-    nama puncak."""
+    Return list (nama, lat, lon, jarak_m) -- jarak_m disertakan (bukan cuma
+    dibuang setelah filter radius) krn hitung_profil_cakrawala butuh angka
+    ini persis utk menyisipkan sampel DEM presisi di jarak sebenarnya ke tiap
+    puncak (lihat blok "refine sampel radial ke puncak katalog" di sana),
+    jadi tidak perlu hitung ulang haversine yg sama dua kali. Sama persis
+    kontrak lama utk 3 elemen pertamanya dgn versi lama yg query Overpass API
+    (OSM) scr live, tapi versi ini TIDAK butuh koneksi internet sama sekali &
+    tidak ada risiko timeout/rate-limit, krn tinggal filter jarak haversine
+    (vektor numpy) dari data yg sudah dimuat di memori. Kalau database
+    kosong/tidak ketemu, return list kosong -- bukan error fatal, profil
+    cakrawala tetap valid tanpa label nama puncak."""
     nama_arr, lat_arr, lon_arr = _muat_gunung_indonesia_csv()
     if len(nama_arr) == 0:
         progress_cb("  Database gunung_indonesia.csv kosong/tidak ketemu -- lanjut TANPA label nama.")
@@ -7694,7 +7726,7 @@ def _cakrawala_cari_nama_puncak_lokal(lat, lon, radius_m, progress_cb=lambda msg
     a = np.sin(dlat / 2) ** 2 + math.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
     jarak_m = 2 * R_BUMI_CAKRAWALA * np.arcsin(np.sqrt(a))
     idx = np.where(jarak_m <= radius_m)[0]
-    hasil = [(nama_arr[i], float(lat_arr[i]), float(lon_arr[i])) for i in idx]
+    hasil = [(nama_arr[i], float(lat_arr[i]), float(lon_arr[i]), float(jarak_m[i])) for i in idx]
     progress_cb(f"  Nama puncak: {len(hasil)} ditemukan dari database lokal (offline, {len(nama_arr)} entri total).")
     return hasil
 
@@ -7716,7 +7748,15 @@ def hitung_profil_cakrawala(lat, lon, tinggi_mata=2.0, radius_km=30, n_azimuth=1
               bukit penghalang -- beda dgn "ufuk topo"/sudut_horizon di
               bawah yang sudah memperhitungkan penghalang nyata),
           "azimuth": array (derajat, 0-360),
-          "sudut_horizon": array (derajat elevasi, boleh negatif),
+          "sudut_horizon": array (derajat elevasi, boleh negatif) --
+              SKYLINE ini gabungan 2 zona: grid DEM asli (<= radius_km, via
+              jarak_arr) DAN puncak katalog zona dip (> radius_km s.d.
+              r_dip_km = 3.57*sqrt(tinggi_pengamat)) yg diukur presisi
+              satu-satu dari gunung_indonesia.csv \u0026 lolos ufuk dip --
+              TANPA memperluas grid n_azimuth*n_sample (mahal). Ridgeline
+              (matriks_sudut) TIDAK ikut diperluas ke zona jauh (jarak_arr
+              tdk menjangkau sejauh itu; area >radius_km tetap proyeksi
+              flat/spherical citra Esri dip di consumer lain).
           "jarak_horizon_km": array,
           "elevasi_titik_m": array,
           "puncak_berlabel": [(azimuth, sudut, nama), ...],
@@ -7731,15 +7771,57 @@ def hitung_profil_cakrawala(lat, lon, tinggi_mata=2.0, radius_km=30, n_azimuth=1
     tinggi_pengamat = elev_tanah + tinggi_mata
     progress_cb(f"Elevasi tanah: {elev_tanah:.1f} m, tinggi mata: {tinggi_pengamat:.1f} m")
 
+    # dip_derajat & r_dip_km dihitung di sini (bukan cuma nanti dekat unduh
+    # citra esri dip) krn juga dipakai buat batas pencarian puncak katalog
+    # zona jauh (>radius_km, lihat blok refine di bawah) -- di luar
+    # radius_km TIDAK ada DEM asli (tidak ekonomis unduh tile sepadat itu),
+    # tapi puncak setinggi Semeru/Slamet/dst bisa saja tetap nongol di atas
+    # ufuk dip dari ratusan km jauhnya (rumus dip radius Bumi-bulat, sama
+    # yg dipakai citra esri dip di bawah).
+    dip_derajat = 0.0293 * math.sqrt(max(tinggi_pengamat, 0.0))
+    r_dip_km = max(3.57 * math.sqrt(max(tinggi_pengamat, 0.0)), radius_km)
+
     azimuth = np.linspace(0, 360, n_azimuth, endpoint=False)
-    # Sampling jarak non-linear (pangkat 1.8): lebih rapat di medan dekat (100m s/d 750m)
-    # agar kontur elevasi lereng/bukit dekat pengamat terukur presisi dari DEM30
+    # Sampling jarak non-linear (pangkat 1.8): lebih rapat di medan dekat (100m s/d radius utama)
+    # agar kontur elevasi lereng/bukit dekat pengamat tetap detail.
     d_min = 100.0  # 100m (bebas noise kuantisasi grid DEM)
     d_max = radius_km * 1000.0
     t_step = np.linspace(0, 1, n_sample)
-    jarak_arr = d_min + (d_max - d_min) * (t_step ** 1.8)
+    jarak_dekat = d_min + (d_max - d_min) * (t_step ** 1.8)
 
-    progress_cb(f"Menyiapkan {n_azimuth * n_sample} titik sampel ({n_azimuth} arah x {n_sample} jarak)...")
+    # ================================================================
+    # ZONA JAUH: tetap pakai DEM asli sampai ufuk dip, tetapi resolusinya
+    # diturunkan. Versi lama berhenti tepat di radius_km sehingga semua
+    # medan >radius_km berubah menjadi satu skyline saja. Akibatnya gunung
+    # 30-50 km hanya terlihat sebagai garis biasa dan tidak pernah masuk
+    # matriks ridge/contour.
+    #
+    # Ring tambahan memakai jarak geometrik di luar radius utama. Karena
+    # tujuan zona jauh adalah bentuk makro pegunungan, bukan detail lereng
+    # 30 m, 24 ring cukup untuk membentuk kontur/ridge line dengan biaya
+    # hanya O(n_azimuth * 24).
+    # ================================================================
+    d_horizon_m = r_dip_km * 1000.0
+    if d_horizon_m > d_max + 1000.0:
+        n_jauh_ring = min(
+            _CAKRAWALA_N_SAMPLE_JAUH,
+            max(8, int(math.ceil((d_horizon_m - d_max) / 2500.0)))
+        )
+        # padat di dekat radius utama, makin jarang menuju ufuk dip.
+        t_jauh = np.linspace(0.0, 1.0, n_jauh_ring + 1)[1:] ** 1.35
+        jarak_jauh = d_max + (d_horizon_m - d_max) * t_jauh
+    else:
+        jarak_jauh = np.array([], dtype=float)
+
+    jarak_arr = np.concatenate([jarak_dekat, jarak_jauh])
+    n_sample_total = len(jarak_arr)
+
+    progress_cb(
+        f"Menyiapkan {n_azimuth * n_sample_total} titik sampel "
+        f"({n_azimuth} arah x {len(jarak_dekat)} ring dekat"
+        + (f" + {len(jarak_jauh)} ring jauh sampai {r_dip_km:.1f} km)"
+           if len(jarak_jauh) else ")")
+    )
     semua_titik = []  # (az_idx, s_idx, jarak_m, lat, lon)
     for az_idx, az in enumerate(azimuth):
         for s_idx, d in enumerate(jarak_arr):
@@ -7758,7 +7840,7 @@ def hitung_profil_cakrawala(lat, lon, tinggi_mata=2.0, radius_km=30, n_azimuth=1
     # buat_figure_ridgeline_cakrawala() bisa gambar efek berlapis
     # (painter's algorithm, ala versi Colab) TANPA unduh ulang tile tiap
     # kali profil ini dibuka lagi.
-    matriks_sudut = np.full((n_azimuth, n_sample), -90.0)
+    matriks_sudut = np.full((n_azimuth, n_sample_total), -90.0)
     r_efektif = R_BUMI_CAKRAWALA / (1 - REFRAKSI_CAKRAWALA)
 
     for idx, (az_idx, s_idx, d, plat, plon) in enumerate(semua_titik):
@@ -7771,6 +7853,86 @@ def hitung_profil_cakrawala(lat, lon, tinggi_mata=2.0, radius_km=30, n_azimuth=1
             jarak_horizon[az_idx] = d
             elevasi_horizon[az_idx] = elev_target
 
+    # -- Refine ke puncak katalog: sisipkan SATU sampel presisi per puncak --
+    # Grid jarak_arr (pangkat 1.8) makin renggang seiring jarak (>1 km di
+    # ujung radius 30 km) -- cukup lebar utk "melompati" apex sebuah gunung
+    # yg sempit, sehingga sudut_horizon bisa lebih rendah dari nilai
+    # sebenarnya walau azimuth bin-nya sudah pas. Daripada menaikkan
+    # n_azimuth/n_sample scr global (biaya sampel naik proporsional ke
+    # seluruh grid), di sini kita pakai koordinat PASTI tiap puncak dari
+    # gunung_indonesia.csv (lewat _cakrawala_cari_nama_puncak_lokal, yg
+    # sudah menghitung jarak haversine-nya) utk mengambil satu sampel DEM
+    # tepat di jarak sebenarnya ke puncak itu -- bukan menebak lewat grid.
+    # Biayanya cuma sebanyak jumlah puncak katalog dlm radius (biasanya
+    # puluhan di Jawa Barat), bukan proporsional ke n_azimuth * n_sample.
+    # Juga dipakai utk perbaiki ridgeline (matriks_sudut): sampel presisi
+    # ditaruh di RING JARAK yg sudah ada (jarak_arr) yg paling dekat ke
+    # jarak puncak sebenarnya -- TIDAK menambah ring/kolom baru, jadi
+    # matriks_sudut/matriks_jarak_km tetap persegi n_azimuth x n_sample
+    # spt semula \u0026 konsumen lain (buat_figure_ridgeline_cakrawala,
+    # ekspor panorama Stellarium/CdC) tidak perlu berubah sama sekali.
+    #
+    # ZONA JAUH (> radius_km, s.d. r_dip_km): di luar radius_km TIDAK ada
+    # DEM asli (grid jarak_arr/matriks_sudut cuma sampai radius_km, tidak
+    # ekonomis diperluas -- itu knapa area ini biasanya cuma diproyeksikan
+    # "flat spherical" pakai citra Esri dip). TAPI puncak katalog yg cukup
+    # tinggi (mis. Slamet, Sindoro/Sumbing dari kejauhan) tetap bisa nongol
+    # di atas ufuk dip walau jauh di luar radius_km. Puncak zona ini DIUKUR
+    # SATU-SATU jg (bukan grid n_azimuth*n_sample yg mahal kalau diperluas
+    # sampai r_dip_km) tapi HANYA disisipkan ke skyline (sudut_horizon) --
+    # tetap bisa diukur satu-per-satu lewat database puncak sebagai refine
+    # presisi skyline. Ring DEM tambahan di atas sudah menangkap bentuk
+    # makro terrain pada seluruh azimuth sampai batas ufuk dip.
+    progress_cb("Mencari nama gunung/puncak dari database lokal (termasuk zona dip)...")
+    radius_m = radius_km * 1000.0
+    r_dip_m = r_dip_km * 1000.0
+    puncak_lokal = _cakrawala_cari_nama_puncak_lokal(lat, lon, r_dip_m, progress_cb)
+
+    az_step = 360.0 / n_azimuth
+    bin_terkonfirmasi = {}  # az_idx -> nama puncak yg sudah diukur presisi
+    # d > JARAK_MIN_REFINE_CAKRAWALA_M (bukan cuma d > 0): kalau pengamat
+    # berdiri persis di/dekat sebuah puncak katalog (mis. simulasi dari
+    # puncak Salak sendiri), jangan refine ke puncak itu -- lihat komentar
+    # di deklarasi konstantanya (dekat R_BUMI_CAKRAWALA).
+    n_terlalu_dekat = sum(1 for *_, d in puncak_lokal if 0 < d <= JARAK_MIN_REFINE_CAKRAWALA_M)
+    titik_puncak = [(nama, plat, plon, d) for nama, plat, plon, d in puncak_lokal
+                     if d > JARAK_MIN_REFINE_CAKRAWALA_M]
+    if n_terlalu_dekat:
+        progress_cb(f"  {n_terlalu_dekat} puncak katalog dilewati (< {JARAK_MIN_REFINE_CAKRAWALA_M:.0f} m dari "
+                    f"pengamat -- kemungkinan pengamat berdiri di/dekat puncak itu sendiri).")
+    n_jauh_lolos = 0
+    if titik_puncak:
+        n_dekat = sum(1 for *_, d in titik_puncak if d <= radius_m)
+        n_jauh = len(titik_puncak) - n_dekat
+        progress_cb(f"Menyisipkan sampel presisi ke {n_dekat} puncak dlm radius DEM "
+                    f"+ {n_jauh} puncak di zona dip (>{radius_km:.0f} km)...")
+        elevasi_puncak = _cakrawala_ambil_elevasi(
+            [(plat, plon) for _, plat, plon, _ in titik_puncak], cache_tile, sesi, progress_cb)
+        for (nama, plat, plon, d), elev_target in zip(titik_puncak, elevasi_puncak):
+            bearing = _cakrawala_bearing_derajat(lat, lon, plat, plon)
+            az_idx = int(round(bearing / az_step)) % n_azimuth
+            penurunan_lengkung = (d ** 2) / (2 * r_efektif)
+            sudut = math.degrees(math.atan((elev_target - tinggi_pengamat - penurunan_lengkung) / d))
+
+            if d > radius_m:
+                # Zona jauh: cuma dipakai kalau beneran nongol di atas dip.
+                if sudut <= -dip_derajat:
+                    continue
+                n_jauh_lolos += 1
+            else:
+                # Ring ridgeline TERDEKAT ke jarak asli -- HANYA utk puncak dlm radius DEM (d <= radius_m).
+                s_idx_terdekat = int(np.argmin(np.abs(jarak_arr - d)))
+                if sudut > matriks_sudut[az_idx, s_idx_terdekat]:
+                    matriks_sudut[az_idx, s_idx_terdekat] = sudut
+
+            if sudut > sudut_horizon[az_idx]:
+                sudut_horizon[az_idx] = sudut
+                jarak_horizon[az_idx] = d
+                elevasi_horizon[az_idx] = elev_target
+                bin_terkonfirmasi[az_idx] = nama
+        progress_cb(f"{len(bin_terkonfirmasi)} bin azimuth diperbarui dgn sampel presisi puncak "
+                    f"({n_jauh_lolos} di antaranya dari zona dip, nongol di atas ufuk dip).")
+
     # -- Clamp: ufuk topografi TIDAK BOLEH lebih rendah dari dip --
     # Di dataran tinggi (pengamat di gunung/bukit), radius DEM yg terbatas
     # bisa membuat semua titik sampel LEBIH RENDAH dari pengamat, sehingga
@@ -7780,8 +7942,8 @@ def hitung_profil_cakrawala(lat, lon, tinggi_mata=2.0, radius_km=30, n_azimuth=1
     # refraksi). Clamp diterapkan HANYA pada sudut_horizon (skyline), BUKAN
     # pada matriks_sudut (lapisan ridgeline), supaya kontur/puncak di bawah
     # dip tetap tergambar visual — hanya garis horizon efektif yg dijaga
-    # tidak jatuh di bawah dip.
-    dip_derajat = 0.0293 * math.sqrt(max(tinggi_pengamat, 0.0))
+    # tidak jatuh di bawah dip. (dip_derajat sudah dihitung di atas, dipakai
+    # ulang -- lihat komentar dekat awal fungsi.)
     # Simpan skyline MENTAH sebelum clamp -- dipakai utk deteksi puncak
     # (supaya puncak yg di bawah dip tetap terdeteksi \u0026 dilabeli) dan utk
     # posisi label (supaya label muncul di ketinggian visual aslinya, bukan
@@ -7795,16 +7957,30 @@ def hitung_profil_cakrawala(lat, lon, tinggi_mata=2.0, radius_km=30, n_azimuth=1
     idx_puncak = _deteksi_puncak_horizon_numpy(sudut_horizon_mentah, prominence_min=prominence_min)
     progress_cb(f"Ditemukan {len(idx_puncak)} kandidat puncak.")
 
-    progress_cb("Mencari nama gunung/puncak dari database lokal...")
-    puncak_lokal = _cakrawala_cari_nama_puncak_lokal(lat, lon, radius_km * 1000, progress_cb)
-
     puncak_berlabel = []
+    # Puncak yg sudah dikonfirmasi presisi di tahap refine di atas: label
+    # LANGSUNG dari situ (tidak butuh lolos syarat prominence/local-max
+    # _deteksi_puncak_horizon_numpy -- kita sudah tahu pasti itu puncak asli
+    # dari database, jadi selalu ditampilkan berlabel).
+    for az_idx, nama in bin_terkonfirmasi.items():
+        puncak_berlabel.append((float(azimuth[az_idx]), float(sudut_horizon_mentah[az_idx]), nama))
+
+    # Fallback lama (cocokkan posisi puncak terdeteksi ke database lewat
+    # jarak_maks_label_km) -- hanya utk kandidat yg BUKAN bin yg sudah
+    # dilabeli presisi di atas, supaya tidak dobel.
     for i in idx_puncak:
-        if jarak_horizon[i] <= 0:
+        if int(i) in bin_terkonfirmasi:
+            continue
+        if jarak_horizon[i] < JARAK_MIN_REFINE_CAKRAWALA_M:
             continue
         plat, plon = _cakrawala_titik_tujuan(lat, lon, azimuth[i], jarak_horizon[i])
-        nama_terbaik, jarak_terbaik = None, jarak_maks_label_km
-        for nama, nlat, nlon in puncak_lokal:
+        nama_terbaik, jarak_terbaik = None, min(jarak_maks_label_km, 2.0)
+        for nama, nlat, nlon, d_kat in puncak_lokal:
+            if d_kat < JARAK_MIN_REFINE_CAKRAWALA_M:
+                continue
+            # Pastikan jarak horizon titik siluet cocok dgn jarak katalog puncak (selisih < 2.5 km)
+            if abs(jarak_horizon[i] - (d_kat / 1000.0)) > 2.5:
+                continue
             d = _cakrawala_haversine_km(plat, plon, nlat, nlon)
             if d < jarak_terbaik:
                 jarak_terbaik, nama_terbaik = d, nama
@@ -7813,7 +7989,9 @@ def hitung_profil_cakrawala(lat, lon, tinggi_mata=2.0, radius_km=30, n_azimuth=1
             # posisi visual asli puncak, bukan di garis datar clamp.
             puncak_berlabel.append((float(azimuth[i]), float(sudut_horizon_mentah[i]), nama_terbaik))
 
-    progress_cb(f"{len(puncak_berlabel)} dari {len(idx_puncak)} kandidat puncak berhasil diberi nama.")
+    progress_cb(f"{len(puncak_berlabel)} puncak berlabel "
+                f"({len(bin_terkonfirmasi)} presisi katalog, "
+                f"{len(puncak_berlabel) - len(bin_terkonfirmasi)} dari pencocokan posisi).")
 
     progress_cb("Mengunduh & mengolah citra satelit Esri (ArcGIS World Imagery)...")
     res_esri = None
@@ -7836,7 +8014,7 @@ def hitung_profil_cakrawala(lat, lon, tinggi_mata=2.0, radius_km=30, n_azimuth=1
         progress_cb(f"  (Citra nadir diabaikan: {e})")
 
     # Unduh citra dip (area datar/laut hingga ufuk dip jika r_dip_km > radius_km)
-    r_dip_km = max(3.57 * math.sqrt(max(float(tinggi_pengamat), 0.0)), radius_km)
+    # (r_dip_km sudah dihitung di atas, dipakai ulang -- lihat komentar dekat awal fungsi.)
     res_esri_dip = None
     if r_dip_km > radius_km + 0.1:
         try:
@@ -7854,6 +8032,7 @@ def hitung_profil_cakrawala(lat, lon, tinggi_mata=2.0, radius_km=30, n_azimuth=1
         "elev_tanah": float(elev_tanah), "tinggi_pengamat": float(tinggi_pengamat),
         "nama_lokasi": nama_lokasi,
         "azimuth": azimuth, "sudut_horizon": sudut_horizon,
+        "sudut_horizon_mentah": sudut_horizon_mentah,
         "jarak_horizon_km": jarak_horizon / 1000.0, "elevasi_titik_m": elevasi_horizon,
         "puncak_berlabel": puncak_berlabel,
         "matriks_sudut": matriks_sudut, "matriks_jarak_km": jarak_arr / 1000.0,
@@ -7861,6 +8040,25 @@ def hitung_profil_cakrawala(lat, lon, tinggi_mata=2.0, radius_km=30, n_azimuth=1
         "esri_nadir_res": res_esri_nadir,
         "esri_dip_res": res_esri_dip,
     }
+
+
+def _dapatkan_sudut_horizon_mentah(profil):
+    """Dapatkan sudut horizon mentah (un-clamped topografi gunung),
+    sehingga kontur gunung di bawah ufuk dip tetap terlihat garis tegasnya."""
+    if isinstance(profil, dict) and "sudut_horizon_mentah" in profil and profil["sudut_horizon_mentah"] is not None:
+        return np.asarray(profil["sudut_horizon_mentah"], dtype=float)
+    matriks_sudut = profil.get("matriks_sudut") if isinstance(profil, dict) else None
+    if matriks_sudut is not None and len(matriks_sudut) > 0:
+        mentah = np.max(matriks_sudut, axis=1).astype(float)
+        puncak = profil.get("puncak_berlabel", [])
+        az_arr = profil.get("azimuth")
+        if puncak and az_arr is not None:
+            for az, sudut, _ in puncak:
+                idx = int(np.argmin(np.abs(az_arr - az)))
+                mentah[idx] = max(mentah[idx], float(sudut))
+        return mentah
+    return np.asarray(profil["sudut_horizon"], dtype=float)
+
 
 
 def ekspor_profil_ke_stellarium(profil, path_zip, nama_lokasi=None, penulis="HisabWin"):
@@ -8160,7 +8358,7 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
         baris = np.clip(
             np.round((alt_atas - sudut_per_kolom) / (alt_atas - alt_bawah_full) * (tinggi_px - 1)).astype(int),
             0, tinggi_px - 1)
-        for tebal in (0,):
+        for tebal in (-1, 0, 1):
             b = np.clip(baris + tebal, 0, tinggi_px - 1)
             kanvas[b, np.arange(lebar_px), 0] = warna_rgb[0]
             kanvas[b, np.arange(lebar_px), 1] = warna_rgb[1]
@@ -8169,8 +8367,6 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
 
     # Skyline altitude per column
     # sudut_horizon dari profil sudah di-clamp ke -dip (lihat hitung_profil_cakrawala).
-    # Untuk masking tekstur satelit, kita butuh skyline MENTAH (batas topo DEM asli)
-    # supaya tekstur tidak meluber ke bawah batas terrain → artefak drone-view.
     siluet_di_azpx = _interp_lingkar(sudut_horizon, kernel_az=3)  # versi dip-clamp (utk garis ufuk)
 
     # Hitung skyline MENTAH dari matriks_sudut (maks per azimuth, tanpa clamp dip)
@@ -8179,7 +8375,7 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
 
     # Interpolate matriks_sudut secara halus melingkar: shape (lebar_px, n_layer)
     # kernel_az=5 menghaluskan artefak tangga DEM 30m antar azimuth tetangga.
-    matriks_sudut_px = np.zeros((lebar_px, n_layer))
+    matriks_sudut_px = np.zeros((lebar_px, n_layer), dtype=np.float32)
     for s in range(n_layer):
         matriks_sudut_px[:, s] = _interp_lingkar(matriks_sudut[:, s], kernel_az=5)
 
@@ -8199,9 +8395,12 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
     ALT = alt_grid[:, None]  # (tinggi_px, 1)
 
     if arr_esri is not None:
-        # Pemetaan 2D Perspektif Geografis Monotonik Presisi
-        R_km = np.zeros((tinggi_px, lebar_px), dtype=float)
+        # Pemetaan 2D Perspektif Geografis (Forward Occlusion Ray-Casting)
+        R_km = np.zeros((tinggi_px, lebar_px), dtype=np.float32)
         h_local_m = max(float(profil.get("tinggi_mata", 2.0)), 2.0)
+        r_boundary = float(matriks_jarak_km[0])  # jarak layer DEM terdekat (km)
+        r_boundary_m = r_boundary * 1000.0
+        scale_row = (tinggi_px - 1) / (alt_atas - alt_bawah_full)
 
         k_rad = max(n_layer // 6, 3)
         x_rad = np.linspace(-3, 3, 2 * k_rad + 1)
@@ -8209,21 +8408,18 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
         g_rad /= g_rad.sum()
 
         # Smooth first_angle (sudut lereng DEM terdekat) lintas 360° azimuth
-        # agar batas ground-cap mulus tanpa tirai vertikal per-kolom.
+        # agar batas ground-cap mulus tanpa loncatan vertikal per-kolom.
         all_first_angles = np.nan_to_num(matriks_sudut_px[:, 0], nan=-2.0)
         k_fa = max(lebar_px // 20, 32)
         pad_fa = np.concatenate([all_first_angles[-k_fa:], all_first_angles, all_first_angles[:k_fa]])
         win_fa = np.ones(2 * k_fa + 1) / (2 * k_fa + 1)
         first_angle_smooth_arr = np.convolve(pad_fa, win_fa, mode='same')[k_fa:-k_fa]
 
-        r_boundary = float(matriks_jarak_km[0])  # jarak layer DEM terdekat (m → km)
-
         for col in range(lebar_px):
             angles_col = np.nan_to_num(
                 matriks_sudut_px[col, :], nan=-90.0, posinf=90.0, neginf=-90.0)
 
-            # Smooth radial HANYA pada layer dalam 1 km pertama dari pengamat
-            # untuk menghilangkan loncatan tangga DEM 30m di area dekat.
+            # Smooth radial pada layer dalam 1 km pertama untuk menghilangkan undakan DEM
             n_dekat = int(np.searchsorted(matriks_jarak_km, 1.0, side='right'))
             n_dekat = max(n_dekat, 4)
             if n_dekat > 2 * k_rad + 1:
@@ -8231,40 +8427,64 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
                 angles_col = angles_col.copy()
                 angles_col[:n_dekat] = bagian_dekat
 
-            env_angle = np.maximum.accumulate(angles_col)
-            eps = np.arange(len(env_angle), dtype=float) * 1e-7
-            env_for_interp = np.maximum.accumulate(env_angle + eps)
+            # 1. Ground Cap (alt < first ring angle): perspektif tanah di kaki pengamat
+            #    r berjalan mulus dari nadir (-90°) ke r_boundary pada alt = fa_col
+            fa_col = float(first_angle_smooth_arr[col])
+            # Pastikan ring 0 DEM persis bertemu di fa_col agar tidak ada gap/lompatan matriks sudut
+            angles_col[0] = fa_col
 
-            r_interp = np.interp(
-                alt_grid, env_for_interp, matriks_jarak_km,
-                left=r_boundary, right=radius_max_km)
-
-            # Batas ground cap: pakai first_angle yg sudah di-smooth lintas 360° azimuth
-            fa_smooth = float(first_angle_smooth_arr[col])
-            mask_flat = alt_grid < fa_smooth
-
-            R_km[:, col] = r_interp
-
-            # Ground cap: ekstrapolasi perspektif KONTINU dari titik boundary DEM.
-            # r = r_boundary * tan(fa_smooth) / tan(alt)
-            # Di alt = fa_smooth: r = r_boundary (KONTINU, tanpa celah/lompatan)
-            # Di alt < fa_smooth: r < r_boundary (makin dekat ke kaki pengamat)
-            # Formula ini memetakan area tanah di sekitar pengamat ke citra nadir.
+            mask_flat = alt_grid < fa_col
             if np.any(mask_flat):
-                tan_fa = max(abs(math.tan(math.radians(fa_smooth))), 1e-7)
-                tan_below = np.maximum(
-                    np.abs(np.tan(np.radians(alt_grid[mask_flat]))), 1e-7)
-                r_extrap = r_boundary * (tan_fa / tan_below)
-                R_km[mask_flat, col] = np.clip(r_extrap, 0.001, r_boundary)
+                alts_cap = alt_grid[mask_flat]
+                span_deg = max(fa_col - (-90.0), 1.0)
+                # Rasio monotonik dari nadir (-90°) ke ring pertama DEM (fa_col)
+                frac_cap = np.clip((alts_cap - (-90.0)) / span_deg, 0.0, 1.0)
+                # Pangkat 1.4 mendistribusikan piksel satelit nadir secara natural
+                r_cap = r_boundary * (frac_cap ** 1.4)
+                R_km[mask_flat, col] = np.clip(r_cap, 0.0005, r_boundary)
 
-        # Smoothing horizontal melingkar (wrap-around 360°) pada R_km
-        k_smooth = max(lebar_px // 200, 8)
-        x_g = np.linspace(-3, 3, 2 * k_smooth + 1)
-        gauss_win = np.exp(-x_g**2 / 2)
-        gauss_win /= gauss_win.sum()
-        for row in range(tinggi_px):
-            padded = np.concatenate([R_km[row, -k_smooth:], R_km[row, :], R_km[row, :k_smooth]])
-            R_km[row, :] = np.convolve(padded, gauss_win, mode='same')[k_smooth:-k_smooth]
+            # 2. Forward Ray-Casting Terrain: setiap lereng gunung yang terlihat
+            #    dipetakan ke jarak geometris aslinya tanpa stretch kontur
+            max_seen = fa_col
+            for s in range(n_layer - 1):
+                ta = float(angles_col[s])
+                tb = float(angles_col[s + 1])
+                ra = float(matriks_jarak_km[s])
+                rb = float(matriks_jarak_km[s + 1])
+
+                if tb <= max_seen and ta <= max_seen:
+                    continue
+                if tb > max_seen:
+                    if ta < max_seen:
+                        frac = (max_seen - ta) / max(tb - ta, 1e-7)
+                        r_start = ra + frac * (rb - ra)
+                        th_start = max_seen
+                    else:
+                        r_start = ra
+                        th_start = ta
+                    r_end = rb
+                    th_end = tb
+
+                    r_top = int(max(0, np.floor((alt_atas - th_end) * scale_row)))
+                    r_bot = int(min(tinggi_px - 1, np.ceil((alt_atas - th_start) * scale_row)))
+                    if r_top <= r_bot:
+                        dth = max(th_end - th_start, 1e-7)
+                        alts = alt_grid[r_top:r_bot + 1]
+                        t = np.clip((alts - th_start) / dth, 0.0, 1.0)
+                        R_km[r_top:r_bot + 1, col] = r_start + t * (r_end - r_start)
+                    max_seen = tb
+
+        # Haluskan R_km melingkar (wrap-around 360°) khusus di area medan dekat (r < 2km)
+        # agar batas pertemuan ground cap dan lereng bukit menyatu mulus tanpa diskontinuitas
+        k_smooth = max(lebar_px // 256, 4)
+        x_g = np.linspace(-2, 2, 2 * k_smooth + 1)
+        g_h = np.exp(-x_g**2 / 2)
+        g_h /= g_h.sum()
+        mask_near_rows = alt_grid < 15.0
+        for r_idx in np.where(mask_near_rows)[0]:
+            row_r = R_km[r_idx, :]
+            pad_r = np.concatenate([row_r[-k_smooth:], row_r, row_r[:k_smooth]])
+            R_km[r_idx, :] = np.convolve(pad_r, g_h, mode='same')[k_smooth:-k_smooth]
 
         AZ_RAD = np.radians(az_query)[None, :]
         D_NORTH = R_km * np.cos(AZ_RAD)
@@ -8276,8 +8496,7 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
         U = (P_LON - min_lon) / (max_lon - min_lon)
         V = (max_lat - P_LAT) / (max_lat - min_lat)
 
-        # Bilinear texture sampling menghilangkan blok/pixel patah saat
-        # panorama 8192 px dipetakan dari citra satelit yang lebih kecil.
+        # Bilinear texture sampling citra satelit Esri utama
         fx = np.clip(U * (W_esri - 1), 0.0, W_esri - 1.0)
         fy = np.clip(V * (H_esri - 1), 0.0, H_esri - 1.0)
         x0 = np.floor(fx).astype(np.int32)
@@ -8295,19 +8514,52 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
         sampled_rgb = (c00 * (1.0 - wx3) * (1.0 - wy3)
                        + c10 * wx3 * (1.0 - wy3)
                        + c01 * (1.0 - wx3) * wy3
-                       + c11 * wx3 * wy3).astype(np.uint8)
+                       + c11 * wx3 * wy3).astype(np.float32)
+
+        # ------------------------------------------------------------------
+        # PEMISAHAN TEKSTUR: zona > radius_max_km memakai citra ESRI DIP
+        # ------------------------------------------------------------------
+        res_dip_for_main = profil.get("esri_dip_res")
+        if res_dip_for_main is not None:
+            try:
+                img_dip_m, (d_min_lon, d_min_lat, d_max_lon, d_max_lat) = res_dip_for_main
+                arr_dip_m = np.array(img_dip_m)
+                H_dip_m, W_dip_m, _ = arr_dip_m.shape
+
+                U_d_m = (P_LON - d_min_lon) / (d_max_lon - d_min_lon)
+                V_d_m = (d_max_lat - P_LAT) / (d_max_lat - d_min_lat)
+
+                fx_d = np.clip(U_d_m * (W_dip_m - 1), 0.0, W_dip_m - 1.0)
+                fy_d = np.clip(V_d_m * (H_dip_m - 1), 0.0, H_dip_m - 1.0)
+                x0_d = np.floor(fx_d).astype(np.int32)
+                y0_d = np.floor(fy_d).astype(np.int32)
+                x1_d = np.minimum(x0_d + 1, W_dip_m - 1)
+                y1_d = np.minimum(y0_d + 1, H_dip_m - 1)
+                wx_d = (fx_d - x0_d).astype(np.float32)[..., None]
+                wy_d = (fy_d - y0_d).astype(np.float32)[..., None]
+
+                c00_d = arr_dip_m[y0_d, x0_d, :3].astype(np.float32)
+                c10_d = arr_dip_m[y0_d, x1_d, :3].astype(np.float32)
+                c01_d = arr_dip_m[y1_d, x0_d, :3].astype(np.float32)
+                c11_d = arr_dip_m[y1_d, x1_d, :3].astype(np.float32)
+
+                sampled_rgb_dip = (
+                    c00_d * (1.0 - wx_d) * (1.0 - wy_d)
+                    + c10_d * wx_d * (1.0 - wy_d)
+                    + c01_d * (1.0 - wx_d) * wy_d
+                    + c11_d * wx_d * wy_d
+                )
+
+                mask_dip_texture = R_km > (radius_max_km + 1e-4)
+                if np.any(mask_dip_texture):
+                    sampled_rgb[mask_dip_texture] = sampled_rgb_dip[mask_dip_texture]
+            except Exception as e:
+                print(f"Gagal menerapkan tekstur ESRI dip pada zona > radius DEM: {e}")
 
         # Mask ground: batas skyline MENTAH (DEM asli)
         MASK_GROUND = ALT <= siluet_mentah_azpx[None, :]
 
-        # 1. Lapisi seluruh area permukaan tanah (gunung, lereng, kawah, lembah, dan ground cap)
-        #    dengan foto satelit ESRI 3D secara 100% penuh (TIDAK ADA LUBANG COKLAT).
-        kanvas[..., :3][MASK_GROUND] = sampled_rgb[MASK_GROUND]
-        kanvas[..., 3][MASK_GROUND] = 255
-
-        # 2. Hamparan Citra Satelit Nadir Ultra-Tinggi (Zoom Maksimum, ~0.5 km)
-        #    Jika citra nadir tersedia, lapisi area tempat berpijak di sekitar pengamat
-        #    dengan FEATHERING (gradasi mulus) di tepi agar transisi ke ESRI luas seamless.
+        # Hamparan Citra Satelit Nadir (resolusi tinggi di sekitar pengamat, r < 1 km)
         res_nadir = profil.get("esri_nadir_res")
         if res_nadir is not None:
             try:
@@ -8315,12 +8567,10 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
                 arr_nadir = np.array(img_nadir)
                 H_n, W_n, _ = arr_nadir.shape
 
-                # Sampling bilinear dari citra nadir
                 U_n = (P_LON - n_min_lon) / (n_max_lon - n_min_lon)
                 V_n = (n_max_lat - P_LAT) / (n_max_lat - n_min_lat)
 
-                # Mask valid nadir: piksel yang berada di dalam bounding box nadir tile
-                mask_nadir_box = MASK_GROUND & (U_n >= 0.0) & (U_n <= 1.0) & (V_n >= 0.0) & (V_n <= 1.0)
+                mask_nadir_box = MASK_GROUND & (U_n >= 0.0) & (U_n <= 1.0) & (V_n >= 0.0) & (V_n <= 1.0) & (R_km < 1.2)
 
                 if np.any(mask_nadir_box):
                     fx_n = np.clip(U_n * (W_n - 1), 0.0, W_n - 1.0)
@@ -8329,66 +8579,145 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
                     y0_n = np.floor(fy_n).astype(np.int32)
                     x1_n = np.minimum(x0_n + 1, W_n - 1)
                     y1_n = np.minimum(y0_n + 1, H_n - 1)
-                    wx_n = (fx_n - x0_n).astype(np.float32)
-                    wy_n = (fy_n - y0_n).astype(np.float32)
+                    wx_n = (fx_n - x0_n).astype(np.float32)[..., None]
+                    wy_n = (fy_n - y0_n).astype(np.float32)[..., None]
                     c00_n = arr_nadir[y0_n, x0_n, :3].astype(np.float32)
                     c10_n = arr_nadir[y0_n, x1_n, :3].astype(np.float32)
                     c01_n = arr_nadir[y1_n, x0_n, :3].astype(np.float32)
                     c11_n = arr_nadir[y1_n, x1_n, :3].astype(np.float32)
-                    wx3_n = wx_n[..., None]
-                    wy3_n = wy_n[..., None]
-                    sampled_nadir = (c00_n * (1.0 - wx3_n) * (1.0 - wy3_n)
-                                     + c10_n * wx3_n * (1.0 - wy3_n)
-                                     + c01_n * (1.0 - wx3_n) * wy3_n
-                                     + c11_n * wx3_n * wy3_n).astype(np.float32)
+                    sampled_nadir = (c00_n * (1.0 - wx_n) * (1.0 - wy_n)
+                                     + c10_n * wx_n * (1.0 - wy_n)
+                                     + c01_n * (1.0 - wx_n) * wy_n
+                                     + c11_n * wx_n * wy_n)
 
-                    # Feathering: gradasi alpha dari 1.0 (pusat) ke 0.0 (tepi bbox)
-                    # agar transisi nadir→ESRI seamless tanpa lancip/garis tepi.
-                    feather_margin = 0.15  # 15% lebar bbox sebagai zona transisi
+                    # Blend ganda: UV edge fade + radial distance fade
+                    # 1) UV edge fade: 0 di tepi citra nadir, 1 di interior
                     dist_from_edge = np.minimum(
                         np.minimum(U_n, 1.0 - U_n),
                         np.minimum(V_n, 1.0 - V_n))
-                    blend_alpha = np.clip(dist_from_edge / feather_margin, 0.0, 1.0)
-
-                    alpha3 = blend_alpha[mask_nadir_box][..., None].astype(np.float32)
-                    esri_under = kanvas[..., :3][mask_nadir_box].astype(np.float32)
-                    nadir_over = sampled_nadir[mask_nadir_box]
-                    blended = (nadir_over * alpha3 + esri_under * (1.0 - alpha3))
-                    kanvas[..., :3][mask_nadir_box] = np.clip(blended, 0, 255).astype(np.uint8)
-                    kanvas[..., 3][mask_nadir_box] = 255
+                    alpha_uv = np.clip(dist_from_edge / 0.20, 0.0, 1.0)
+                    # 2) Radial fade: 1.0 di r<0.5km, taper halus ke 0.0 di r>=1.0km
+                    alpha_r = np.clip((1.0 - R_km) / 0.5, 0.0, 1.0)
+                    # Gabungkan: produk kedua alpha
+                    blend_alpha = (alpha_uv * alpha_r)[..., None]
+                    sampled_rgb[mask_nadir_box] = (
+                        sampled_nadir[mask_nadir_box] * blend_alpha[mask_nadir_box]
+                        + sampled_rgb[mask_nadir_box] * (1.0 - blend_alpha[mask_nadir_box]))
             except Exception as e:
                 print(f"Sampling nadir error: {e}")
 
-        # --- RIDGELINE SHADOW / DEPTH EFFECT ---
-        # Setiap lapisan ridgeline (dari dekat ke jauh) membuat bayangan di
-        # permukaan terrain di belakangnya. Gelap = di balik ridgeline dekat.
-        urutan_dekat_ke_jauh = np.argsort(matriks_jarak_km)
-        shadow_map = np.zeros((tinggi_px, lebar_px), dtype=np.float32)
-        for i, s_idx in enumerate(urutan_dekat_ke_jauh):
-            y_curve = layer_di_azpx[s_idx]
-            baris_batas = np.clip(
-                np.round((alt_atas - y_curve) / (alt_atas - alt_bawah_full) * (tinggi_px - 1)).astype(int),
-                0, tinggi_px - 1)
-            fraksi_jarak = float(matriks_jarak_km[s_idx]) / radius_max_km
-            shadow_tebal_px = max(2, int(10 * (1.0 - fraksi_jarak * 0.7)))
-            shadow_kekuatan = 0.22 * (1.0 - fraksi_jarak * 0.5)
-            for col_idx in range(lebar_px):
-                b_top = baris_batas[col_idx]
-                b_bot = min(b_top + shadow_tebal_px, tinggi_px)
-                if b_top < tinggi_px:
-                    panjang = b_bot - b_top
-                    if panjang > 0:
-                        grad = np.linspace(shadow_kekuatan, 0.0, panjang)
-                        shadow_map[b_top:b_bot, col_idx] = np.maximum(
-                            shadow_map[b_top:b_bot, col_idx], grad)
+        # ==================================================================
+        # HILLSHADING 3D, BAYANGAN TEBING & HIGHLIGHT PUNCAK GUNUNG
+        # Memisahkan pegunungan secara dramatis agar tidak "nyaru" satu sama lain
+        # ==================================================================
+        r_efektif = R_BUMI_CAKRAWALA / (1.0 - REFRAKSI_CAKRAWALA)
+        r_m_grid = matriks_jarak_km[:, None] * 1000.0
+        elev_m_grid = r_m_grid * np.tan(np.radians(layer_di_azpx)) + (r_m_grid ** 2) / (2.0 * r_efektif)
 
-        shadow_mask = MASK_GROUND & (shadow_map > 0.01)
-        if np.any(shadow_mask):
-            darken_factor = 1.0 - shadow_map
-            terrain_rgb = kanvas[..., :3].astype(np.float32)
-            for ch in range(3):
-                terrain_rgb[..., ch][shadow_mask] *= darken_factor[shadow_mask]
-            kanvas[..., :3] = np.clip(terrain_rgb, 0, 255).astype(np.uint8)
+        # Haluskan elev_m_grid melingkar lintas azimuth untuk menghilangkan artefak kuantisasi tangga DEM
+        k_el = max(lebar_px // 120, 9)
+        if k_el % 2 == 0:
+            k_el += 1
+        pad_el = k_el // 2
+        win_el = np.exp(-np.linspace(-2.2, 2.2, k_el)**2 / 2)
+        win_el /= win_el.sum()
+        ext_el = np.concatenate([elev_m_grid[:, -pad_el:], elev_m_grid, elev_m_grid[:, :pad_el]], axis=1)
+        elev_smooth = np.apply_along_axis(lambda m: np.convolve(m, win_el, mode='valid'), axis=1, arr=ext_el)
+
+        d_elev_dr = np.gradient(elev_smooth, axis=0)
+        dr_m = np.maximum(np.gradient(r_m_grid, axis=0), 1.0)
+        slope_r = d_elev_dr / dr_m
+
+        d_elev_daz = np.gradient(elev_smooth, axis=1)
+        d_arc_m = np.maximum(r_m_grid * (2.0 * np.pi / lebar_px), 5.0)
+        slope_az = d_elev_daz / d_arc_m
+
+        # Batasi slope ekstrem dari loncatan batas tile DEM
+        slope_r = np.clip(slope_r, -2.5, 2.5)
+        slope_az = np.clip(slope_az, -2.5, 2.5)
+
+        z_ex = 2.0
+        slope_r_ex = slope_r * z_ex
+        slope_az_ex = slope_az * z_ex
+
+        sin_az = np.sin(np.radians(az_query))[None, :]
+        cos_az = np.cos(np.radians(az_query))[None, :]
+
+        nx_grid = -slope_az_ex * cos_az - slope_r_ex * sin_az
+        ny_grid =  slope_az_ex * sin_az - slope_r_ex * cos_az
+        nz_grid = np.ones_like(nx_grid)
+
+        norm_len = np.sqrt(nx_grid * nx_grid + ny_grid * ny_grid + nz_grid * nz_grid)
+        nx_grid /= norm_len
+        ny_grid /= norm_len
+        nz_grid /= norm_len
+
+        # Cahaya matahari standar kartografi: Barat-Laut (315°), elevasi 40°
+        light_az = math.radians(315.0)
+        light_el = math.radians(40.0)
+        lx = math.cos(light_el) * math.sin(light_az)
+        ly = math.cos(light_el) * math.cos(light_az)
+        lz = math.sin(light_el)
+
+        lambert_grid = np.clip(nx_grid * lx + ny_grid * ly + nz_grid * lz, -1.0, 1.0)
+
+        # Proyeksikan nilai pencahayaan Lambertian ke kanvas piksel panorama
+        lambert_map = np.zeros((tinggi_px, lebar_px), dtype=np.float32)
+        for col in range(lebar_px):
+            r_col = R_km[:, col]
+            m_r = r_col >= r_boundary
+            if np.any(m_r):
+                l_col = lambert_grid[:, col]
+                lambert_map[m_r, col] = np.interp(
+                    r_col[m_r], matriks_jarak_km, l_col,
+                    left=float(l_col[0]), right=float(l_col[-1]))
+
+        # Area ground cap di bawah kaki pengamat (r < r_boundary) adalah tanah datar:
+        # normal menghadap ke atas (nz=1, nx=ny=0), lambert = lz (iluminasi matahari datar alami)
+        mask_ground_cap = (R_km > 0.0005) & (R_km < r_boundary)
+        lambert_map[mask_ground_cap] = lz
+
+        # Shading terarah: bayangan dalam (0.20) hingga terang benderang (1.45)
+        shade_factor = np.clip(0.65 + 0.70 * lambert_map, 0.20, 1.45)
+        # Highlight keemasan di lereng & tebing yang langsung menghadap matahari
+        highlight_val = np.clip((lambert_map - 0.30) / 0.70, 0.0, 1.0) ** 2.0
+
+        terrain_rgb = sampled_rgb.copy()
+        terrain_rgb *= shade_factor[..., None]
+        terrain_rgb[..., 0] += highlight_val * 48.0
+        terrain_rgb[..., 1] += highlight_val * 44.0
+        terrain_rgb[..., 2] += highlight_val * 28.0
+
+        # Kedalaman Atmosfer (Aerial Perspective / Haze):
+        # Memisahkan lapis-lapis gunung: gunung dekat pekat & kontras, gunung jauh lembut berkabut
+        fraksi_jauh = np.clip(R_km / radius_max_km, 0.0, 1.0)
+        haze_amount = 0.32 * (fraksi_jauh ** 1.1)
+        haze_rgb = np.array([172.0, 195.0, 222.0], dtype=np.float32)
+        terrain_rgb = terrain_rgb * (1.0 - haze_amount[..., None]) + haze_rgb * haze_amount[..., None]
+
+        # Aksen Punggungan (Ridge Crest Lines):
+        # Highlight lembut di tepi punggungan yang terang, bayangan tipis pada celah balik
+        for s_idx in range(1, n_layer):
+            y_c = layer_di_azpx[s_idx]
+            r_target = float(matriks_jarak_km[s_idx])
+            row_c = np.clip(np.round((alt_atas - y_c) * scale_row).astype(int), 0, tinggi_px - 1)
+            col_idx = np.arange(lebar_px)
+            r_actual = R_km[row_c, col_idx]
+            vis = (r_actual > 0) & (np.abs(r_actual - r_target) / max(r_target, 0.1) < 0.45)
+
+            lam_val = lambert_grid[s_idx, :]
+            hi_ridge = vis & (lam_val > 0.15)
+            sh_ridge = vis & (lam_val <= 0.15)
+
+            if np.any(hi_ridge):
+                terrain_rgb[row_c[hi_ridge], col_idx[hi_ridge]] = np.clip(
+                    terrain_rgb[row_c[hi_ridge], col_idx[hi_ridge]] * 1.18 + np.array([22.0, 20.0, 10.0]), 0, 255)
+            if np.any(sh_ridge):
+                terrain_rgb[row_c[sh_ridge], col_idx[sh_ridge]] *= 0.78
+
+        # Isi kanvas dengan tekstur yang sudah diberi pencahayaan 3D penuh
+        kanvas[..., :3][MASK_GROUND] = np.clip(terrain_rgb[MASK_GROUND], 0, 255).astype(np.uint8)
+        kanvas[..., 3][MASK_GROUND] = 255
     else:
         # Fallback jika offline: painter's algorithm gradien elevasi
         norm = mcolors.Normalize(vmin=float(matriks_jarak_km.min()), vmax=float(matriks_jarak_km.max()))
@@ -8408,7 +8737,9 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
             kanvas[..., 2][mask] = warna[2]
             kanvas[..., 3][mask] = 255
 
-    # --- RENDER DATARAN UFUK DIP (ANTARA DIP HORIZON DAN DEM SILUET MENTAH) MENGGUNAKAN CITRA ESRI DIP ---
+    # --- RENDER TERRAIN LUAR RADIUS DEM DENGAN CITRA ESRI DIP ---
+    # Citra DIP menjadi extension terrain dari skyline utama sampai garis dip.
+    # Matriks_sudut tetap hanya menentukan geometri terrain utama yang tersedia.
     dip_derajat = 0.0293 * math.sqrt(max(tinggi_pengamat, 0.0))
     dip_alt = -dip_derajat
     r_dip_km = max(3.57 * math.sqrt(max(tinggi_pengamat, 0.0)), radius_max_km)
@@ -8422,7 +8753,7 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
         except Exception:
             pass
 
-    citra_dip_terpakai = res_esri_dip or res_esri
+    citra_dip_terpakai = res_esri_dip
     if citra_dip_terpakai is not None:
         try:
             img_d, (d_min_lon, d_min_lat, d_max_lon, d_max_lat) = citra_dip_terpakai
@@ -8432,77 +8763,113 @@ def ekspor_profil_ke_stellarium_terrain3d_satellite(
             baris_dip = max(0, min(tinggi_px - 1, baris_dip))
 
             for col_idx in range(lebar_px):
-                topo_col = siluet_mentah_azpx[col_idx]
-                if topo_col < dip_alt:
-                    baris_topo_col = int(round((alt_atas - topo_col) / (alt_atas - alt_bawah_full) * (tinggi_px - 1)))
-                    baris_topo_col = max(0, min(tinggi_px - 1, baris_topo_col))
+                topo_col = float(siluet_mentah_azpx[col_idx])
+                baris_topo_col = int(round((alt_atas - topo_col) / (alt_atas - alt_bawah_full) * (tinggi_px - 1)))
+                baris_topo_col = max(0, min(tinggi_px - 1, baris_topo_col))
 
-                    if baris_topo_col > baris_dip:
-                        panjang = baris_topo_col - baris_dip
-                        az_deg = az_query[col_idx]
-                        az_rad = math.radians(az_deg)
-                        cos_az = math.cos(az_rad)
-                        sin_az = math.sin(az_rad)
+                # Isi SELURUH interval antara skyline terrain utama dan garis dip,
+                # baik skyline berada di atas maupun di bawah dip.
+                row_awal = min(baris_topo_col, baris_dip)
+                row_akhir = max(baris_topo_col, baris_dip)
+                if row_akhir <= row_awal:
+                    continue
 
-                        for i in range(panjang):
-                            row = baris_dip + i
-                            if kanvas[row, col_idx, 3] == 255 and (ALT[row, 0] <= topo_col):
-                                continue
+                az_rad = math.radians(float(az_query[col_idx]))
+                cos_az, sin_az = math.cos(az_rad), math.sin(az_rad)
 
-                            # Koreksi Distorsi Perspektif Spherical / Bumi Bulat
-                            # r = R_E * (theta - sqrt(theta^2 - 2h/R_E))
-                            # Menghilangkan penumpukan/penyeretan garis pantai, memetakan jarak
-                            # optik secara hiperbolik presisi ke altitude baris panorama.
-                            alt_deg_row = float(ALT[row, 0])
-                            theta_rad = max(math.radians(-alt_deg_row), 1e-6)
-                            h_km = max(tinggi_pengamat, 0.0) / 1000.0
-                            R_E = 6371.0
-                            disc = theta_rad * theta_rad - (2.0 * h_km / R_E)
-                            if disc >= 0:
-                                r_dist = R_E * (theta_rad - math.sqrt(disc))
-                            else:
-                                r_dist = r_dip_km
+                for row in range(row_awal, row_akhir):
+                    # Jangan menimpa terrain utama.
+                    if kanvas[row, col_idx, 3] == 255 and (ALT[row, 0] <= topo_col):
+                        continue
 
-                            r_dist = float(np.clip(r_dist, radius_max_km, r_dip_km))
+                    theta_rad = max(math.radians(-float(ALT[row, 0])), 1e-6)
+                    h_km = max(tinggi_pengamat, 0.0) / 1000.0
+                    R_E = 6371.0
+                    disc = theta_rad * theta_rad - (2.0 * h_km / R_E)
+                    if disc >= 0:
+                        r_dist = R_E * (theta_rad - math.sqrt(disc))
+                    else:
+                        r_dist = r_dip_km
+                    r_dist = float(np.clip(r_dist, radius_max_km, r_dip_km))
 
-                            d_north = r_dist * cos_az
-                            d_east = r_dist * sin_az
-                            p_lat = lat + (d_north / 111.32)
-                            p_lon = lon + (d_east / (111.32 * cos_lat))
-
-                            u_d = np.clip((p_lon - d_min_lon) / (d_max_lon - d_min_lon), 0.0, 1.0)
-                            v_d = np.clip((d_max_lat - p_lat) / (d_max_lat - d_min_lat), 0.0, 1.0)
-
-                            fx_d = np.clip(u_d * (W_d - 1), 0.0, W_d - 1.0)
-                            fy_d = np.clip(v_d * (H_d - 1), 0.0, H_d - 1.0)
-                            x0_d = int(math.floor(fx_d))
-                            y0_d = int(math.floor(fy_d))
-                            x1_d = min(x0_d + 1, W_d - 1)
-                            y1_d = min(y0_d + 1, H_d - 1)
-                            wx_d = fx_d - x0_d
-                            wy_d = fy_d - y0_d
-
-                            c00_d = arr_d[y0_d, x0_d, :3].astype(float)
-                            c10_d = arr_d[y0_d, x1_d, :3].astype(float)
-                            c01_d = arr_d[y1_d, x0_d, :3].astype(float)
-                            c11_d = arr_d[y1_d, x1_d, :3].astype(float)
-
-                            pix_rgb = (c00_d * (1.0 - wx_d) * (1.0 - wy_d) +
-                                       c10_d * wx_d * (1.0 - wy_d) +
-                                       c01_d * (1.0 - wx_d) * wy_d +
-                                       c11_d * wx_d * wy_d).astype(np.uint8)
-
-                            kanvas[row, col_idx, 0] = pix_rgb[0]
-                            kanvas[row, col_idx, 1] = pix_rgb[1]
-                            kanvas[row, col_idx, 2] = pix_rgb[2]
-                            kanvas[row, col_idx, 3] = 255
+                    p_lat = lat + (r_dist * cos_az / 111.32)
+                    p_lon = lon + (r_dist * sin_az / (111.32 * cos_lat))
+                    u_d = np.clip((p_lon - d_min_lon) / (d_max_lon - d_min_lon), 0.0, 1.0)
+                    v_d = np.clip((d_max_lat - p_lat) / (d_max_lat - d_min_lat), 0.0, 1.0)
+                    fx_d = np.clip(u_d * (W_d - 1), 0.0, W_d - 1.0)
+                    fy_d = np.clip(v_d * (H_d - 1), 0.0, H_d - 1.0)
+                    x0_d, y0_d = int(math.floor(fx_d)), int(math.floor(fy_d))
+                    x1_d, y1_d = min(x0_d + 1, W_d - 1), min(y0_d + 1, H_d - 1)
+                    wx_d, wy_d = fx_d - x0_d, fy_d - y0_d
+                    c00_d = arr_d[y0_d, x0_d, :3].astype(float)
+                    c10_d = arr_d[y0_d, x1_d, :3].astype(float)
+                    c01_d = arr_d[y1_d, x0_d, :3].astype(float)
+                    c11_d = arr_d[y1_d, x1_d, :3].astype(float)
+                    pix_rgb = (c00_d * (1.0-wx_d) * (1.0-wy_d) + c10_d * wx_d * (1.0-wy_d) + c01_d * (1.0-wx_d) * wy_d + c11_d * wx_d * wy_d).astype(np.uint8)
+                    kanvas[row, col_idx, :3] = pix_rgb
+                    kanvas[row, col_idx, 3] = 255
         except Exception as e:
-            print(f"Gagal render ESRI dip: {e}")
+            print(f"Gagal render terrain ESRI dip luar radius DEM: {e}")
 
-    # TIGA GARIS UFUK (Astronomis 0°, Dip, Topografi) dilukis di atas tekstur satelit
+    # TIGA GARIS UFUK (Astronomis 0°, Dip, Topografi Mentah Gunung) dilukis di atas tekstur satelit
     _gambar_garis_datar(0.0, _hex_ke_rgb(_GAYA_UFUK["astro"]["warna"]), "dashed")
     _gambar_garis_datar(-dip_derajat, _hex_ke_rgb(_GAYA_UFUK["dip"]["warna"]), "dotted")
-    _gambar_garis_kontur(siluet_di_azpx, _hex_ke_rgb(_GAYA_UFUK["topo"]["warna"]))
+    _gambar_garis_kontur(siluet_mentah_azpx, _hex_ke_rgb(_GAYA_UFUK["topo"]["warna"]))
+
+    # Garis sampling DEM & garis lereng puncak untuk setiap gunung berlabel di Stellarium Terrain 3D
+    puncak_berlabel = profil.get("puncak_berlabel", [])
+    if puncak_berlabel and matriks_sudut is not None:
+        warna_subtle = _hex_ke_rgb("#1F2937")  # Warna gelap halus
+        warna_pin = _hex_ke_rgb("#B91C1C")     # Warna penanda vertikal puncak
+        span_deg = 8.0  # Bentangan garis kontur ±8° di sekitar puncak
+
+        for az_p, alt_p, nama in puncak_berlabel:
+            az_idx = int(np.argmin(np.abs(azimuth - az_p)))
+            diffs = np.abs(matriks_sudut[az_idx, :] - alt_p)
+            s_idx = int(np.argmin(diffs))
+
+            alt_front = float(np.max(matriks_sudut[az_idx, :s_idx])) if s_idx > 0 else -90.0
+            prom = alt_p - alt_front
+
+            # Hanya abaikan jika puncak tertutup total oleh kontur di depannya (prom < -0.1°)
+            if prom < -0.1:
+                continue
+
+            # 1. Garis ring kontur DEM gunung melengkung (interpolasi penuh lalu difilter per kolom pixel)
+            ring_curve = matriks_sudut[:, s_idx]
+            ring_curve_px = _interp_lingkar(ring_curve, kernel_az=3)
+
+            alt_front_arr = np.max(matriks_sudut[:, :s_idx], axis=1) if s_idx > 0 else np.full(n_azimuth, -90.0)
+            alt_front_px = _interp_lingkar(alt_front_arr, kernel_az=3)
+
+            az_diff_col = np.abs((az_query - az_p + 180.0) % 360.0 - 180.0)
+            mask_near_col = (az_diff_col <= span_deg) & (ring_curve_px >= alt_front_px - 0.3)
+
+            if np.any(mask_near_col):
+                vis_vals = ring_curve_px[mask_near_col]
+                baris_vis = np.clip(
+                    np.round((alt_atas - vis_vals) / (alt_atas - alt_bawah_full) * (tinggi_px - 1)).astype(int),
+                    0, tinggi_px - 1)
+                cols_idx = np.arange(lebar_px)[mask_near_col]
+                
+                # Plot garis kontur melengkung puncak (2px tebal agar terlihat jelas)
+                kanvas[baris_vis, cols_idx, :3] = warna_subtle
+                kanvas[baris_vis, cols_idx, 3] = 255
+                kanvas[np.clip(baris_vis + 1, 0, tinggi_px - 1), cols_idx, :3] = warna_subtle
+                kanvas[np.clip(baris_vis + 1, 0, tinggi_px - 1), cols_idx, 3] = 255
+
+            # 2. Garis tegak vertikal puncak
+            col_center = int(round(((az_p - 90.0) % 360.0) / 360.0 * (lebar_px - 1))) % lebar_px
+            b_top = int(round((alt_atas - alt_p) / (alt_atas - alt_bawah_full) * (tinggi_px - 1)))
+            b_bot = int(round((alt_atas - alt_front) / (alt_atas - alt_bawah_full) * (tinggi_px - 1)))
+            b_top = max(0, min(tinggi_px - 1, b_top))
+            b_bot = max(0, min(tinggi_px - 1, b_bot))
+            if b_bot > b_top:
+                kanvas[b_top:b_bot + 1, col_center, :3] = warna_pin
+                kanvas[b_top:b_bot + 1, col_center, 3] = 255
+                col_r = min(lebar_px - 1, col_center + 1)
+                kanvas[b_top:b_bot + 1, col_r, :3] = warna_pin
+                kanvas[b_top:b_bot + 1, col_r, 3] = 255
 
     img = Image.fromarray(kanvas, mode="RGBA")
     profil["panorama_img"] = img
@@ -8971,13 +9338,68 @@ def ekspor_profil_ke_stellarium_panorama(
         kanvas[..., 3][mask] = 255  # opaque -- dari sini ke bawah, timpa lapisan yg lebih jauh
 
     # Gambar ulang TIGA garis ufuk SETELAH terrain selesai, supaya tidak
-    # tertimpa oleh fill terrain yang opaque. Topografi akan tepat mengikuti
-    # tepi siluet karena memakai skala equirectangular yang sama.
+    # tertimpa oleh fill terrain yang opaque. Topografi mentah (garis gunung)
+    # dilukis tegas mengikuti kontur asli hingga di bawah ufuk dip.
     dip_derajat = 0.0293 * math.sqrt(max(tinggi_pengamat, 0.0))
     _gambar_garis_datar(0.0, _hex_ke_rgb(_GAYA_UFUK["astro"]["warna"]), "dashed")
     _gambar_garis_datar(-dip_derajat, _hex_ke_rgb(_GAYA_UFUK["dip"]["warna"]), "dotted")
-    siluet_di_azpx = _interp_lingkar(sudut_horizon)
+    siluet_mentah = _dapatkan_sudut_horizon_mentah(profil)
+    siluet_di_azpx = _interp_lingkar(siluet_mentah)
     _gambar_garis_kontur(siluet_di_azpx, _hex_ke_rgb(_GAYA_UFUK["topo"]["warna"]))
+
+    # Garis sampling DEM & garis lereng puncak untuk setiap gunung berlabel di Stellarium Panorama
+    puncak_berlabel = profil.get("puncak_berlabel", [])
+    if puncak_berlabel and matriks_sudut is not None:
+        warna_subtle = _hex_ke_rgb("#1F2937")  # Warna gelap halus
+        warna_pin = _hex_ke_rgb("#B91C1C")     # Warna penanda vertikal puncak
+        span_deg = 8.0  # Bentangan garis kontur ±8° di sekitar puncak
+
+        for az_p, alt_p, nama in puncak_berlabel:
+            az_idx = int(np.argmin(np.abs(azimuth - az_p)))
+            diffs = np.abs(matriks_sudut[az_idx, :] - alt_p)
+            s_idx = int(np.argmin(diffs))
+
+            alt_front = float(np.max(matriks_sudut[az_idx, :s_idx])) if s_idx > 0 else -90.0
+            prom = alt_p - alt_front
+
+            if prom < -0.1:
+                continue
+
+            # 1. Garis ring kontur DEM gunung melengkung
+            ring_curve = matriks_sudut[:, s_idx]
+            ring_curve_px = _interp_lingkar(ring_curve)
+
+            alt_front_arr = np.max(matriks_sudut[:, :s_idx], axis=1) if s_idx > 0 else np.full(n_azimuth, -90.0)
+            alt_front_px = _interp_lingkar(alt_front_arr)
+
+            az_diff_col = np.abs((az_query - az_p + 180.0) % 360.0 - 180.0)
+            mask_near_col = (az_diff_col <= span_deg) & (ring_curve_px >= alt_front_px - 0.3)
+
+            if np.any(mask_near_col):
+                vis_vals = ring_curve_px[mask_near_col]
+                baris_vis = np.clip(
+                    np.round((alt_atas - vis_vals) / (alt_atas - alt_bawah_full) * (tinggi_px - 1)).astype(int),
+                    0, tinggi_px - 1)
+                cols_idx = np.arange(lebar_px)[mask_near_col]
+                
+                # Plot garis kontur melengkung puncak (2px tebal agar terlihat jelas)
+                kanvas[baris_vis, cols_idx, :3] = warna_subtle
+                kanvas[baris_vis, cols_idx, 3] = 255
+                kanvas[np.clip(baris_vis + 1, 0, tinggi_px - 1), cols_idx, :3] = warna_subtle
+                kanvas[np.clip(baris_vis + 1, 0, tinggi_px - 1), cols_idx, 3] = 255
+
+            # 2. Garis tegak vertikal puncak
+            col_center = int(round(((az_p - 90.0) % 360.0) / 360.0 * (lebar_px - 1))) % lebar_px
+            b_top = int(round((alt_atas - alt_p) / (alt_atas - alt_bawah_full) * (tinggi_px - 1)))
+            b_bot = int(round((alt_atas - alt_front) / (alt_atas - alt_bawah_full) * (tinggi_px - 1)))
+            b_top = max(0, min(tinggi_px - 1, b_top))
+            b_bot = max(0, min(tinggi_px - 1, b_bot))
+            if b_bot > b_top:
+                kanvas[b_top:b_bot + 1, col_center, :3] = warna_pin
+                kanvas[b_top:b_bot + 1, col_center, 3] = 255
+                col_r = min(lebar_px - 1, col_center + 1)
+                kanvas[b_top:b_bot + 1, col_r, :3] = warna_pin
+                kanvas[b_top:b_bot + 1, col_r, 3] = 255
 
     # -- 3b. Tutup celah transparan di bawah ufuk topografi --
     # "sudut_horizon" (garis topo) di-clamp minimal = -dip (lihat catatan di
@@ -9248,7 +9670,8 @@ def ekspor_profil_ke_cartes_du_ciel(profil, path_png, lebar_px=8192, margin_atas
     # -- matriks_sudut) ditambal abu2 spy tidak bolong. --
     _gambar_garis_datar(0.0, _hex_ke_rgb(_GAYA_UFUK["astro"]["warna"]), "dashed")
     _gambar_garis_datar(-dip_derajat, _hex_ke_rgb(_GAYA_UFUK["dip"]["warna"]), "dotted")
-    siluet_di_azpx = _interp_lingkar(sudut_horizon)
+    siluet_mentah = _dapatkan_sudut_horizon_mentah(profil)
+    siluet_di_azpx = _interp_lingkar(siluet_mentah)
     _gambar_garis_kontur(siluet_di_azpx, _hex_ke_rgb(_GAYA_UFUK["topo"]["warna"]))
     baris_topo = np.clip(
         np.round((alt_atas - siluet_di_azpx) / (alt_atas - alt_bawah) * (tinggi_px - 1)).astype(int),
@@ -9549,7 +9972,7 @@ def muat_profil_cakrawala_txt(path):
     arr_sudut_horizon = np.maximum(np.array(sudut_horizon), -dip_derajat_muat)
     nama_lokasi = meta.get("nama_lokasi") or dapatkan_nama_lokasi_reverse_geocode(lat, lon)
 
-    return {
+    res_dict = {
         "lat": lat, "lon": lon,
         "tinggi_mata": tinggi_mata, "elev_tanah": elev_tanah,
         "tinggi_pengamat": tinggi_pengamat_val,
@@ -9565,6 +9988,8 @@ def muat_profil_cakrawala_txt(path):
         "esri_nadir_res": res_esri_nadir,
         "esri_dip_res": res_esri_dip,
     }
+    res_dict["sudut_horizon_mentah"] = _dapatkan_sudut_horizon_mentah(res_dict)
+    return res_dict
 
 
 def lengkapi_elev_tanah_profil_txt(path, profil, progress_cb=lambda msg: None):
@@ -9614,22 +10039,25 @@ def buat_figure_profil_cakrawala(profil):
 
     azimuth = profil["azimuth"]
     sudut_horizon = profil["sudut_horizon"]
+    sudut_topo_mentah = _dapatkan_sudut_horizon_mentah(profil)
     puncak_berlabel = profil["puncak_berlabel"]
 
-    # y_min: kalau ada matriks_sudut (belum di-clamp), pakai skyline mentah
-    # supaya area isian terrain tetap proporsional (sudut_horizon sudah
-    # di-clamp ke -dip, bisa terlalu dangkal utk y_min).
+    # y_min: pakai skyline mentah gunung (tanpa clamp dip)
+    # supaya kontur gunung di bawah ufuk dip tetap terlihatutuh.
     matriks_sudut_pf = profil.get("matriks_sudut")
     if matriks_sudut_pf is not None:
         skyline_mentah_min = float(matriks_sudut_pf.max(axis=1).min())
-        y_min = np.floor(min(sudut_horizon.min(), skyline_mentah_min)) - 1
+        y_min = np.floor(min(sudut_topo_mentah.min(), skyline_mentah_min)) - 1
     else:
-        y_min = np.floor(sudut_horizon.min()) - 1
-    y_max = np.ceil(sudut_horizon.max()) + 1 + (8 if puncak_berlabel else 0)
+        y_min = np.floor(sudut_topo_mentah.min()) - 1
+    y_max = np.ceil(max(sudut_horizon.max(), sudut_topo_mentah.max())) + 1 + (8 if puncak_berlabel else 0)
 
     fig, ax = plt.subplots(figsize=(10, 4.5))
-    ax.plot(azimuth, sudut_horizon, color="dimgray", linewidth=1.0)
-    ax.fill_between(azimuth, sudut_horizon, y_min, color="#8B7355", alpha=0.6)
+    ax.plot(azimuth, sudut_topo_mentah, color="#111827", linewidth=1.5, label="Ufuk Topografi (Pegunungan)", zorder=3)
+    ax.fill_between(azimuth, sudut_topo_mentah, y_min, color="#8B7355", alpha=0.6, zorder=2)
+    tinggi_pengamat = profil.get("tinggi_pengamat", 0.0)
+    dip_derajat = 0.0293 * math.sqrt(max(tinggi_pengamat, 0.0))
+    ax.axhline(-dip_derajat, color="#7C3AED", linestyle=":", linewidth=1.0, alpha=0.8, label=f"Ufuk dip (-{dip_derajat:.2f}°)", zorder=3.1)
 
     ax.set_xlim(0, 360)
     ax.set_ylim(y_min, y_max)
@@ -9647,9 +10075,25 @@ def buat_figure_profil_cakrawala(profil):
     ax.axhline(0, color="blue", linestyle="--", linewidth=0.8, alpha=0.6, label="Garis datar (0°)")
     ax.legend(loc="upper right", fontsize=8)
 
+    matriks_sudut_pf = profil.get("matriks_sudut")
+    matriks_jarak_pf = profil.get("matriks_jarak_km")
     for az, sudut, nama in puncak_berlabel:
-        ax.plot([az, az], [sudut, sudut + 1.5], color="black", linewidth=0.6, alpha=0.7)
-        ax.text(az, sudut + 1.8, nama, rotation=75, ha="left", va="bottom", fontsize=7)
+        az_idx = int(np.argmin(np.abs(azimuth - az)))
+        if matriks_sudut_pf is not None and matriks_jarak_pf is not None:
+            diffs = np.abs(matriks_sudut_pf[az_idx, :] - sudut)
+            s_idx = int(np.argmin(diffs))
+            dist_km = float(matriks_jarak_pf[s_idx])
+            alt_front = float(np.max(matriks_sudut_pf[az_idx, :s_idx])) if s_idx > 0 else -90.0
+            prom = sudut - alt_front
+            if prom <= 0.1:
+                continue
+            ax.plot([az, az], [sudut, sudut + 1.5], color="black", linewidth=0.6, alpha=0.7)
+            ax.text(az, sudut + 1.8, nama, rotation=75, ha="left", va="bottom", fontsize=7)
+            if alt_front < sudut:
+                ax.plot([az, az], [alt_front, sudut], color="#1F2937", linewidth=0.8, linestyle="--", alpha=0.7, zorder=3.2)
+        else:
+            ax.plot([az, az], [sudut, sudut + 1.5], color="black", linewidth=0.6, alpha=0.7)
+            ax.text(az, sudut + 1.8, nama, rotation=75, ha="left", va="bottom", fontsize=7)
 
     fig.tight_layout()
     return fig
@@ -9717,10 +10161,17 @@ def buat_figure_terrain3d_cakrawala(profil, elevasi_maks_jarak_km=None, pakai_sa
     Yp = np.vstack([Y, Y[0:1, :]])
     Zp = np.vstack([z_rel, z_rel[0:1, :]])
 
+    # Cakupan citra harus mengikuti radius terrain SEBENARNYA, bukan hanya
+    # radius utama profil. Saat observer tinggi dan ring jauh aktif,
+    # matriks_sudut bisa melampaui radius_km (mis. 30 -> 50+ km). Memakai
+    # citra lama 30 km akan membuat bagian >30 km ter-clamp ke tepi gambar
+    # sehingga tampak seperti permukaan datar/tertarik.
     res_esri = profil.get("esri_satelit_res")
-    if res_esri is None and pakai_satelit_esri:
+    if pakai_satelit_esri:
         radius_max = float(jarak_km.max())
-        res_esri = ambil_citra_satelit_esri(lat, lon, radius_max, size_px=2048)
+        radius_profil = float(profil.get("radius_km", 0.0) or 0.0)
+        if res_esri is None or radius_max > radius_profil + 0.5:
+            res_esri = ambil_citra_satelit_esri(lat, lon, radius_max, size_px=2048)
 
     if res_esri is not None:
         img_esri, (min_lon, min_lat, max_lon, max_lat) = res_esri
@@ -9753,6 +10204,37 @@ def buat_figure_terrain3d_cakrawala(profil, elevasi_maks_jarak_km=None, pakai_sa
                     + c10 * wx3 * (1.0 - wy3)
                     + c01 * (1.0 - wx3) * wy3
                     + c11 * wx3 * wy3) / 255.0
+
+        # Hillshade nyata dari DEM/permukaan, tetapi tetap mempertahankan
+        # foto satelit sebagai tekstur dasar. Cahaya datang dari NW dengan
+        # elevasi tinggi; faktor shading dibatasi supaya relief jauh tidak
+        # tenggelam total dan gunung tetap mudah dibaca.
+        try:
+            dz_dy, dz_dx = np.gradient(z_rel, 1000.0 * np.maximum(np.abs(np.gradient(Y, axis=0)).mean(), 1e-9),
+                                       1000.0 * np.maximum(np.abs(np.gradient(X, axis=1)).mean(), 1e-9))
+        except Exception:
+            dz_dy, dz_dx = np.gradient(z_rel)
+        # Gradien geometris sederhana dalam koordinat matriks azimuth/jarak.
+        # Dipakai hanya untuk arah cahaya; amplitudo dinormalisasi per piksel.
+        gx = np.gradient(z_rel, axis=1)
+        gy = np.gradient(z_rel, axis=0)
+        nx = -gx
+        ny = -gy
+        nz = np.ones_like(z_rel) * max(1.0, float(np.nanmedian(jarak_km)) * 0.002)
+        norm_n = np.sqrt(nx * nx + ny * ny + nz * nz)
+        nx /= norm_n; ny /= norm_n; nz /= norm_n
+        light_az = math.radians(315.0)
+        light_el = math.radians(42.0)
+        lx = math.cos(light_el) * math.sin(light_az)
+        ly = math.cos(light_el) * math.cos(light_az)
+        lz = math.sin(light_el)
+        lambert = np.clip(nx * lx + ny * ly + nz * lz, -1.0, 1.0)
+        shade_factor = np.clip(0.62 + 0.78 * lambert, 0.20, 1.38)
+        # Sedikit atmosfer: kontras makin lembut pada jarak sangat jauh.
+        fade = 1.0 - 0.08 * np.clip((jarak_km[None, :] - jarak_km.min()) /
+                                     max(jarak_km.max() - jarak_km.min(), 1e-9), 0.0, 1.0)
+        shade_factor *= fade
+        face_rgb = np.clip(face_rgb * shade_factor[..., None], 0.0, 1.0)
         facecolors = np.concatenate(
             [face_rgb, np.full(face_rgb.shape[:-1] + (1,), 0.98, dtype=np.float32)],
             axis=-1)
@@ -9777,10 +10259,11 @@ def buat_figure_terrain3d_cakrawala(profil, elevasi_maks_jarak_km=None, pakai_sa
         shade=False,
     )
 
-    # Ring kontur horizon/siluet pada permukaan luar
+    # Ring kontur horizon/siluet pada permukaan luar (puncak & lereng gunung mentah)
+    sudut_topo_mentah = _dapatkan_sudut_horizon_mentah(profil)
     az_closed = np.r_[az, az[0] + 360.0]
-    horizon_angles = np.r_[np.asarray(sudut_horizon, dtype=float),
-                           float(np.asarray(sudut_horizon, dtype=float)[0])]
+    horizon_angles = np.r_[np.asarray(sudut_topo_mentah, dtype=float),
+                           float(np.asarray(sudut_topo_mentah, dtype=float)[0])]
     jarak_horizon = np.asarray(profil.get("jarak_horizon_km", np.zeros_like(az)), dtype=float)
     if len(jarak_horizon) == len(az):
         jh = np.where(jarak_horizon > 0, jarak_horizon, float(jarak_km[-1])) * 1000.0
@@ -9788,7 +10271,39 @@ def buat_figure_terrain3d_cakrawala(profil, elevasi_maks_jarak_km=None, pakai_sa
         zh = jh_closed * np.tan(np.radians(horizon_angles))
         xh = jh_closed * np.sin(np.radians(az_closed)) / 1000.0
         yh = jh_closed * np.cos(np.radians(az_closed)) / 1000.0
-        ax.plot(xh, yh, zh, linewidth=2.0, color=_GAYA_UFUK["topo"]["warna"], label=_GAYA_UFUK["topo"].get("nama", "Ufuk Topografi (Pegunungan)"))
+        ax.plot(xh, yh, zh, linewidth=2.2, color=_GAYA_UFUK["topo"]["warna"], label=_GAYA_UFUK["topo"].get("nama", "Ufuk Topografi (Pegunungan)"))
+
+    # Penanda 3D puncak gunung berlabel & garis sampling DEM per radius jarak pada permukaan medan 3D
+    puncak_berlabel = profil.get("puncak_berlabel", [])
+    seen_layers = set()
+    for az_p, alt_p, nama in puncak_berlabel:
+        az_idx = int(np.argmin(np.abs(az - az_p)))
+        s_idx = int(np.argmax(sudut[az_idx, :]))
+        xp_km = X[az_idx, s_idx] / 1000.0
+        yp_km = Y[az_idx, s_idx] / 1000.0
+        zp_m = z_rel[az_idx, s_idx]
+        offset_z = max(50.0, float(np.abs(zp_m)) * 0.12 + 40.0)
+
+        # 1. Garis pin vertikal puncak + teks nama gunung
+        ax.plot([xp_km, xp_km], [yp_km, yp_km], [zp_m, zp_m + offset_z],
+                color="#B91C1C", linewidth=1.8, zorder=6)
+        ax.text(xp_km, yp_km, zp_m + offset_z + 10.0, nama,
+                color="#111827", fontsize=8, fontweight="bold", zorder=6)
+
+        # 2. Garis radial DEM dari pengamat melintasi lereng & puncak gunung
+        x_rad = X[az_idx, :] / 1000.0
+        y_rad = Y[az_idx, :] / 1000.0
+        z_rad = z_rel[az_idx, :]
+        ax.plot(x_rad, y_rad, z_rad, color="#DC2626", linewidth=1.5, linestyle="--", zorder=5.8)
+
+        # 3. Garis ring DEM melingkar pada radius jarak puncak gunung tersebut
+        if s_idx not in seen_layers:
+            seen_layers.add(s_idx)
+            x_ring = np.r_[X[:, s_idx], X[0, s_idx]] / 1000.0
+            y_ring = np.r_[Y[:, s_idx], Y[0, s_idx]] / 1000.0
+            z_ring = np.r_[z_rel[:, s_idx], z_rel[0, s_idx]]
+            ax.plot(x_ring, y_ring, z_ring, color="#D97706", linewidth=1.6, linestyle="-",
+                    zorder=5.5, label=f"Sampling DEM {nama} ({jarak_km[s_idx]:.1f} km)")
 
     # Observer dan sumbu orientasi.
     ax.scatter([0], [0], [0], s=60, marker="o", color="#B91C1C", depthshade=False,
@@ -9869,9 +10384,6 @@ def buat_figure_ridgeline_cakrawala(profil):
     n_sample = matriks_sudut.shape[1]
 
     y_floor = matriks_sudut.min() - 5.0
-    # y_min pakai skyline MENTAH (belum di-clamp dip) dari matriks_sudut,
-    # supaya kontur/lapisan terrain di bawah dip tetap terlihat di plot --
-    # sudut_horizon sudah di-clamp ke -dip, jadi terlalu dangkal utk y_min.
     skyline_mentah_min = float(matriks_sudut.max(axis=1).min())
     y_min = np.floor(min(sudut_horizon.min(), skyline_mentah_min)) - 1
     y_max = np.ceil(sudut_horizon.max()) + 1 + (8 if puncak_berlabel else 0)
@@ -9881,15 +10393,12 @@ def buat_figure_ridgeline_cakrawala(profil):
 
     fig, ax = plt.subplots(figsize=(12, 5))
 
-    # Painter's algorithm: gambar lapisan dari yg PALING JAUH dulu, lalu
-    # makin dekat menutupi di atasnya -- efek pegunungan bertumpuk.
     for s_idx in range(n_sample - 1, -1, -1):
         y_curve = matriks_sudut[:, s_idx]
         warna = cmap(norm(matriks_jarak_km[s_idx]))
         ax.fill_between(azimuth, y_floor, y_curve, color=warna, linewidth=0, zorder=2)
         ax.plot(azimuth, y_curve, color="black", linewidth=0.2, alpha=0.3, zorder=2)
 
-    # Garis siluet skyline teratas, sama seperti versi garis-tunggal.
     ax.plot(azimuth, sudut_horizon, color="black", linewidth=1.2, alpha=0.9, zorder=3)
 
     ax.set_xlim(0, 360)
@@ -10388,16 +10897,24 @@ def buat_figure_simulasi_hilal(profil, hasil):
         # Align Stellarium spherical texture (Column 0 = 90° East) to Matplotlib X-axis (Column 0 = 0° North)
         img_aligned = np.roll(img_arr, int(w_p / 4), axis=1)
         ax.imshow(img_aligned, extent=[0.0, 360.0, -90.0, 90.0], origin="upper", aspect="auto", zorder=1)
-        h_topo, = ax.plot(azimuth, sudut_horizon, color=_GAYA_UFUK["topo"]["warna"], linewidth=1.2,
-                           zorder=3, label="Ufuk topografi (cakrawala nyata)")
+        sudut_topo_mentah = _dapatkan_sudut_horizon_mentah(profil)
+        h_topo, = ax.plot(azimuth, sudut_topo_mentah, color=_GAYA_UFUK["topo"]["warna"], linewidth=1.5,
+                           zorder=3.5, label="Ufuk topografi (cakrawala nyata)")
     elif matriks_sudut is not None and matriks_jarak_km is not None:
         import matplotlib.colors as mcolors
         norm = mcolors.Normalize(vmin=matriks_jarak_km.min(), vmax=matriks_jarak_km.max())
         cmap = plt.get_cmap("copper_r")
         n_sample = matriks_sudut.shape[1]
         y_floor_layer = min(y_min, float(matriks_sudut.min()) - 5.0)
-        # Landasan Cokelat Tembaga Senja di belakang kontur pegunungan (zorder=1)
-        ax.fill_between(azimuth, y_floor_layer, sudut_horizon, color="#6e5545", alpha=0.45, zorder=1)
+        sudut_topo_mentah = _dapatkan_sudut_horizon_mentah(profil)
+        # Landasan kontur dominan pegunungan (zorder=1) di bawah garis topo
+        # Gunakan warna kontur dominan horizon agar tidak ada celah terang / menciut di bawah line topo
+        s_idx_dom = np.argmax(matriks_sudut, axis=1)
+        jarak_dom = matriks_jarak_km[s_idx_dom]
+        warna_dom = cmap(norm(jarak_dom))
+        for i in range(len(azimuth) - 1):
+            ax.fill_between(azimuth[i:i+2], y_floor_layer, sudut_topo_mentah[i:i+2],
+                            color=warna_dom[i], alpha=0.95, linewidth=0, zorder=1)
         # Painter's algorithm: lapisan PALING JAUH digambar duluan, lapisan
         # makin dekat menutupi di atasnya -- efek pegunungan bertumpuk.
         for s_idx in range(n_sample - 1, -1, -1):
@@ -10405,20 +10922,37 @@ def buat_figure_simulasi_hilal(profil, hasil):
             warna = cmap(norm(matriks_jarak_km[s_idx]))
             ax.fill_between(azimuth, y_floor_layer, y_curve, color=warna, linewidth=0, zorder=2)
             ax.plot(azimuth, y_curve, color="black", linewidth=0.2, alpha=0.3, zorder=2)
-        h_topo, = ax.plot(azimuth, sudut_horizon, color=_GAYA_UFUK["topo"]["warna"], linewidth=1.2,
-                           zorder=3, label="Ufuk topografi (cakrawala nyata)")
+        h_topo, = ax.plot(azimuth, sudut_topo_mentah, color=_GAYA_UFUK["topo"]["warna"], linewidth=1.5,
+                           zorder=3.5, label="Ufuk topografi (cakrawala nyata)")
     else:
-        h_topo, = ax.plot(azimuth, sudut_horizon, color=_GAYA_UFUK["topo"]["warna"], linewidth=1.2,
-                           label="Ufuk topografi (cakrawala nyata)")
-        ax.fill_between(azimuth, y_min - 10, sudut_horizon, color="#6e5545", alpha=0.55, zorder=2)
+        sudut_topo_mentah = _dapatkan_sudut_horizon_mentah(profil)
+        h_topo, = ax.plot(azimuth, sudut_topo_mentah, color=_GAYA_UFUK["topo"]["warna"], linewidth=1.5,
+                           zorder=3.5, label="Ufuk topografi (cakrawala nyata)")
+        ax.fill_between(azimuth, y_min - 10, sudut_topo_mentah, color="#6e5545", alpha=0.55, zorder=2)
 
     # Label nama gunung/puncak (spt di Profil Cakrawala) -- garis tegak
     # tipis dari kontur ke atas + nama miring, hanya utk puncak yg jatuh
     # di dalam jendela zoom ini supaya tidak bertumpuk penuh di plot yg
     # sempit.
+    matriks_sudut_sim = profil.get("matriks_sudut")
+    matriks_jarak_sim = profil.get("matriks_jarak_km")
     for az, sudut, nama in puncak_terlihat:
-        ax.plot([az, az], [sudut, sudut + 1.2], color="black", linewidth=0.6, alpha=0.7, zorder=4)
-        ax.text(az, sudut + 1.4, nama, rotation=75, ha="left", va="bottom", fontsize=7, zorder=4)
+        az_idx = int(np.argmin(np.abs(azimuth - az)))
+        if matriks_sudut_sim is not None and matriks_jarak_sim is not None:
+            diffs = np.abs(matriks_sudut_sim[az_idx, :] - sudut)
+            s_idx = int(np.argmin(diffs))
+            dist_km = float(matriks_jarak_sim[s_idx])
+            alt_front = float(np.max(matriks_sudut_sim[az_idx, :s_idx])) if s_idx > 0 else -90.0
+            prom = sudut - alt_front
+            if prom <= 0.1:
+                continue
+            ax.plot([az, az], [sudut, sudut + 1.2], color="black", linewidth=0.6, alpha=0.7, zorder=4)
+            ax.text(az, sudut + 1.4, nama, rotation=75, ha="left", va="bottom", fontsize=7, zorder=4)
+            if alt_front < sudut:
+                ax.plot([az, az], [alt_front, sudut], color="#1F2937", linewidth=0.8, linestyle="--", alpha=0.7, zorder=4.2)
+        else:
+            ax.plot([az, az], [sudut, sudut + 1.2], color="black", linewidth=0.6, alpha=0.7, zorder=4)
+            ax.text(az, sudut + 1.4, nama, rotation=75, ha="left", va="bottom", fontsize=7, zorder=4)
     h_astro0 = ax.axhline(0, color=_GAYA_UFUK["astro"]["warna"], linestyle=_GAYA_UFUK["astro"]["linestyle"],
                            linewidth=1.0, alpha=0.7, zorder=4, label="Ufuk astronomis (datar 0°)")
     h_dip0 = ax.axhline(-dip_derajat, color=_GAYA_UFUK["dip"]["warna"], linestyle=_GAYA_UFUK["dip"]["linestyle"],
