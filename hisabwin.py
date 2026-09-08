@@ -3123,6 +3123,23 @@ def _cek_interseksi_elong_alt_amerika(grids):
     jarak = np.abs(elong_grid - 8.0) + np.abs(geo_alt_grid - 5.0)
     jarak_valid = np.where(valid, jarak, np.inf)
     idx = np.unravel_index(np.argmin(jarak_valid), jarak_valid.shape)
+
+    # BUGFIX: titik TERDEKAT ke perpotongan (8, 5) belum tentu benar-benar
+    # MEMENUHI kriteria PKG 2 -- argmin cuma jarak MINIMUM, bukan jaminan
+    # elong>=8 & geo_alt>=5. Sebelum patch ini, cek cepat cuma menguji
+    # "titik terdekat ada di daratan?" TANPA menguji ambang batasnya sendiri,
+    # jadi bisa mengembalikan True (via OR di evaluasi_pkg) walau pencarian
+    # KETAT cari_zona_pkg2_amerika() sudah benar2 gagal menemukan satu pun
+    # titik yg memenuhi kriteria di daratan Amerika. Ini menyebabkan PKG 2
+    # dianggap terpenuhi sehari lebih awal dari seharusnya (lihat kasus
+    # ijtimak 2128-04-29: seharusnya awal bulan 2128-05-01, tapi jadi
+    # 2128-04-30 krn malam ijtimak itu sendiri, yg elong/geo_alt-nya masih
+    # di bawah ambang di titik terdekat manapun, ikut lolos lewat cek ini).
+    elong0 = float(elong_grid[idx])
+    geo_alt0 = float(geo_alt_grid[idx])
+    if not (elong0 >= 8.0 and geo_alt0 >= 5.0):
+        return False
+
     lat0, lon0 = float(lat_mesh[idx]), float(lon_mesh[idx])
 
     hasil = buat_mask_mainland_amerika(np.array([lat0]), np.array([lon0]))
