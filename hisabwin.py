@@ -2461,6 +2461,19 @@ def _hitung_titik_flat(tanggal, ts, eph, lats, lons, mode="jpl"):
             diff = alt_now - h0_deg
             d_alt_safe = np.where(np.abs(d_alt) < 1e-6, -15.0, d_alt)
             t_curr = t_curr - diff / d_alt_safe
+        # Sanity check: Newton's method TANPA jendela pembatas bisa melejit
+        # jauh dari tebakan awal kalau turunannya (d_alt) nyaris nol -- ini
+        # terjadi PERSIS di lintang perbatasan siang/malam kutub (dekat
+        # solstis), di mana kurva altitude Matahari cuma menyinggung ambang
+        # ghurub tanpa beneran memotongnya. Tanpa validasi ini, hasilnya bisa
+        # berupa "ghurub" berjarak berhari-hari dari tanggal yg diminta
+        # (ditemukan lewat pengujian: 66.00 N/158.00 W, 11 Jun 2048 ->
+        # melejit ke +128 jam alih2 NaN spt seharusnya). mode='jpl' di
+        # cabang else di bawah sudah aman dari soal ini krn dibatasi jendela
+        # sunset_utc_guess +/- 0.33 jam sejak awal -- batas yg sama dipakai
+        # di sini supaya PERILAKU KEDUA MODE KONSISTEN.
+        drift = np.abs(t_curr - sunset_utc_guess)
+        t_curr = np.where(drift <= 0.33, t_curr, np.nan)
         precise_sunset_hours[idx] = t_curr
     else:
         n_window = 5
@@ -2917,13 +2930,45 @@ def buat_figure_indonesia_elongasi(grids_id, tanggal):
 #  PEMBUATAN FIGURE (dijalankan di thread utama / main thread)
 # =========================================================
 
-def buat_figure_mabims(grids, tanggal):
+
+# =========================================================
+#  TOGGLE PROYEKSI PETA GLOBAL (MABIMS & Muhammadiyah/KHGT)
+# =========================================================
+# 'platecarree' (default/lama): equirectangular biasa -- kotak, gridline
+#   lat/lon lurus semua, tapi luas area di lintang tinggi jadi TERLIHAT
+#   jauh lebih besar drpd aslinya (distorsi luas, sama seperti Mercator
+#   scr visual walau bukan Mercator sesungguhnya).
+# 'equalearth': proyeksi Equal Earth (Šavrić dkk. 2018) -- area (luas)
+#   tiap wilayah proporsional sama seperti di globe asli, bentuk benua
+#   jauh lebih wajar di lintang tinggi. Peta jadi elips, bukan kotak.
+def _buat_axes_peta_global(fig, proyeksi="platecarree"):
+    """Buat GeoAxes cartopy utk peta global (MABIMS/Muhammadiyah), di
+    posisi & ukuran baku yg sama dipakai kedua peta itu.
+
+    proyeksi: 'platecarree' (default) atau 'equalearth'. Data hasil
+    hitung_grid() SELALU dalam koordinat lon/lat biasa (PlateCarree) --
+    itu urusan transform= saat plotting (tetap ccrs.PlateCarree() di
+    semua pemanggilan ax.contour/contourf/plot, TIDAK berubah walau
+    proyeksi tampilannya diganti), beda dgn projection= di sini yg
+    hanya menentukan bagaimana axes itu SENDIRI digambar/ditampilkan."""
+    proyeksi_obj = ccrs.EqualEarth() if proyeksi == "equalearth" else ccrs.PlateCarree()
+    ax = fig.add_axes([0.06, 0.22, 0.88, 0.64], projection=proyeksi_obj)
+    if proyeksi == "equalearth":
+        # Equal Earth tidak punya konsep "extent kotak -180..180/-90..90"
+        # yg valid spt PlateCarree -- set_global() ini setara: tampilkan
+        # seluruh cakupan proyeksi (seluruh dunia).
+        ax.set_global()
+    else:
+        ax.set_extent([-180, 180, -90, 90], crs=ccrs.PlateCarree())
+    return ax
+
+
+def buat_figure_mabims(grids, tanggal, proyeksi="platecarree"):
     lon_mesh, lat_mesh = grids["lon_mesh"], grids["lat_mesh"]
     elong_grid, alt_grid = grids["elong_grid"], grids["alt_grid"]
 
     fig = plt.figure(figsize=(11, 7.5))
-    ax = fig.add_axes([0.06, 0.22, 0.88, 0.64], projection=ccrs.PlateCarree())
-    ax.set_extent([-180, 180, -90, 90], crs=ccrs.PlateCarree())
+    ax = _buat_axes_peta_global(fig, proyeksi)
     # LAND/OCEAN dipatok .with_scale("110m") jg di sini utk konsisten/robust --
     # extent dunia [-180,180,-90,90] saat ini memang sudah otomatis resolve ke
     # 110m lewat AdaptiveScaler bawaan cfeature.LAND/OCEAN, TAPI itu bergantung
@@ -3757,7 +3802,7 @@ def _injeksi_titik_pertama_ke_grid(grids, titik_pertama_list, tanggal):
     return new_grids
 
 
-def buat_figure_muhammadiyah(grids, tanggal, evaluasi):
+def buat_figure_muhammadiyah(grids, tanggal, evaluasi, proyeksi="platecarree"):
     zona_pkg1 = evaluasi["zona_pkg1"]
     no_sunset_masked = evaluasi["no_sunset_masked"]
     pkg1_terpenuhi = evaluasi["pkg1_terpenuhi"]
@@ -3792,8 +3837,7 @@ def buat_figure_muhammadiyah(grids, tanggal, evaluasi):
         no_sunset_masked = np.isnan(geo_alt_grid)
 
     fig = plt.figure(figsize=(11, 7.5))
-    ax = fig.add_axes([0.06, 0.22, 0.88, 0.64], projection=ccrs.PlateCarree())
-    ax.set_extent([-180, 180, -90, 90], crs=ccrs.PlateCarree())
+    ax = _buat_axes_peta_global(fig, proyeksi)
     ax.add_feature(cfeature.LAND.with_scale("110m"), facecolor="lightgray")
     ax.add_feature(cfeature.OCEAN.with_scale("110m"), facecolor="lightblue")
     ax.coastlines(resolution="110m", linewidth=0.5)
@@ -11390,6 +11434,21 @@ class HisabWinApp(tk.Tk):
         self.hitung_alt = tk.BooleanVar(value=True)
         self.hitung_elong = tk.BooleanVar(value=True)
 
+        # Toggle proyeksi peta global (MABIMS/Muhammadiyah): False = Plate
+        # Carrée (default/lama, kotak), True = Equal Earth (elips, area
+        # proporsional). Di-trace supaya kalau peta global SUDAH pernah
+        # dihitung & ditampilkan, membalik toggle ini langsung menggambar
+        # ULANG peta yg sedang tampil dengan proyeksi baru -- TANPA perlu
+        # menghitung ulang grid/evaluasi (itu bagian yg mahal; proyeksi
+        # cuma soal gambar ulang, datanya sama persis).
+        self.proyeksi_equalearth = tk.BooleanVar(value=False)
+        self.proyeksi_equalearth.trace_add("write", lambda *_: self._on_toggle_proyeksi_peta())
+
+        # Cache hasil grid_global_ok terakhir: (tanggal, grids, evaluasi) --
+        # dipakai _on_toggle_proyeksi_peta() utk gambar ulang tanpa hitung
+        # ulang. None kalau belum pernah ada peta global yg berhasil dihitung.
+        self._grid_global_cache = None
+
         # Menyimpan tab-peta yang sudah pernah dibuat: nama_tab -> {"frame":..., "fig":...}
         # supaya saat "Tampilkan Peta" ditekan lagi, kanvas & figure LAMA diganti
         # (bukan menumpuk tab baru terus-menerus).
@@ -12263,6 +12322,27 @@ class HisabWinApp(tk.Tk):
         self.chk_alt.grid(row=2, column=0, padx=10, pady=4, sticky="w")
         self.chk_elong.grid(row=3, column=0, padx=10, pady=4, sticky="w")
 
+        # --- Toggle proyeksi peta global (MABIMS/Muhammadiyah): Plate
+        #     Carrée (default) <-> Equal Earth. Dipisah dari frame4 (yg
+        #     isinya kriteria APA yg dihitung) krn ini bukan soal kriteria,
+        #     tapi murni cara TAMPILAN petanya -- ditaruh baris sendiri
+        #     supaya jelas beda konteksnya.
+        frame_proyeksi = ttk.Frame(frame4)
+        frame_proyeksi.grid(row=4, column=0, padx=10, pady=(8, 4), sticky="w")
+        ttk.Separator(frame_proyeksi, orient="horizontal").pack(fill="x", pady=(0, 6))
+        self.chk_proyeksi_equalearth = tk.Checkbutton(
+            frame_proyeksi, text="🌐 Proyeksi Equal Earth (peta global)",
+            variable=self.proyeksi_equalearth, **chk_opts)
+        self.chk_proyeksi_equalearth.pack(anchor="w")
+        ttk.Label(
+            frame_proyeksi,
+            text="Centang: peta MABIMS/Muhammadiyah pakai proyeksi Equal Earth\n"
+                 "(elips, luas area proporsional). Kosongkan: Plate Carrée (kotak).",
+            foreground=WARNA_TEKS_MUTED,
+            font=FONT_KECIL,
+            justify="left"
+        ).pack(anchor="w", pady=(2, 0))
+
         self.btn_proses = ttk.Button(body_hilal, text="Tampilkan Peta", command=self._on_proses,
                                       state="disabled", style="Aksen.TButton")
         self.btn_proses.pack(pady=8)
@@ -12626,6 +12706,49 @@ class HisabWinApp(tk.Tk):
             self._tutup_tab_by_id(tab_id)
 
     # ---------------- Tab peta (di jendela utama, bukan popup) ----------------
+
+    def _render_peta_global(self, tanggal, grids, evaluasi, pilih_tab=False):
+        """Gambar (atau gambar ULANG) tab peta MABIMS/Muhammadiyah dari
+        grids+evaluasi yg SUDAH dihitung, memakai proyeksi yg sedang aktif
+        di toggle self.proyeksi_equalearth. Dipanggil baik dari handler
+        "grid_global_ok" (pertama kali) MAUPUN dari _on_toggle_proyeksi_peta
+        (gambar ulang saat toggle proyeksi dibalik) -- makanya logikanya
+        disatukan di sini, bukan diduplikasi di dua tempat."""
+        proyeksi = "equalearth" if self.proyeksi_equalearth.get() else "platecarree"
+        tgl_str = tanggal.strftime('%d %B %Y')
+        label_proyeksi = " (Equal Earth)" if proyeksi == "equalearth" else ""
+        frame_to_select = None
+
+        if self.hitung_khgt.get():
+            fig_muh = buat_figure_muhammadiyah(grids, tanggal, evaluasi, proyeksi=proyeksi)
+            frame_muh = self._tampilkan_peta(
+                "muhammadiyah", f"🌙 Muhammadiyah — {tgl_str}{label_proyeksi}", fig_muh)
+            frame_to_select = frame_muh
+
+        if self.hitung_mabims.get():
+            fig_mabims = buat_figure_mabims(grids, tanggal, proyeksi=proyeksi)
+            frame_mabims = self._tampilkan_peta(
+                "mabims", f"🌙 MABIMS — {tgl_str}{label_proyeksi}", fig_mabims)
+            frame_to_select = frame_mabims
+
+        if pilih_tab and frame_to_select is not None:
+            self.notebook.select(frame_to_select)
+
+    def _on_toggle_proyeksi_peta(self):
+        """Callback saat toggle 'Proyeksi Equal Earth' dibalik. Kalau peta
+        global belum pernah dihitung sama sekali, tidak ada yg perlu
+        digambar ulang -- toggle-nya akan otomatis kepakai nanti begitu
+        user menekan "Tampilkan Peta" utk pertama kali. Kalau sudah ada
+        (cache terisi), langsung gambar ulang tab yg sedang tampil dengan
+        proyeksi baru, TANPA memilih/pindah tab (biar tidak mengganggu
+        kalau user sedang lihat tab lain)."""
+        if getattr(self, "_grid_global_cache", None) is None:
+            return
+        tanggal, grids, evaluasi = self._grid_global_cache
+        try:
+            self._render_peta_global(tanggal, grids, evaluasi, pilih_tab=False)
+        except Exception as e:
+            self._log(f"Gagal menggambar ulang peta dengan proyeksi baru: {e}")
 
     def _tab_peta_frame(self, nama_tab, judul_tab):
         """Ambil frame tab untuk satu peta (mis. 'mabims'/'muhammadiyah').
@@ -17189,22 +17312,10 @@ for i in range(7):
                     # peta Indonesia (yang dihitung paralel di thread lain
                     # dan tampil sendiri lewat "grid_id_ok" di bawah).
                     tanggal, grids, evaluasi = payload
-                    self._log("Peta global (MABIMS/Muhammadiyah) selesai. Menampilkan...")
-                    tgl_str = tanggal.strftime('%d %B %Y')
-                    frame_to_select = None
-
-                    if self.hitung_khgt.get():
-                        fig_muh = buat_figure_muhammadiyah(grids, tanggal, evaluasi)
-                        frame_muh = self._tampilkan_peta("muhammadiyah", f"🌙 Muhammadiyah — {tgl_str}", fig_muh)
-                        frame_to_select = frame_muh
-
-                    if self.hitung_mabims.get():
-                        fig_mabims = buat_figure_mabims(grids, tanggal)
-                        frame_mabims = self._tampilkan_peta("mabims", f"🌙 MABIMS — {tgl_str}", fig_mabims)
-                        frame_to_select = frame_mabims
-
-                    if frame_to_select is not None:
-                        self.notebook.select(frame_to_select)
+                    # Simpan cache -- dipakai _on_toggle_proyeksi_peta() utk
+                    # gambar ulang (toggle Equal Earth) tanpa hitung ulang.
+                    self._grid_global_cache = (tanggal, grids, evaluasi)
+                    self._render_peta_global(tanggal, grids, evaluasi, pilih_tab=True)
 
                     self._tugas_peta_tersisa = max(0, getattr(self, "_tugas_peta_tersisa", 1) - 1)
                     if self._tugas_peta_tersisa == 0:
